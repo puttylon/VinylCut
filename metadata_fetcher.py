@@ -5,34 +5,74 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 import time
+import re
 
 USER_AGENT = "VinylCutter/2.0 ( private@localhost )"
 
-def fetch_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+def fetch_text(url):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return json.loads(response.read())
+        with urllib.request.urlopen(req, timeout=15) as response:
+            return response.read().decode("utf-8", errors="replace")
     except Exception as e:
         print(f"  [Netzwerk-Fehler] {e}")
         return None
 
-def find_release_with_cover(releases):
-    """Iteriert über Kandidaten und gibt (mbid, cover_bytes) des ersten Treffers zurück."""
-    for release in releases:
-        mbid = release["id"]
-        url = f"https://coverartarchive.org/release/{mbid}/front"
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                return mbid, response.read()
-        except Exception:
-            time.sleep(0.5)
-    return None, None
+def fetch_json(url):
+    txt = fetch_text(url)
+    if not txt:
+        return None
+    try:
+        return json.loads(txt)
+    except Exception as e:
+        print(f"  [JSON-Fehler] {e}")
+        return None
+
+def download_file(url, dest_path):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            dest_path.write_bytes(response.read())
+        return True
+    except Exception as e:
+        print(f"  [Cover-Fehler] {e}")
+        return False
+
+def pick_best_release(results, artist, album):
+    artist_l = artist.strip().lower()
+    album_l = album.strip().lower()
+
+    def score(r):
+        s = 0
+        title = (r.get("title") or "").strip().lower()
+        fmt = " ".join(r.get("format") or []).lower()
+        community = r.get("community", {}) or {}
+        have = community.get("have", 0)
+        want = community.get("want", 0)
+
+        if title == album_l:
+            s += 50
+        if artist_l in (r.get("artist") or "").strip().lower():
+            s += 25
+        if "album" in fmt:
+            s += 10
+        if have:
+            s += min(have // 5, 20)
+        if want:
+            s += min(want // 20, 10)
+        if any(x in title for x in ["deluxe", "remaster", "expanded", "live", "compilation", "best of"]):
+            s -= 20
+        return s
+
+    return sorted(results, key=score, reverse=True)[0] if results else None
+
+def extract_og_image(html):
+    m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, re.I)
+    return m.group(1) if m else None
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("Nutzung: python3 metadata_fetcher.py \"Pfad/zur/Artist - Album.flac\"")
+        sys.exit('Nutzung: python3 metadata_fetcher.py "Pfad/zur/Artist - Album.flac"')
 
     flac_path = Path(sys.argv[1]).resolve()
     if not flac_path.exists():
@@ -45,56 +85,66 @@ def main():
 
     print(f"\n=== METADATEN FETCHER: {artist} - {album} ===")
 
-    query = f'artist:"{artist}" AND release:"{album}"'
-    search_url = f"https://musicbrainz.org/ws/2/release/?query={urllib.parse.quote(query)}&limit=5&fmt=json"
-
+    query = urllib.parse.quote(f"{artist} {album}")
+    search_url = f"https://api.discogs.com/database/search?type=release&q={query}&per_page=10&page=1"
     search_data = fetch_json(search_url)
-    if not search_data or not search_data.get("releases"):
+    if not search_data or not search_data.get("results"):
         sys.exit("Fehler: Kein Release gefunden.")
 
-    time.sleep(1.1)
+    best = pick_best_release(search_data["results"], artist, album)
+    if not best:
+        sys.exit("Fehler: Kein passender Release-Kandidat gefunden.")
 
-    # Schritt 1: Cover unter den Top-5-Treffern suchen
-    mbid, cover_bytes = find_release_with_cover(search_data["releases"])
+    release_url = best.get("resource_url")
+    if not release_url:
+        sys.exit("Fehler: Kein resource_url im Treffer.")
 
-    # Schritt 2: Fallback über Release-Group (alle Editionen)
-    if mbid is None:
-        print("  → Kein Cover in Top-5, suche in Release-Group …")
-        rg_mbid = search_data["releases"][0].get("release-group", {}).get("id")
-        if rg_mbid:
-            time.sleep(1.1)
-            rg_url = f"https://musicbrainz.org/ws/2/release?release-group={rg_mbid}&limit=10&fmt=json"
-            rg_data = fetch_json(rg_url)
-            if rg_data:
-                mbid, cover_bytes = find_release_with_cover(rg_data.get("releases", []))
+    time.sleep(1.0)
+    release_data = fetch_json(release_url)
+    if not release_data:
+        sys.exit("Fehler: Release-Details konnten nicht geladen werden.")
 
-    # Metadaten-MBID: bester Suchtreffer (unabhängig vom Cover)
-    meta_mbid = mbid if mbid else search_data["releases"][0]["id"]
-
-    # Cover speichern
-    if cover_bytes:
-        (out_dir / "cover.jpg").write_bytes(cover_bytes)
-        print("✓ Cover gespeichert.")
-    else:
-        print("⚠ Kein Cover gefunden – weiter ohne.")
-
-    time.sleep(1.1)
-
-    # Trackliste laden
-    details_data = fetch_json(
-        f"https://musicbrainz.org/ws/2/release/{meta_mbid}?inc=recordings+media&fmt=json"
-    )
     tracks = []
-    for medium in details_data.get("media", []):
-        for track in medium.get("tracks", []):
-            dur = track.get("length") or (track.get("recording") or {}).get("length")
-            tracks.append({
-                "title": track.get("title", "Track"),
-                "dur_s": (dur / 1000.0) if dur else 180.0
-            })
+    for track in release_data.get("tracklist", []):
+        if track.get("type_") != "track":
+            continue
+        tracks.append({
+            "title": track.get("title", "Track"),
+            "duration": track.get("duration") or ""
+        })
+
+    cover_url = None
+    images = release_data.get("images") or []
+    for img in images:
+        if img.get("type") == "primary" and img.get("uri"):
+            cover_url = img["uri"]
+            break
+    if not cover_url and images:
+        cover_url = images[0].get("uri")
+
+    if not cover_url:
+        html = fetch_text(best.get("uri")) if best.get("uri") else None
+        if html:
+            cover_url = extract_og_image(html)
 
     with open(out_dir / "release.json", "w", encoding="utf-8") as f:
-        json.dump({"artist": artist, "album": album, "mbid": meta_mbid, "tracks": tracks}, f, indent=2)
+        json.dump({
+            "artist": artist,
+            "album": album,
+            "release_id": release_data.get("id"),
+            "title": release_data.get("title"),
+            "year": release_data.get("year"),
+            "country": release_data.get("country"),
+            "tracks": tracks
+        }, f, indent=2, ensure_ascii=False)
+
+    if cover_url:
+        if download_file(cover_url, out_dir / "cover.jpg"):
+            print("✓ Cover gespeichert.")
+        else:
+            print("⚠ Cover-Download fehlgeschlagen.")
+    else:
+        print("⚠ Kein Cover gefunden.")
 
     print("✓ Fertig.")
 

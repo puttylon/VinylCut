@@ -1,0 +1,5 @@
+*.flac
+input/
+cut_out/
+__pycache__/
+.DS_Store

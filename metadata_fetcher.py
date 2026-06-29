@@ -14,6 +14,7 @@ from pathlib import Path
 DISCOGS_API = "https://api.discogs.com"
 DISCOGS_UA  = "VinylCutter/2.0 (+https://localhost)"
 DEFAULT_MAX_RELEASES = 25
+DEFAULT_TRACK_LENGTH_S = 120.0
 
 def _get_json(url, token=None, retries=3):
     headers = {"User-Agent": DISCOGS_UA}
@@ -91,7 +92,8 @@ def fetch_discogs_by_id(rel_id, token):
         "format": fmts,
         "is_vinyl": "vinyl" in fmts.lower(),
         "tracks": tracks,
-        "cover_url": (full.get("images") or [{}])[0].get("uri")
+        "cover_url": (full.get("images") or [{}])[0].get("uri"),
+        "community_have": 0,
     }
 
 def score_release(cand, flac_total, album):
@@ -143,17 +145,18 @@ def main():
 
     best_cand = None
     best_score = 9999.0
+    all_cands = []
 
     for i, res in enumerate(plausible[:DEFAULT_MAX_RELEASES], 1):
         rel_id = res.get("id")
         print(f"  > Prüfe Pressung {i}/{min(len(plausible), DEFAULT_MAX_RELEASES)} (ID: {rel_id})...")
-        
+
         full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
         if not full: continue
-        
-        tracks = [{"title": (t.get("title") or "Track").strip(), "dur_s": _parse_discogs_duration(t.get("duration", ""))} 
+
+        tracks = [{"title": (t.get("title") or "Track").strip(), "dur_s": _parse_discogs_duration(t.get("duration", ""))}
                   for t in full.get("tracklist", []) if t.get("type_") in (None, "track")]
-        
+
         if not tracks: continue
 
         fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
@@ -163,8 +166,10 @@ def main():
             "format": fmts,
             "is_vinyl": "vinyl" in fmts.lower(),
             "tracks": tracks,
-            "cover_url": (full.get("images") or [{}])[0].get("uri")
+            "cover_url": (full.get("images") or [{}])[0].get("uri"),
+            "community_have": res.get("community", {}).get("have", 0) if isinstance(res.get("community"), dict) else 0,
         }
+        all_cands.append(cand)
 
         score = score_release(cand, flac_total, album)
         
@@ -196,6 +201,8 @@ def main():
         new_cand = fetch_discogs_by_id(ans, token)
         if new_cand:
             current_cand = new_cand
+            if not any(c["id"] == new_cand["id"] for c in all_cands):
+                all_cands.append(new_cand)
         else:
             print("✗ Fehler: ID nicht gefunden oder enthält keine validen Tracks. Bitte erneut versuchen.")
 
@@ -203,18 +210,24 @@ def main():
     # ----------------------------
 
     for t in best_cand["tracks"]:
-        if not t["dur_s"]: t["dur_s"] = 180.0
+        if not t["dur_s"]: t["dur_s"] = DEFAULT_TRACK_LENGTH_S
 
     with open(out_dir / "release.json", "w", encoding="utf-8") as f:
         json.dump({"artist": artist, "album": album, "release_id": best_cand["id"], "tracks": best_cand["tracks"]}, f, indent=2, ensure_ascii=False)
 
-    if best_cand.get("cover_url"):
+    cover_sorted = sorted(all_cands, key=lambda c: (0 if c["is_vinyl"] else 1, -c["community_have"]))
+    for c in cover_sorted:
+        if not c.get("cover_url"):
+            continue
         try:
-            with urllib.request.urlopen(urllib.request.Request(best_cand["cover_url"], headers={"User-Agent": DISCOGS_UA}), timeout=20) as r:
+            with urllib.request.urlopen(urllib.request.Request(c["cover_url"], headers={"User-Agent": DISCOGS_UA}), timeout=20) as r:
                 (out_dir / "cover.jpg").write_bytes(r.read())
-                print("✓ Cover gespeichert.")
+                print(f"✓ Cover gespeichert (von '{c['title']}', {c['community_have']} Besitzer).")
+            break
         except Exception:
-            print("⚠ Cover-Download fehlgeschlagen.")
+            continue
+    else:
+        print("⚠ Cover-Download fehlgeschlagen.")
 
 if __name__ == "__main__":
     main()

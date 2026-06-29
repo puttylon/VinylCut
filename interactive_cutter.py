@@ -41,6 +41,14 @@ def show_status(i: int, data: dict, current_start: float, starts: list, last_gap
     normton_str = "EIN" if normton else "aus"
     print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl in s oder ±m:ss")
 
+def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float:
+    if i == 0:
+        return 0.0
+    if "dur_s" in tracks[i - 1]:
+        return starts[i - 1] + tracks[i - 1]["dur_s"] + last_gap
+    return starts[i - 1]
+
+
 def save_progress(progress_path: Path, history: list) -> None:
     with open(progress_path, "w", encoding="utf-8") as f:
         json.dump({"history": history}, f)
@@ -157,12 +165,7 @@ def main():
     normton = False
     i = len(starts)
     while i < len(data["tracks"]):
-        if i == 0:
-            current_start = 0.0
-        elif "dur_s" in data["tracks"][i-1]:
-            current_start = starts[i-1] + data["tracks"][i-1]["dur_s"] + last_gap
-        else:
-            current_start = starts[i-1]
+        current_start = estimate_start(i, data["tracks"], starts, last_gap)
 
         while True:
             show_status(i, data, current_start, starts, last_gap, normton)

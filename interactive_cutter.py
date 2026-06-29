@@ -67,7 +67,7 @@ def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) 
     )
     cmd = [
         "ffmpeg", "-v", "quiet",
-        "-f", "lavfi", "-i", "sine=frequency=1000:duration=0.25",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=0.25",
         "-ss", f"{start_time:.3f}", "-t", str(duration), "-i", str(flac_path),
         "-filter_complex", filter_complex,
         "-map", "[out]", "-f", "wav", "pipe:1",
@@ -102,7 +102,7 @@ def main():
             "  [++]/[--]   Start ±2,0 s verschieben\n"
             "  [ok]        Startpunkt bestätigen, nächster Track\n"
             "  [u]         Letztes ok rückgängig machen\n"
-            "  [n]         Normton (1000 Hz, 0,25 s) vor Snippet ein-/ausschalten\n"
+            "  [n]         Normton (440 Hz, 0,25 s) vor Snippet ein-/ausschalten\n"
             "  Zahl/±m:ss  Start um Offset verschieben (z.B. +2:34 oder -30)"
         )
         sys.exit(0 if len(sys.argv) >= 2 else 1)

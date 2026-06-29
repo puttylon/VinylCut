@@ -14,3 +14,6 @@ Ausgabeverzeichnis für geschnittene Tracks frei wählbar statt fest neben der Q
 
 ## ✓ v1.6.0 — Preview-Dauer konfigurierbar (`--preview`)
 Snippet-Länge frei wählbar statt fix 3 Sekunden (z.B. `--preview 5`).
+
+## Zurückgestellt
+- **Android/Termux-Port** — auf unbestimmte Zeit verschoben.

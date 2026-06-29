@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 PLAY_DURATION_SEC = 3.0
 
@@ -38,7 +38,7 @@ def show_status(i: int, data: dict, current_start: float, starts: list, last_gap
         soll = f"  (Soll: {fmt_dur(prev['dur_s'])})" if "dur_s" in prev else ""
         print(f"  Tracklänge [{i:02d}/{n:02d}] \"{prev['title']}\": {fmt_dur(laenge)}{soll}")
     print(f"  Startpunkt [{i+1:02d}/{n:02d}] \"{tracks[i]['title']}\": {fmt_dur(current_start)}")
-    print("  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | Offset: Zahl in s oder ±m:ss")
+    print("  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | Offset: Zahl in s oder ±m:ss")
 
 def save_progress(progress_path: Path, history: list) -> None:
     with open(progress_path, "w", encoding="utf-8") as f:
@@ -143,6 +143,16 @@ def main():
                 current_start += 2.0
             elif action == '--':
                 current_start = max(0.0, current_start - 2.0)
+            elif action == 'u':
+                if i == 0:
+                    print("  Kein vorheriger Track.")
+                else:
+                    history.pop()
+                    starts = [h["start"] for h in history]
+                    last_gap = history[-1]["last_gap"] if history else 0.0
+                    save_progress(progress_path, history)
+                    i -= 1
+                    break
             elif action == 'ok':
                 starts.append(current_start)
                 if i > 0 and "dur_s" in data["tracks"][i-1]:

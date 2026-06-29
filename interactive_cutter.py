@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 PLAY_DURATION_SEC = 3.0
 
@@ -133,22 +133,23 @@ def main():
                 except ValueError:
                     print("Ungültige Eingabe.")
                                                
+    n = len(data["tracks"])
+    print("\n=== TRACKS EXPORTIEREN ===")
     for i, track in enumerate(data["tracks"]):
+        print(f"  [{i+1:02d}/{n:02d}] {track['title']}...")
         start_smp = round(starts[i] * sr)
-        # Länge bis zum nächsten Track oder bis Ende der Datei
         if i < len(starts) - 1:
             len_smp = round((starts[i+1] - starts[i]) * sr)
         else:
             total_dur = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)]))
             len_smp = round((total_dur * sr) - start_smp)
-            
         cut_and_tag(flac_path, out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac", i+1, track["title"], data["artist"], data["album"], start_smp, len_smp, out_dir / "cover.jpg")
 
     if no_songtext:
         print("\n(Songtexte übersprungen: --no-songtext)")
     else:
-        print("\n=== SCHRITT 4: SONGTEXTE (LYRICS) LADEN ===")
-        print(f"Starte Suche für: {out_dir}...")
+        print("\n=== SONGTEXTE LADEN ===")
+        print(f"=== Suche in: {out_dir} ===")
         result = subprocess.run(["python3", "songtext.py", str(out_dir)], capture_output=True, text=True)
         if result.returncode == 0:
             print("✓ Songtexte erfolgreich verarbeitet.")
@@ -161,8 +162,6 @@ def main():
 
     print(f"\n=== ALLES FERTIG! ===")
     print(f"Dein fertiges Album liegt in: {out_dir}")
-
-    print("\n✓ Fertig.")
 
 if __name__ == "__main__":
     main()

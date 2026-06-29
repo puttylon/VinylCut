@@ -88,7 +88,24 @@ def main():
             
         cut_and_tag(flac_path, out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac", i+1, track["title"], data["artist"], data["album"], start_smp, len_smp, out_dir / "cover.jpg")
 
-    subprocess.run(["python3", "songtext.py", str(out_dir)])
+    print("\n=== SCHRITT 4: SONGTEXTE (LYRICS) LADEN ===")
+    print(f"Starte Suche für: {out_dir}...")
+    
+    # Wir führen es so aus, dass wir Fehlermeldungen sehen, falls es crasht
+    result = subprocess.run(["python3", "songtext.py", str(out_dir)], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        print("✓ Songtexte erfolgreich verarbeitet.")
+        if result.stdout:
+            print(result.stdout)
+    else:
+        print("✗ Fehler beim Suchen der Songtexte:")
+        print(result.stderr)
+        print("\nBitte prüfe 'songtext.py' auf Import-Fehler.")
+
+    print(f"\n=== ALLES FERTIG! ===")
+    print(f"Dein fertiges Album liegt in: {out_dir}")
+
     print("\n✓ Fertig.")
 
 if __name__ == "__main__":

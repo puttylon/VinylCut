@@ -3,150 +3,218 @@ import sys
 import json
 import urllib.request
 import urllib.parse
-from pathlib import Path
+import urllib.error
 import time
-import re
+import subprocess
+import difflib
+import unicodedata
+import os
+from pathlib import Path
 
-USER_AGENT = "VinylCutter/2.0 ( private@localhost )"
+DISCOGS_API = "https://api.discogs.com"
+DISCOGS_UA  = "VinylCutter/2.0 (+https://localhost)"
+DEFAULT_MAX_RELEASES = 25
 
-def fetch_text(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+def _get_json(url, token=None, retries=3):
+    headers = {"User-Agent": DISCOGS_UA}
+    if token:
+        url += ("&" if "?" in url else "?") + f"token={token}"
+        
+    req = urllib.request.Request(url, headers=headers)
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                time.sleep(1.2)
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = int(e.headers.get("Retry-After", 5)) + 1
+                print(f"  [http] 429 Rate Limit. Warte {wait}s...")
+                time.sleep(wait)
+            elif e.code >= 500:
+                print(f"  [http] {e.code} Server Error. Warte 3s...")
+                time.sleep(3)
+            else:
+                return None
+        except Exception:
+            time.sleep(2)
+    return None
+
+def get_flac_duration(flac_path):
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return response.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"  [Netzwerk-Fehler] {e}")
+        return float(subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)
+        ]))
+    except Exception:
+        return 0.0
+
+def _norm_title(s):
+    s = s or ""
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        s = s.replace(a, b).replace(a.upper(), b)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    for ch in "?!.,;:\"'`´’…/\\-–—()[]{}": s = s.replace(ch, " ")
+    return " ".join(s.split())
+
+def _similar(a, b):
+    return difflib.SequenceMatcher(None, _norm_title(a), _norm_title(b)).ratio()
+
+def _name_matches(a, b):
+    na, nb = _norm_title(a), _norm_title(b)
+    if not na or not nb: return False
+    return na == nb or na in nb or nb in na or _similar(a, b) >= 0.72
+
+def _parse_discogs_duration(s):
+    if not s: return None
+    try:
+        return float(sum(int(x) * 60 ** i for i, x in enumerate(reversed(s.strip().split(":")))))
+    except ValueError:
         return None
 
-def fetch_json(url):
-    txt = fetch_text(url)
-    if not txt:
-        return None
-    try:
-        return json.loads(txt)
-    except Exception as e:
-        print(f"  [JSON-Fehler] {e}")
-        return None
+def fmt_dur(sec):
+    if not sec: return "?:??"
+    m, s = divmod(int(sec), 60)
+    return f"{m}:{s:02d}"
 
-def download_file(url, dest_path):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as response:
-            dest_path.write_bytes(response.read())
-        return True
-    except Exception as e:
-        print(f"  [Cover-Fehler] {e}")
-        return False
+def fetch_discogs_by_id(rel_id, token):
+    full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
+    if not full: return None
+    tracks = [{"title": (t.get("title") or "Track").strip(), "dur_s": _parse_discogs_duration(t.get("duration", ""))} 
+              for t in full.get("tracklist", []) if t.get("type_") in (None, "track")]
+    if not tracks: return None
+    fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
+    return {
+        "id": str(rel_id),
+        "title": full.get("title", ""),
+        "format": fmts,
+        "is_vinyl": "vinyl" in fmts.lower(),
+        "tracks": tracks,
+        "cover_url": (full.get("images") or [{}])[0].get("uri")
+    }
 
-def pick_best_release(results, artist, album):
-    artist_l = artist.strip().lower()
-    album_l = album.strip().lower()
-
-    def score(r):
-        s = 0
-        title = (r.get("title") or "").strip().lower()
-        fmt = " ".join(r.get("format") or []).lower()
-        community = r.get("community", {}) or {}
-        have = community.get("have", 0)
-        want = community.get("want", 0)
-
-        if title == album_l:
-            s += 50
-        if artist_l in (r.get("artist") or "").strip().lower():
-            s += 25
-        if "album" in fmt:
-            s += 10
-        if have:
-            s += min(have // 5, 20)
-        if want:
-            s += min(want // 20, 10)
-        if any(x in title for x in ["deluxe", "remaster", "expanded", "live", "compilation", "best of"]):
-            s -= 20
-        return s
-
-    return sorted(results, key=score, reverse=True)[0] if results else None
-
-def extract_og_image(html):
-    m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html, re.I)
-    return m.group(1) if m else None
+def score_release(cand, flac_total, album):
+    cand_durs = [t["dur_s"] for t in cand["tracks"]]
+    have_durs = [d for d in cand_durs if d]
+    
+    title_pen = 0.0 if _norm_title(cand.get("title", "")) == _norm_title(album) else 100.0
+    vinyl_pen = 0.0 if cand.get("is_vinyl") else 25.0
+    missing_pen = 8.0 * (len(cand["tracks"]) - len(have_durs))
+    
+    cat_total = sum(have_durs)
+    dur_pen = 0.0
+    if flac_total and cat_total:
+        ratio = cat_total / flac_total
+        dev = (ratio - 1.0) if ratio >= 1.0 else (1.0 - ratio)
+        tol = 0.05 if ratio >= 1.0 else 0.12
+        if dev > tol:
+            dur_pen = (dev - tol) * 400.0
+            
+    return title_pen + vinyl_pen + dur_pen + missing_pen
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit('Nutzung: python3 metadata_fetcher.py "Pfad/zur/Artist - Album.flac"')
+        sys.exit("Nutzung: python3 metadata_fetcher.py \"Pfad/zur/Artist - Album.flac\"")
 
     flac_path = Path(sys.argv[1]).resolve()
-    if not flac_path.exists():
-        sys.exit(f"Fehler: Datei nicht gefunden: {flac_path}")
-
     stem = flac_path.stem
     artist, album = stem.split(" - ", 1) if " - " in stem else ("Unknown", stem)
     out_dir = flac_path.parent / stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n=== METADATEN FETCHER: {artist} - {album} ===")
+    print(f"\n=== ROBUSTER METADATEN FETCHER: {artist} - {album} ===")
+    token = os.environ.get("DISCOGS_TOKEN", "")
+    flac_total = get_flac_duration(flac_path)
+    print(f"Dateidauer gemessen: {flac_total/60:.1f} min")
 
-    query = urllib.parse.quote(f"{artist} {album}")
-    search_url = f"https://api.discogs.com/database/search?type=release&q={query}&per_page=10&page=1"
-    search_data = fetch_json(search_url)
-    if not search_data or not search_data.get("results"):
-        sys.exit("Fehler: Kein Release gefunden.")
+    results = []
+    for page in range(1, 3):
+        query = urllib.parse.quote(f"{artist} {album}")
+        data = _get_json(f"{DISCOGS_API}/database/search?type=release&q={query}&per_page=50&page={page}", token)
+        if not data: break
+        results += data.get("results", [])
+        if page >= data.get("pagination", {}).get("pages", 1): break
 
-    best = pick_best_release(search_data["results"], artist, album)
-    if not best:
-        sys.exit("Fehler: Kein passender Release-Kandidat gefunden.")
+    plausible = [r for r in results if _name_matches(r.get("title", "").split(" - ")[-1], album)]
+    plausible.sort(key=lambda r: (0 if "vinyl" in " ".join(r.get("format", [])).lower() else 1, -r.get("community", {}).get("have", 0)))
 
-    release_url = best.get("resource_url")
-    if not release_url:
-        sys.exit("Fehler: Kein resource_url im Treffer.")
+    if not plausible: sys.exit("Fehler: Kein passendes Release gefunden.")
 
-    time.sleep(1.0)
-    release_data = fetch_json(release_url)
-    if not release_data:
-        sys.exit("Fehler: Release-Details konnten nicht geladen werden.")
+    best_cand = None
+    best_score = 9999.0
 
-    tracks = []
-    for track in release_data.get("tracklist", []):
-        if track.get("type_") != "track":
-            continue
-        tracks.append({
-            "title": track.get("title", "Track"),
-            "duration": track.get("duration") or ""
-        })
+    for i, res in enumerate(plausible[:DEFAULT_MAX_RELEASES], 1):
+        rel_id = res.get("id")
+        print(f"  > Prüfe Pressung {i}/{min(len(plausible), DEFAULT_MAX_RELEASES)} (ID: {rel_id})...")
+        
+        full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
+        if not full: continue
+        
+        tracks = [{"title": (t.get("title") or "Track").strip(), "dur_s": _parse_discogs_duration(t.get("duration", ""))} 
+                  for t in full.get("tracklist", []) if t.get("type_") in (None, "track")]
+        
+        if not tracks: continue
 
-    cover_url = None
-    images = release_data.get("images") or []
-    for img in images:
-        if img.get("type") == "primary" and img.get("uri"):
-            cover_url = img["uri"]
+        fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
+        cand = {
+            "id": str(rel_id),
+            "title": full.get("title", ""),
+            "format": fmts,
+            "is_vinyl": "vinyl" in fmts.lower(),
+            "tracks": tracks,
+            "cover_url": (full.get("images") or [{}])[0].get("uri")
+        }
+
+        score = score_release(cand, flac_total, album)
+        
+        if score < best_score:
+            best_score = score
+            best_cand = cand
+            
+        if score <= 5.0 and cand["is_vinyl"]:
+            print(f"  ✓ Perfekter Match gefunden (Score: {score:.1f}). Breche weitere Suche ab.")
             break
-    if not cover_url and images:
-        cover_url = images[0].get("uri")
 
-    if not cover_url:
-        html = fetch_text(best.get("uri")) if best.get("uri") else None
-        if html:
-            cover_url = extract_og_image(html)
+    if not best_cand: sys.exit("Fehler: Konnte keine validen Tracks laden.")
+
+    # --- INTERAKTIVE SCHLEIFE ---
+    current_cand = best_cand
+    while True:
+        print(f"\n--- VORSCHLAG: {current_cand['title']} ---")
+        print(f"Format: {current_cand['format']}")
+        print(f"Quelle: https://www.discogs.com/release/{current_cand['id']}")
+        print("Tracks:")
+        for idx, t in enumerate(current_cand["tracks"], 1):
+            print(f"  {idx:02d}. {t['title']} ({fmt_dur(t.get('dur_s'))})")
+        
+        ans = input("\n[Enter] Akzeptieren, oder Discogs-ID eingeben für Override: ").strip()
+        if not ans:
+            break
+        
+        print(f"Lade Discogs-ID {ans}...")
+        new_cand = fetch_discogs_by_id(ans, token)
+        if new_cand:
+            current_cand = new_cand
+        else:
+            print("✗ Fehler: ID nicht gefunden oder enthält keine validen Tracks. Bitte erneut versuchen.")
+
+    best_cand = current_cand
+    # ----------------------------
+
+    for t in best_cand["tracks"]:
+        if not t["dur_s"]: t["dur_s"] = 180.0
 
     with open(out_dir / "release.json", "w", encoding="utf-8") as f:
-        json.dump({
-            "artist": artist,
-            "album": album,
-            "release_id": release_data.get("id"),
-            "title": release_data.get("title"),
-            "year": release_data.get("year"),
-            "country": release_data.get("country"),
-            "tracks": tracks
-        }, f, indent=2, ensure_ascii=False)
+        json.dump({"artist": artist, "album": album, "release_id": best_cand["id"], "tracks": best_cand["tracks"]}, f, indent=2, ensure_ascii=False)
 
-    if cover_url:
-        if download_file(cover_url, out_dir / "cover.jpg"):
-            print("✓ Cover gespeichert.")
-        else:
+    if best_cand.get("cover_url"):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(best_cand["cover_url"], headers={"User-Agent": DISCOGS_UA}), timeout=20) as r:
+                (out_dir / "cover.jpg").write_bytes(r.read())
+                print("✓ Cover gespeichert.")
+        except Exception:
             print("⚠ Cover-Download fehlgeschlagen.")
-    else:
-        print("⚠ Kein Cover gefunden.")
-
-    print("✓ Fertig.")
 
 if __name__ == "__main__":
     main()

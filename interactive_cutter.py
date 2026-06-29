@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 PLAY_DURATION_SEC = 3.0
 
@@ -39,6 +39,11 @@ def show_status(i: int, data: dict, current_start: float, starts: list, last_gap
         print(f"  Tracklänge [{i:02d}/{n:02d}] \"{prev['title']}\": {fmt_dur(laenge)}{soll}")
     print(f"  Startpunkt [{i+1:02d}/{n:02d}] \"{tracks[i]['title']}\": {fmt_dur(current_start)}")
     print("  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | Offset: Zahl in s oder ±m:ss")
+
+def save_progress(progress_path: Path, history: list) -> None:
+    with open(progress_path, "w", encoding="utf-8") as f:
+        json.dump({"history": history}, f)
+
 
 def play_snippet(flac_path, start_time):
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-ss", f"{start_time:.3f}", "-t", str(PLAY_DURATION_SEC), str(flac_path)])
@@ -98,16 +103,32 @@ def main():
     probe = json.loads(subprocess.run(["ffprobe", "-v", "quiet", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "json", str(flac_path)], capture_output=True, text=True).stdout)
     sr = int(probe["streams"][0]["sample_rate"])
     
-    starts, last_gap = [], 0.0
-    for i, track in enumerate(data["tracks"]):
-        # Berechnung des nächsten Starts basierend auf vorherigem Ende + gelernter Pause
+    progress_path = out_dir / "progress.json"
+    history: list = []
+    starts: list = []
+    last_gap = 0.0
+
+    if progress_path.exists():
+        with open(progress_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        history = saved["history"]
+        starts = [h["start"] for h in history]
+        last_gap = history[-1]["last_gap"] if history else 0.0
+        n_done, n_total = len(starts), len(data["tracks"])
+        ans = input(f"\n=== Fortschritt gefunden ({n_done}/{n_total} Tracks). Fortsetzen? [j/n] ===\n> ").strip().lower()
+        if ans != "j":
+            history, starts, last_gap = [], [], 0.0
+            progress_path.unlink()
+
+    i = len(starts)
+    while i < len(data["tracks"]):
         if i == 0:
             current_start = 0.0
         elif "dur_s" in data["tracks"][i-1]:
             current_start = starts[i-1] + data["tracks"][i-1]["dur_s"] + last_gap
         else:
             current_start = starts[i-1]
-        
+
         while True:
             show_status(i, data, current_start, starts, last_gap)
             play_snippet(flac_path, current_start)
@@ -126,13 +147,18 @@ def main():
                 starts.append(current_start)
                 if i > 0 and "dur_s" in data["tracks"][i-1]:
                     last_gap = current_start - (starts[i-1] + data["tracks"][i-1]["dur_s"])
+                history.append({"start": current_start, "last_gap": last_gap})
+                save_progress(progress_path, history)
+                i += 1
                 break
             else:
                 try:
                     current_start = max(0.0, current_start + parse_offset(action))
                 except ValueError:
-                    print("Ungültige Eingabe.")
+                    print("  Ungültige Eingabe.")
                                                
+    progress_path.unlink(missing_ok=True)
+
     n = len(data["tracks"])
     print("\n=== TRACKS EXPORTIEREN ===")
     for i, track in enumerate(data["tracks"]):

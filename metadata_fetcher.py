@@ -210,7 +210,8 @@ def main():
     # ----------------------------
 
     for t in best_cand["tracks"]:
-        if not t["dur_s"]: t["dur_s"] = DEFAULT_TRACK_LENGTH_S
+        if not t["dur_s"]:
+            del t["dur_s"]
 
     with open(out_dir / "release.json", "w", encoding="utf-8") as f:
         json.dump({"artist": artist, "album": album, "release_id": best_cand["id"], "tracks": best_cand["tracks"]}, f, indent=2, ensure_ascii=False)

@@ -44,6 +44,7 @@ python3 interactive_cutter.py "Artist - Album.flac" --no-songtext
 |------|-----------|
 | `--out <Verzeichnis>` | Ausgabeverzeichnis für geschnittene Tracks |
 | `--no-songtext` | Songtext-Suche am Ende überspringen (z.B. bei Instrumentalalben) |
+| `--preview <Sek>` | Snippet-Länge in Sekunden (Standard: 3) |
 | `-h`, `--help` | Hilfe anzeigen |
 | `-V`, `--version` | Versionsnummer ausgeben |
 

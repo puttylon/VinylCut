@@ -4,9 +4,9 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
-PLAY_DURATION_SEC = 3.0
+DEFAULT_PLAY_DURATION_SEC = 3.0
 
 
 def parse_offset(s: str) -> float:
@@ -54,12 +54,12 @@ def save_progress(progress_path: Path, history: list) -> None:
         json.dump({"history": history}, f)
 
 
-def play_snippet(flac_path: Path, start_time: float) -> None:
+def play_snippet(flac_path: Path, start_time: float, duration: float) -> None:
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet",
-                    "-ss", f"{start_time:.3f}", "-t", str(PLAY_DURATION_SEC), str(flac_path)])
+                    "-ss", f"{start_time:.3f}", "-t", str(duration), str(flac_path)])
 
 
-def play_snippet_with_tone(flac_path: Path, start_time: float) -> None:
+def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) -> None:
     filter_complex = (
         "[0:a]aformat=channel_layouts=stereo[tone];"
         "[1:a]aformat=channel_layouts=stereo[audio];"
@@ -68,7 +68,7 @@ def play_snippet_with_tone(flac_path: Path, start_time: float) -> None:
     cmd = [
         "ffmpeg", "-v", "quiet",
         "-f", "lavfi", "-i", "sine=frequency=1000:duration=0.25",
-        "-ss", f"{start_time:.3f}", "-t", str(PLAY_DURATION_SEC), "-i", str(flac_path),
+        "-ss", f"{start_time:.3f}", "-t", str(duration), "-i", str(flac_path),
         "-filter_complex", filter_complex,
         "-map", "[out]", "-f", "wav", "pipe:1",
     ]
@@ -95,6 +95,7 @@ def main():
             "  -V, --version       Versionsnummer ausgeben\n"
             "  --no-songtext       Songtext-Suche am Ende überspringen\n"
             "  --out <Verzeichnis> Ausgabeverzeichnis für geschnittene Tracks\n"
+            "  --preview <Sek>     Snippet-Länge in Sekunden (Standard: 3)\n"
             "\nInteraktive Befehle während des Schneidens:\n"
             "  [p]         Snippet nochmal abspielen\n"
             "  [+] / [-]   Start ±0,5 s verschieben\n"
@@ -121,6 +122,19 @@ def main():
             print("Fehler: --out benötigt ein Verzeichnis.")
             sys.exit(1)
         out_arg = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
+    preview_duration = DEFAULT_PLAY_DURATION_SEC
+    if "--preview" in args:
+        idx = args.index("--preview")
+        if idx + 1 >= len(args):
+            print("Fehler: --preview benötigt eine Sekundenangabe.")
+            sys.exit(1)
+        try:
+            preview_duration = float(args[idx + 1])
+        except ValueError:
+            print("Fehler: --preview erwartet eine Zahl.")
+            sys.exit(1)
         args = args[:idx] + args[idx + 2:]
 
     if not args:
@@ -172,9 +186,9 @@ def main():
         while True:
             show_status(i, data, current_start, starts, last_gap, normton)
             if normton:
-                play_snippet_with_tone(flac_path, current_start)
+                play_snippet_with_tone(flac_path, current_start, preview_duration)
             else:
-                play_snippet(flac_path, current_start)
+                play_snippet(flac_path, current_start, preview_duration)
             action = input("  > ").strip().lower()
             if action == 'p':
                 continue

@@ -12,5 +12,5 @@ Ausgabeverzeichnis für geschnittene Tracks frei wählbar statt fest neben der Q
 ## ✓ v1.5.0 — Normton (experimentell)
 `[n]` schaltet einen 1000 Hz Normton (0,25 s) vor dem Schneidpunkt ein/aus. Nahtloser Übergang via ffmpeg concat-Filter.
 
-## Offen (ohne Versionsplanung)
-- Preview-Dauer konfigurierbar (z.B. `--preview 5`)
+## ✓ v1.6.0 — Preview-Dauer konfigurierbar (`--preview`)
+Snippet-Länge frei wählbar statt fix 3 Sekunden (z.B. `--preview 5`).

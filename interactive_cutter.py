@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 PLAY_DURATION_SEC = 3.0
 
@@ -62,9 +62,10 @@ def main():
             "\nNutzung:\n"
             "  python3 interactive_cutter.py \"Pfad/zur/Artist - Album.flac\"\n"
             "\nOptionen:\n"
-            "  -h, --help       Diese Hilfe anzeigen\n"
-            "  -V, --version    Versionsnummer ausgeben\n"
-            "  --no-songtext    Songtext-Suche am Ende überspringen\n"
+            "  -h, --help          Diese Hilfe anzeigen\n"
+            "  -V, --version       Versionsnummer ausgeben\n"
+            "  --no-songtext       Songtext-Suche am Ende überspringen\n"
+            "  --out <Verzeichnis> Ausgabeverzeichnis für geschnittene Tracks\n"
             "\nInteraktive Befehle während des Schneidens:\n"
             "  [p]        Snippet nochmal abspielen\n"
             "  [+] / [-]  Start ±0.5 s verschieben\n"
@@ -81,12 +82,24 @@ def main():
     args = sys.argv[1:]
     no_songtext = "--no-songtext" in args
     args = [a for a in args if a != "--no-songtext"]
+
+    out_arg = None
+    if "--out" in args:
+        idx = args.index("--out")
+        if idx + 1 >= len(args):
+            print("Fehler: --out benötigt ein Verzeichnis.")
+            sys.exit(1)
+        out_arg = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
     if not args:
         print("Fehler: Kein FLAC-Pfad angegeben.")
         sys.exit(1)
 
     flac_path = Path(args[0]).resolve()
     out_dir = flac_path.parent / flac_path.stem
+    track_out_dir = Path(out_arg).resolve() if out_arg else out_dir
+    track_out_dir.mkdir(parents=True, exist_ok=True)
     
     # Metadaten holen
     subprocess.run(["python3", "metadata_fetcher.py", str(flac_path)])
@@ -179,7 +192,7 @@ def main():
         else:
             total_dur = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)]))
             len_smp = round((total_dur * sr) - start_smp)
-        cut_and_tag(flac_path, out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac", i+1, track["title"], data["artist"], data["album"], start_smp, len_smp, out_dir / "cover.jpg")
+        cut_and_tag(flac_path, track_out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac", i+1, track["title"], data["artist"], data["album"], start_smp, len_smp, out_dir / "cover.jpg")
 
     if no_songtext:
         print("\n(Songtexte übersprungen: --no-songtext)")

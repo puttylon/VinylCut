@@ -30,20 +30,38 @@ python3 metadata_fetcher.py "Artist - Album.flac"
 Benötigt: `DISCOGS_TOKEN` als Umgebungsvariable.
 
 ### `interactive_cutter.py`
-Liest `release.json`, lässt dich für jeden Track den Startpunkt per Tastatur feinjustieren (Playback via ffplay), schneidet sample-genau mit SoX und taggt jede FLAC mit metaflac. Ruft danach automatisch `songtext.py` auf.
+Liest `release.json`, lässt dich für jeden Track den Startpunkt per Tastatur feinjustieren (Playback via ffplay), schneidet sample-genau mit SoX und taggt jede FLAC mit metaflac. Speichert Fortschritt nach jedem bestätigten Track. Ruft danach automatisch `songtext.py` auf.
 
 ```bash
 python3 interactive_cutter.py "Artist - Album.flac"
+python3 interactive_cutter.py "Artist - Album.flac" --out "/Ziel/Verzeichnis"
+python3 interactive_cutter.py "Artist - Album.flac" --no-songtext
 ```
 
-Steuerung im interaktiven Modus:
+**Optionen:**
+
+| Flag | Bedeutung |
+|------|-----------|
+| `--out <Verzeichnis>` | Ausgabeverzeichnis für geschnittene Tracks |
+| `--no-songtext` | Songtext-Suche am Ende überspringen (z.B. bei Instrumentalalben) |
+| `-h`, `--help` | Hilfe anzeigen |
+| `-V`, `--version` | Versionsnummer ausgeben |
+
+**Steuerung im interaktiven Modus:**
+
 | Eingabe | Aktion |
 |---------|--------|
-| Enter / `p` | Snippet nochmal abspielen |
+| `p` | Snippet nochmal abspielen |
 | `+` / `-` | ±0,5 Sekunden |
 | `++` / `--` | ±2 Sekunden |
 | `ok` | Startpunkt bestätigen, nächster Track |
-| Zahl | Startpunkt um N Sekunden verschieben |
+| `u` | Letztes `ok` rückgängig machen |
+| `n` | Normton (1000 Hz, 0,25 s) vor Snippet ein-/ausschalten |
+| Zahl oder `±m:ss` | Startpunkt um Offset verschieben (z.B. `+2:34` oder `-30`) |
+
+Bei Abbruch wird der Fortschritt in `<Album>/progress.json` gespeichert und beim nächsten Start zum Fortsetzen angeboten.
+
+Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 
 ### `songtext.py`
 Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics` und speichert sie als `.lrc`-Datei.
@@ -58,14 +76,24 @@ Optionaler Genius-Token (bessere Trefferquote): Datei `genius_token` im Skript-V
 
 **Python-Pakete:**
 ```bash
+pip install -r requirements.txt
 pip install syncedlyrics
 ```
 
 **Systemprogramme:**
-- `ffprobe` / `ffplay` — Dauer messen, Snippets abspielen (Teil von ffmpeg)
+- `ffprobe` / `ffplay` / `ffmpeg` — Dauer messen, Snippets abspielen, Normton-Funktion (Teil von ffmpeg)
 - `sox` — sample-genaues Schneiden
 - `metaflac` — FLAC-Tagging und Cover-Einbettung
 
 **Tokens:**
 - `DISCOGS_TOKEN` — Umgebungsvariable (erforderlich)
 - `genius_token` — Datei im Repo-Verzeichnis (optional, für Songtexte)
+
+## Entwicklung
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pytest
+```

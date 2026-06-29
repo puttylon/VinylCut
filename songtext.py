@@ -27,7 +27,7 @@ def main():
         pass
 
     # 2. Genius Token einlesen
-    token_path = Path("genius_token")
+    token_path = Path(__file__).parent / "genius_token"
     env = os.environ.copy()
     if token_path.exists():
         token = token_path.read_text().strip()

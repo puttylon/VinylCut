@@ -41,41 +41,36 @@ def main():
     starts, last_gap = [], 0.0
     for i, track in enumerate(data["tracks"]):
         # Berechnung des nächsten Starts basierend auf vorherigem Ende + gelernter Pause
-        prev_dur = data["tracks"][i-1].get("dur_s", 180.0) if i > 0 else 0.0
+        prev_dur = data["tracks"][i-1].get("dur_s", 120.0) if i > 0 else 0.0
         current_start = (starts[i-1] + prev_dur + last_gap) if i > 0 else 0.0
         
         print(f"\n--- Track {i+1:02d}: {track['title']} ---")
         while True:
-             play_snippet(flac_path, current_start)
-            
-             # Hier wurde die Anzeige um "Pause: {last_gap:.2f}s" erweitert
-             prompt = (f"Track {i+1} | Start: {current_start:.2f}s | Pause: {last_gap:.2f}s | "
-                       f"[p]lay | [+] +0.5 | [-] -0.5 | [++] +2 | [--] -2 | [ok] | [Zahl]: ")
-            
-             action = input(prompt).strip().lower()
-            
-             if action == 'p':
-                 continue
-             elif action == '+':
-                 current_start += 0.5
-             elif action == '-':
-                 current_start = max(0.0, current_start - 0.5)
-             elif action == '++':
-                 current_start += 2.0
-             elif action == '--':
-                 current_start = max(0.0, current_start - 2.0)
-             elif action == 'ok':
-                 starts.append(current_start)
-                 # Berechnung der neuen Pause für den nächsten Track
-                 if i > 0:
-                     prev_dur = data["tracks"][i-1].get("dur_s", 180.0)
-                     last_gap = current_start - (starts[i-1] + prev_dur)
-                 break
-             else:
-                 try:
-                     current_start = max(0.0, current_start + float(action))
-                 except ValueError:
-                     print("Ungültige Eingabe.")
+            play_snippet(flac_path, current_start)
+            prompt = (f"Track {i+1} | Start: {current_start:.2f}s | Pause: {last_gap:.2f}s | "
+                      f"[p]lay | [+] +0.5 | [-] -0.5 | [++] +2 | [--] -2 | [ok] | [Zahl]: ")
+            action = input(prompt).strip().lower()
+            if action == 'p':
+                continue
+            elif action == '+':
+                current_start += 0.5
+            elif action == '-':
+                current_start = max(0.0, current_start - 0.5)
+            elif action == '++':
+                current_start += 2.0
+            elif action == '--':
+                current_start = max(0.0, current_start - 2.0)
+            elif action == 'ok':
+                starts.append(current_start)
+                if i > 0:
+                    prev_dur = data["tracks"][i-1].get("dur_s", 120.0)
+                    last_gap = current_start - (starts[i-1] + prev_dur)
+                break
+            else:
+                try:
+                    current_start = max(0.0, current_start + float(action))
+                except ValueError:
+                    print("Ungültige Eingabe.")
                                                
     for i, track in enumerate(data["tracks"]):
         start_smp = round(starts[i] * sr)

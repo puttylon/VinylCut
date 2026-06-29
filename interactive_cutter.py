@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 PLAY_DURATION_SEC = 3.0
 
@@ -28,7 +28,7 @@ def fmt_dur(seconds: float) -> str:
     return f"{sign}{total // 60}:{total % 60:02d}"
 
 
-def show_status(i: int, data: dict, current_start: float, starts: list, last_gap: float) -> None:
+def show_status(i: int, data: dict, current_start: float, starts: list, last_gap: float, normton: bool = False) -> None:
     tracks = data["tracks"]
     n = len(tracks)
     print()
@@ -38,15 +38,36 @@ def show_status(i: int, data: dict, current_start: float, starts: list, last_gap
         soll = f"  (Soll: {fmt_dur(prev['dur_s'])})" if "dur_s" in prev else ""
         print(f"  Tracklänge [{i:02d}/{n:02d}] \"{prev['title']}\": {fmt_dur(laenge)}{soll}")
     print(f"  Startpunkt [{i+1:02d}/{n:02d}] \"{tracks[i]['title']}\": {fmt_dur(current_start)}")
-    print("  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | Offset: Zahl in s oder ±m:ss")
+    normton_str = "EIN" if normton else "aus"
+    print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl in s oder ±m:ss")
 
 def save_progress(progress_path: Path, history: list) -> None:
     with open(progress_path, "w", encoding="utf-8") as f:
         json.dump({"history": history}, f)
 
 
-def play_snippet(flac_path, start_time):
-    subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-ss", f"{start_time:.3f}", "-t", str(PLAY_DURATION_SEC), str(flac_path)])
+def play_snippet(flac_path: Path, start_time: float) -> None:
+    subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet",
+                    "-ss", f"{start_time:.3f}", "-t", str(PLAY_DURATION_SEC), str(flac_path)])
+
+
+def play_snippet_with_tone(flac_path: Path, start_time: float) -> None:
+    filter_complex = (
+        "[0:a]aformat=channel_layouts=stereo[tone];"
+        "[1:a]aformat=channel_layouts=stereo[audio];"
+        "[tone][audio]concat=n=2:v=0:a=1[out]"
+    )
+    cmd = [
+        "ffmpeg", "-v", "quiet",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=0.25",
+        "-ss", f"{start_time:.3f}", "-t", str(PLAY_DURATION_SEC), "-i", str(flac_path),
+        "-filter_complex", filter_complex,
+        "-map", "[out]", "-f", "wav", "pipe:1",
+    ]
+    ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
+                   stdin=ffmpeg.stdout, stderr=subprocess.DEVNULL)
+    ffmpeg.wait()
 
 def cut_and_tag(flac_path, out_file, track_num, title, artist, album, start_s, length_s, cover_path):
     comment = f"interactive_cutter.py v{__version__}"
@@ -133,6 +154,7 @@ def main():
             history, starts, last_gap = [], [], 0.0
             progress_path.unlink()
 
+    normton = False
     i = len(starts)
     while i < len(data["tracks"]):
         if i == 0:
@@ -143,8 +165,11 @@ def main():
             current_start = starts[i-1]
 
         while True:
-            show_status(i, data, current_start, starts, last_gap)
-            play_snippet(flac_path, current_start)
+            show_status(i, data, current_start, starts, last_gap, normton)
+            if normton:
+                play_snippet_with_tone(flac_path, current_start)
+            else:
+                play_snippet(flac_path, current_start)
             action = input("  > ").strip().lower()
             if action == 'p':
                 continue
@@ -156,6 +181,8 @@ def main():
                 current_start += 2.0
             elif action == '--':
                 current_start = max(0.0, current_start - 2.0)
+            elif action == 'n':
+                normton = not normton
             elif action == 'u':
                 if i == 0:
                     print("  Kein vorheriger Track.")

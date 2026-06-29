@@ -96,11 +96,13 @@ def main():
             "  --no-songtext       Songtext-Suche am Ende überspringen\n"
             "  --out <Verzeichnis> Ausgabeverzeichnis für geschnittene Tracks\n"
             "\nInteraktive Befehle während des Schneidens:\n"
-            "  [p]        Snippet nochmal abspielen\n"
-            "  [+] / [-]  Start ±0.5 s verschieben\n"
-            "  [++]/[--]  Start ±2.0 s verschieben\n"
-            "  [ok]       Startpunkt bestätigen\n"
-            "  [Zahl]     Start um den angegebenen Wert (in s) verschieben"
+            "  [p]         Snippet nochmal abspielen\n"
+            "  [+] / [-]   Start ±0,5 s verschieben\n"
+            "  [++]/[--]   Start ±2,0 s verschieben\n"
+            "  [ok]        Startpunkt bestätigen, nächster Track\n"
+            "  [u]         Letztes ok rückgängig machen\n"
+            "  [n]         Normton (1000 Hz, 0,25 s) vor Snippet ein-/ausschalten\n"
+            "  Zahl/±m:ss  Start um Offset verschieben (z.B. +2:34 oder -30)"
         )
         sys.exit(0 if len(sys.argv) >= 2 else 1)
 

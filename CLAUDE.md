@@ -18,6 +18,7 @@ Dieses Dokument dient als Leitfaden für die KI-Unterstützung in diesem Reposit
   - Dokumentation nachziehen — Reihenfolge: **Roadmap → Code → Tests → Dokumentation → Commit**
     - Implementiertes Feature in ROADMAP.md als erledigt markieren
     - README.md auf aktuelle Flags, Befehle und Abhängigkeiten aktualisieren
+	-- help auf dann aktuelle Funktionen und Änderung anpassen
 
 ## 3. Code-Stil & Qualität
 - **Stil:** Halte dich an PEP 8 (Standard-Formatierung via Ruff). Nutze sprechende Variablen- und Funktionsnamen in `snake_case`.

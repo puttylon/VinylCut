@@ -17,3 +17,30 @@ Snippet-Länge frei wählbar statt fix 3 Sekunden (z.B. `--preview 5`).
 
 ## Zurückgestellt
 - **Android/Termux-Port** — auf unbestimmte Zeit verschoben.
+
+---
+
+# preparer.py — Roadmap
+
+Werkzeug zur non-destruktiven Vorbereitung einer Roh-FLAC (alle Seiten in einer Datei) vor dem Schneiden mit `interactive_cutter.py`. Die Original-FLAC wird nie verändert. Alle Schnittdaten landen in `preparer.json`, Zwischenergebnisse in neuen Dateien.
+
+## v0.1 — Stille-Erkennung
+Nimmt eine FLAC, erkennt lange Stillepausen via `ffmpeg silencedetect`, gibt vorgeschlagene A/B-Punkte für jede Nahtstelle im Terminal aus. Noch keine Interaktion — nur prüfen ob die Erkennung brauchbare Ergebnisse liefert.
+
+## v0.2 — Interaktives Grob-Beschneiden
+Für jede Nahtstelle: Punkt A (Ende Musik Seite N) und Punkt B (Anfang Musik Seite N+1) per Playback interaktiv setzen und in `preparer.json` speichern. Fortschritt wird nach jeder Bestätigung gespeichert, Session kann fortgesetzt werden.
+
+## v0.3 — Crossfade-Vorschau + Feinschneiden
+Jeden Übergang abhören: temporärer Crossfade (~0,5 s) wird on-the-fly generiert und abgespielt. A/B können nochmals verschoben werden bis der Übergang stimmt. `preparer.json` wird aktualisiert, keine Datei wird geschrieben.
+
+## v0.4 — Schneiden + Zusammenfügen
+Ausgabe: `<Name>_prepared.flac` mit Crossfades an allen Nahtstellen. Original-FLAC bleibt unangetastet.
+
+## v0.5 — Normalisierung + DC-Offset
+Normalisierung und DC-Offset-Korrektur via sox auf `_prepared.flac`. Ergebnis in `<Name>_final.flac`, `_prepared.flac` bleibt erhalten.
+
+## v0.6 — Polish
+`--help`, Flags, Statusmeldungen, Tests.
+
+## v1.0 — Stabile Version
+Dokumentation nachgezogen, in Gesamtworkflow integriert.

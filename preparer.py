@@ -8,6 +8,8 @@ __version__ = "0.1.0"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0
+TRIM_NOISE_DB = -40
+TRIM_MIN_DURATION = 0.5
 
 
 def detect_silences(flac_path: Path, noise_db: int = SILENCE_NOISE_DB, min_duration: float = SILENCE_MIN_DURATION) -> list:
@@ -34,6 +36,14 @@ def detect_silences(flac_path: Path, noise_db: int = SILENCE_NOISE_DB, min_durat
             })
             current_start = None
     return silences
+
+
+def detect_trim_points(flac_path: Path, total_duration: float) -> tuple:
+    """Erkennt Rauschen am Anfang und Ende mit lockerem Schwellwert."""
+    silences = detect_silences(flac_path, noise_db=TRIM_NOISE_DB, min_duration=TRIM_MIN_DURATION)
+    music_start = silences[0]["end"] if silences and silences[0]["start"] < 1.0 else 0.0
+    music_end = silences[-1]["start"] if silences and silences[-1]["end"] > total_duration - 10.0 else total_duration
+    return music_start, music_end
 
 
 def fmt_time(seconds: float) -> str:
@@ -67,16 +77,26 @@ def main():
 
     print(f"\n=== VinylCut Preparer v{__version__} ===")
     print(f"Datei: {flac_path.name}")
-    print(f"\nSuche Stillepausen (>{SILENCE_MIN_DURATION}s, Schwelle: {SILENCE_NOISE_DB} dB)...")
+    print("\nAnalysiere...")
 
+    total_duration = float(subprocess.check_output([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)
+    ]))
+
+    music_start, music_end = detect_trim_points(flac_path, total_duration)
     silences = detect_silences(flac_path)
 
+    print()
+    print(f"  Anfang:  Rauschen bis  {fmt_time(music_start)}  ({music_start:.1f}s)  → Musik ab {fmt_time(music_start)}")
+    print(f"  Ende:    Musik bis     {fmt_time(music_end)}  ({music_end:.1f}s)  → Rauschen ab {fmt_time(music_end)}")
+
     if not silences:
-        print("Keine langen Stillepausen gefunden.")
+        print("\nKeine Seitengrenzen gefunden.")
         print(f"Tipp: Vinyl hat oft Oberflächenrauschen — evtl. Schwelle auf -45 dB anheben.")
         sys.exit(0)
 
-    print(f"\n{len(silences)} Stillepause(n) gefunden — mögliche Seitengrenzen:\n")
+    print(f"\n  {len(silences)} Seitengrenze(n) gefunden:\n")
     for i, s in enumerate(silences, 1):
         print(f"  Grenze {i}:")
         print(f"    A (Ende Musik):   {fmt_time(s['start'])}  ({s['start']:.1f}s)")

@@ -129,90 +129,16 @@ def build_steps(music_start: float, music_end: float, silences: list) -> list:
     return steps
 
 
-def adjust_point_loop(flac_path: Path, label: str, pos: float, normton: bool, play_from_end: bool = False) -> float:
-    """Sub-Loop zum Feinjustieren eines einzelnen Punktes (A oder B)."""
-    play_dur = DEFAULT_PLAY_DURATION
-    while True:
-        print()
-        print(f"  {label}: {fmt_time(pos)}  ({pos:.1f}s)")
-        print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] fertig | Offset: Zahl oder ±m:ss")
-        start = max(0.0, pos - play_dur) if play_from_end else pos
-        if normton:
-            play_snippet_with_tone(flac_path, start, play_dur)
-        else:
-            play_snippet(flac_path, start, play_dur)
-        action = input("  > ").strip().lower()
-        if action == 'p':
-            continue
-        elif action == '+':
-            pos += 0.5
-        elif action == '-':
-            pos = max(0.0, pos - 0.5)
-        elif action == '++':
-            pos += 2.0
-        elif action == '--':
-            pos = max(0.0, pos - 2.0)
-        elif action == 'ok':
-            return pos
-        else:
-            try:
-                pos = max(0.0, pos + parse_offset(action))
-            except ValueError:
-                print("  Ungültige Eingabe.")
-
-
-def crossfade_review_loop(flac_path: Path, history: list, n_boundaries: int,
-                          progress_path: Path, cf_done: list) -> list:
-    """Phase 2: Crossfade-Vorschau und Feinschneiden für jede Grenze."""
-    normton = False
-    j = len(cf_done)
-
-    while j < n_boundaries:
-        a_idx = 1 + j * 2
-        b_idx = 2 + j * 2
-        a_pos = history[a_idx]["pos"]
-        b_pos = history[b_idx]["pos"]
-
-        while True:
-            print()
-            print(f"  === Crossfade-Vorschau: Grenze {j+1}/{n_boundaries} ===")
-            print(f"  A (Ende Musik):   {fmt_time(a_pos)}  ({a_pos:.1f}s)")
-            print(f"  B (Anfang Musik): {fmt_time(b_pos)}  ({b_pos:.1f}s)")
-            print(f"  Herausgeschnitten: {fmt_time(b_pos - a_pos)}")
-            normton_str = "EIN" if normton else "aus"
-            print(f"  [p]lay | [a] A anpassen | [b] B anpassen | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str}")
-            play_crossfade_preview(flac_path, a_pos, b_pos)
-            action = input("  > ").strip().lower()
-
-            if action == 'p':
-                continue
-            elif action == 'n':
-                normton = not normton
-            elif action == 'a':
-                a_pos = adjust_point_loop(flac_path, f"A — Grenze {j+1}", a_pos, normton, play_from_end=True)
-                history[a_idx]["pos"] = a_pos
-                save_progress(progress_path, Path(history[0]["pos"] if False else ""), history, cf_done)
-            elif action == 'b':
-                b_pos = adjust_point_loop(flac_path, f"B — Grenze {j+1}", b_pos, normton, play_from_end=False)
-                history[b_idx]["pos"] = b_pos
-                save_progress(progress_path, Path(history[0]["pos"] if False else ""), history, cf_done)
-            elif action == 'u':
-                if j == 0:
-                    print("  Keine vorherige Grenze.")
-                else:
-                    cf_done.pop()
-                    j -= 1
-                    a_pos = history[1 + j * 2]["pos"]
-                    b_pos = history[2 + j * 2]["pos"]
-                break
-            elif action == 'ok':
-                history[a_idx]["pos"] = a_pos
-                history[b_idx]["pos"] = b_pos
-                cf_done.append(j)
-                j += 1
-                break
-
-    return cf_done
+def show_crossfade_status(j: int, n: int, a_pos: float, b_pos: float, active: str, normton: bool) -> None:
+    a_marker = " ←" if active == 'a' else ""
+    b_marker = " ←" if active == 'b' else ""
+    normton_str = "EIN" if normton else "aus"
+    print()
+    print(f"  === Crossfade-Vorschau: Grenze {j+1}/{n} ===")
+    print(f"  A (Ende Musik):    {fmt_time(a_pos)}  ({a_pos:.1f}s){a_marker}")
+    print(f"  B (Anfang Musik):  {fmt_time(b_pos)}  ({b_pos:.1f}s){b_marker}")
+    print(f"  Herausgeschnitten: {fmt_time(b_pos - a_pos)}")
+    print(f"  [a]/[b] Fokus | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl oder ±m:ss")
 
 
 def main():
@@ -237,11 +163,14 @@ def main():
             "  Zahl/±m:ss  Offset eingeben\n"
             "\nPhase-2-Steuerung (Crossfade):\n"
             "  [p]         Crossfade nochmal abspielen\n"
-            "  [a]         Punkt A feinjustieren\n"
-            "  [b]         Punkt B feinjustieren\n"
+            "  [a]         Fokus auf A (Ende Musik)\n"
+            "  [b]         Fokus auf B (Anfang Musik)\n"
+            "  [+]/[-]     Aktiven Punkt ±0,5 s verschieben\n"
+            "  [++]/[--]   Aktiven Punkt ±2,0 s verschieben\n"
             "  [ok]        Grenze bestätigen, weiter\n"
             "  [u]         Vorherige Grenze nochmal\n"
-            "  [n]         Normton ein-/ausschalten"
+            "  [n]         Normton ein-/ausschalten\n"
+            "  Zahl/±m:ss  Aktiven Punkt um Offset verschieben"
         )
         sys.exit(0 if len(sys.argv) >= 2 else 1)
 
@@ -352,14 +281,10 @@ def main():
     # --- Phase 2: Crossfade-Vorschau ---
     if n_boundaries > 0 and len(cf_done) < n_boundaries:
         print("\n=== PHASE 2: CROSSFADE-VORSCHAU ===")
-        print(f"Für jede der {n_boundaries} Grenzen: Übergang abhören, bei Bedarf A/B feinjustieren.\n")
+        print(f"Für jede der {n_boundaries} Grenzen: Übergang abhören, A/B mit [a]/[b] fokussieren und verschieben.\n")
 
-        # save_progress braucht flac_path — wir wrappen es
-        def _save(h, cf):
-            save_progress(progress_path, flac_path, h, cf)
-
-        # Undo in Phase 2 muss auch history speichern können
         normton_cf = False
+        active = 'a'
         j = len(cf_done)
         while j < n_boundaries:
             a_idx = 1 + j * 2
@@ -368,13 +293,7 @@ def main():
             b_pos = history[b_idx]["pos"]
 
             while True:
-                print()
-                print(f"  === Crossfade-Vorschau: Grenze {j+1}/{n_boundaries} ===")
-                print(f"  A (Ende Musik):    {fmt_time(a_pos)}  ({a_pos:.1f}s)")
-                print(f"  B (Anfang Musik):  {fmt_time(b_pos)}  ({b_pos:.1f}s)")
-                print(f"  Herausgeschnitten: {fmt_time(b_pos - a_pos)}")
-                normton_str = "EIN" if normton_cf else "aus"
-                print(f"  [p]lay | [a] A anpassen | [b] B anpassen | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str}")
+                show_crossfade_status(j, n_boundaries, a_pos, b_pos, active, normton_cf)
                 play_crossfade_preview(flac_path, a_pos, b_pos)
                 action = input("  > ").strip().lower()
 
@@ -383,28 +302,37 @@ def main():
                 elif action == 'n':
                     normton_cf = not normton_cf
                 elif action == 'a':
-                    a_pos = adjust_point_loop(flac_path, f"A — Grenze {j+1}", a_pos, normton_cf, play_from_end=True)
-                    history[a_idx]["pos"] = a_pos
-                    _save(history, cf_done)
+                    active = 'a'
                 elif action == 'b':
-                    b_pos = adjust_point_loop(flac_path, f"B — Grenze {j+1}", b_pos, normton_cf, play_from_end=False)
-                    history[b_idx]["pos"] = b_pos
-                    _save(history, cf_done)
-                elif action == 'u':
+                    active = 'b'
+                elif action in ('+', '-', '++', '--') or action:
+                    delta = {'+': 0.5, '-': -0.5, '++': 2.0, '--': -2.0}.get(action)
+                    if delta is None:
+                        try:
+                            delta = parse_offset(action)
+                        except ValueError:
+                            print("  Ungültige Eingabe.")
+                            continue
+                    if active == 'a':
+                        a_pos = max(0.0, a_pos + delta)
+                        history[a_idx]["pos"] = a_pos
+                    else:
+                        b_pos = max(0.0, b_pos + delta)
+                        history[b_idx]["pos"] = b_pos
+                    save_progress(progress_path, flac_path, history, cf_done)
+                if action == 'u':
                     if j == 0:
                         print("  Keine vorherige Grenze.")
                     else:
                         cf_done.pop()
-                        _save(history, cf_done)
+                        save_progress(progress_path, flac_path, history, cf_done)
                         j -= 1
                         a_pos = history[1 + j * 2]["pos"]
                         b_pos = history[2 + j * 2]["pos"]
                     break
                 elif action == 'ok':
-                    history[a_idx]["pos"] = a_pos
-                    history[b_idx]["pos"] = b_pos
                     cf_done.append(j)
-                    _save(history, cf_done)
+                    save_progress(progress_path, flac_path, history, cf_done)
                     j += 1
                     break
 

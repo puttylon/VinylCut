@@ -305,22 +305,7 @@ def main():
                     active = 'a'
                 elif action == 'b':
                     active = 'b'
-                elif action in ('+', '-', '++', '--') or action:
-                    delta = {'+': 0.5, '-': -0.5, '++': 2.0, '--': -2.0}.get(action)
-                    if delta is None:
-                        try:
-                            delta = parse_offset(action)
-                        except ValueError:
-                            print("  Ungültige Eingabe.")
-                            continue
-                    if active == 'a':
-                        a_pos = max(0.0, a_pos + delta)
-                        history[a_idx]["pos"] = a_pos
-                    else:
-                        b_pos = max(0.0, b_pos + delta)
-                        history[b_idx]["pos"] = b_pos
-                    save_progress(progress_path, flac_path, history, cf_done)
-                if action == 'u':
+                elif action == 'u':
                     if j == 0:
                         print("  Keine vorherige Grenze.")
                     else:
@@ -335,6 +320,21 @@ def main():
                     save_progress(progress_path, flac_path, history, cf_done)
                     j += 1
                     break
+                else:
+                    delta = {'+': 0.5, '-': -0.5, '++': 2.0, '--': -2.0}.get(action)
+                    if delta is None:
+                        try:
+                            delta = parse_offset(action)
+                        except ValueError:
+                            print("  Ungültige Eingabe.")
+                            continue
+                    if active == 'a':
+                        a_pos = max(0.0, a_pos + delta)
+                        history[a_idx]["pos"] = a_pos
+                    else:
+                        b_pos = max(0.0, b_pos + delta)
+                        history[b_idx]["pos"] = b_pos
+                    save_progress(progress_path, flac_path, history, cf_done)
 
     # --- Zusammenfassung ---
     print("\n=== ALLE PUNKTE BESTÄTIGT ===\n")

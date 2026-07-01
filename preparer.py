@@ -70,16 +70,36 @@ def play_snippet(flac_path: Path, start_time: float, duration: float = DEFAULT_P
                     "-ss", f"{start_time:.3f}", "-t", str(duration), str(flac_path)])
 
 
+def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float = DEFAULT_PLAY_DURATION) -> None:
+    filter_complex = (
+        "[0:a]aformat=channel_layouts=stereo[tone];"
+        "[1:a]aformat=channel_layouts=stereo[audio];"
+        "[tone][audio]concat=n=2:v=0:a=1[out]"
+    )
+    cmd = [
+        "ffmpeg", "-v", "quiet",
+        "-f", "lavfi", "-i", "sine=frequency=220:duration=0.25",
+        "-ss", f"{start_time:.3f}", "-t", str(duration), "-i", str(flac_path),
+        "-filter_complex", filter_complex,
+        "-map", "[out]", "-f", "wav", "pipe:1",
+    ]
+    ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
+                   stdin=ffmpeg.stdout, stderr=subprocess.DEVNULL)
+    ffmpeg.wait()
+
+
 def save_progress(progress_path: Path, flac_path: Path, history: list) -> None:
     with open(progress_path, "w", encoding="utf-8") as f:
         json.dump({"flac": str(flac_path), "history": history}, f, indent=2)
 
 
-def show_status(step: dict, current_pos: float, i: int, n_steps: int) -> None:
+def show_status(step: dict, current_pos: float, i: int, n_steps: int, normton: bool = False) -> None:
     print()
     print(f"  [{i+1:02d}/{n_steps:02d}] {step['desc']}")
     print(f"  Aktuell: {fmt_time(current_pos)}  ({current_pos:.1f}s)  |  Vorschlag: {fmt_time(step['suggested'])}  ({step['suggested']:.1f}s)")
-    print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | Offset: Zahl oder ±m:ss")
+    normton_str = "EIN" if normton else "aus"
+    print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl oder ±m:ss")
 
 
 def build_steps(music_start: float, music_end: float, silences: list) -> list:
@@ -108,6 +128,7 @@ def main():
             "  [++]/[--]   Punkt ±2,0 s verschieben\n"
             "  [ok]        Punkt bestätigen, weiter\n"
             "  [u]         Letzten Schritt rückgängig machen\n"
+            "  [n]         Normton (220 Hz, 0,25 s) vor Snippet ein-/ausschalten\n"
             "  Zahl/±m:ss  Punkt um Offset verschieben"
         )
         sys.exit(0 if len(sys.argv) >= 2 else 1)
@@ -153,18 +174,24 @@ def main():
                 history = []
                 progress_path.unlink()
 
+    normton = False
     i = len(history)
     while i < len(steps):
         step = steps[i]
         current_pos = history[i]["pos"] if i < len(history) else step["suggested"]
 
         while True:
-            show_status(step, current_pos, i, len(steps))
-            play_snippet(flac_path, current_pos)
+            show_status(step, current_pos, i, len(steps), normton)
+            if normton:
+                play_snippet_with_tone(flac_path, current_pos)
+            else:
+                play_snippet(flac_path, current_pos)
             action = input("  > ").strip().lower()
 
             if action == 'p':
                 continue
+            elif action == 'n':
+                normton = not normton
             elif action == '+':
                 current_pos += 0.5
             elif action == '-':

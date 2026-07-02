@@ -12,6 +12,7 @@ SILENCE_MIN_DURATION = 5.0
 TRIM_NOISE_DB = -40
 TRIM_MIN_DURATION = 0.5
 DEFAULT_PLAY_DURATION = 3.0
+DEFAULT_CROSSFADE_PREVIEW_SEC = 8.0
 CROSSFADE_DURATION = 0.5
 
 
@@ -91,7 +92,7 @@ def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float =
 
 
 def play_crossfade_preview(flac_path: Path, a_pos: float, b_pos: float,
-                           preview_sec: float = DEFAULT_PLAY_DURATION,
+                           preview_sec: float = DEFAULT_CROSSFADE_PREVIEW_SEC,
                            crossfade_sec: float = CROSSFADE_DURATION) -> None:
     """Spielt Ende von Seite N + Crossfade + Anfang von Seite N+1 ab."""
     cmd = [
@@ -148,8 +149,9 @@ def main():
             "\nNutzung:\n"
             "  python3 preparer.py \"Pfad/zur/Aufnahme.flac\"\n"
             "\nOptionen:\n"
-            "  -h, --help     Diese Hilfe anzeigen\n"
-            "  -V, --version  Versionsnummer ausgeben\n"
+            "  -h, --help          Diese Hilfe anzeigen\n"
+            "  -V, --version       Versionsnummer ausgeben\n"
+            "  --preview <Sek>     Crossfade-Vorschau-Länge in Sekunden (Standard: 8)\n"
             "\nPhase 1: Schnitt-/Trim-Punkte interaktiv setzen.\n"
             "Phase 2: Crossfade-Vorschau je Seitengrenze, Feinschneiden.\n"
             "Ergebnis non-destruktiv in preparer.json gespeichert.\n"
@@ -178,7 +180,25 @@ def main():
         print(f"preparer.py {__version__}")
         sys.exit(0)
 
-    flac_path = Path(sys.argv[1]).resolve()
+    args = sys.argv[1:]
+    cf_preview_sec = DEFAULT_CROSSFADE_PREVIEW_SEC
+    if "--preview" in args:
+        idx = args.index("--preview")
+        if idx + 1 >= len(args):
+            print("Fehler: --preview benötigt eine Sekundenangabe.")
+            sys.exit(1)
+        try:
+            cf_preview_sec = float(args[idx + 1])
+        except ValueError:
+            print("Fehler: --preview erwartet eine Zahl.")
+            sys.exit(1)
+        args = args[:idx] + args[idx + 2:]
+
+    if not args:
+        print("Fehler: Kein FLAC-Pfad angegeben.")
+        sys.exit(1)
+
+    flac_path = Path(args[0]).resolve()
     if not flac_path.exists():
         print(f"Fehler: Datei nicht gefunden: {flac_path}")
         sys.exit(1)
@@ -294,7 +314,7 @@ def main():
 
             while True:
                 show_crossfade_status(j, n_boundaries, a_pos, b_pos, active, normton_cf)
-                play_crossfade_preview(flac_path, a_pos, b_pos)
+                play_crossfade_preview(flac_path, a_pos, b_pos, preview_sec=cf_preview_sec)
                 action = input("  > ").strip().lower()
 
                 if action == 'p':

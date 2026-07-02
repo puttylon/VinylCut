@@ -50,8 +50,10 @@ def detect_trim_points(flac_path: Path, total_duration: float) -> tuple:
 
 
 def fmt_time(seconds: float) -> str:
-    total = int(round(abs(seconds)))
-    return f"{total // 60}:{total % 60:02d}"
+    total = abs(seconds)
+    m = int(total) // 60
+    s = total - m * 60
+    return f"{m}:{s:05.2f}"
 
 
 def parse_offset(s: str) -> float:

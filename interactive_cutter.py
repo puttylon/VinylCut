@@ -23,9 +23,11 @@ def parse_offset(s: str) -> float:
 
 
 def fmt_dur(seconds: float) -> str:
-    total = int(round(abs(seconds)))
     sign = "-" if seconds < 0 else ""
-    return f"{sign}{total // 60}:{total % 60:02d}"
+    total = abs(seconds)
+    m = int(total) // 60
+    s = total - m * 60
+    return f"{sign}{m}:{s:05.2f}"
 
 
 def show_status(i: int, data: dict, current_start: float, starts: list, last_gap: float, normton: bool = False) -> None:
@@ -67,7 +69,7 @@ def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) 
     )
     cmd = [
         "ffmpeg", "-v", "quiet",
-        "-f", "lavfi", "-i", "sine=frequency=440:duration=0.25",
+        "-f", "lavfi", "-i", "sine=frequency=220:duration=0.25",
         "-ss", f"{start_time:.3f}", "-t", str(duration), "-i", str(flac_path),
         "-filter_complex", filter_complex,
         "-map", "[out]", "-f", "wav", "pipe:1",
@@ -178,7 +180,7 @@ def main():
             history, starts, last_gap = [], [], 0.0
             progress_path.unlink()
 
-    normton = False
+    normton = True
     i = len(starts)
     while i < len(data["tracks"]):
         current_start = estimate_start(i, data["tracks"], starts, last_gap)

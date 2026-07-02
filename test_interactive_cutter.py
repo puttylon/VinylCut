@@ -34,28 +34,28 @@ class TestParseOffset:
 
 class TestFmtDur:
     def test_zero(self):
-        assert fmt_dur(0) == "0:00"
+        assert fmt_dur(0) == "0:00.00"
 
     def test_one_minute(self):
-        assert fmt_dur(60) == "1:00"
+        assert fmt_dur(60) == "1:00.00"
 
     def test_ninety_seconds(self):
-        assert fmt_dur(90) == "1:30"
+        assert fmt_dur(90) == "1:30.00"
 
     def test_154_seconds(self):
-        assert fmt_dur(154) == "2:34"
+        assert fmt_dur(154) == "2:34.00"
 
-    def test_rounding_up(self):
-        assert fmt_dur(59.5) == "1:00"
+    def test_centiseconds(self):
+        assert fmt_dur(154.37) == "2:34.37"
 
-    def test_rounding_down(self):
-        assert fmt_dur(0.4) == "0:00"
+    def test_sub_second(self):
+        assert fmt_dur(0.4) == "0:00.40"
 
     def test_negative(self):
-        assert fmt_dur(-90) == "-1:30"
+        assert fmt_dur(-90) == "-1:30.00"
 
     def test_one_hour(self):
-        assert fmt_dur(3600) == "60:00"
+        assert fmt_dur(3600) == "60:00.00"
 
 
 class TestEstimateStart:

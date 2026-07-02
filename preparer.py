@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0
@@ -171,6 +171,13 @@ def cut_segment(flac_path: Path, out_path: Path, start_s: float, end_s: float) -
         "ffmpeg", "-v", "quiet", "-y",
         "-ss", f"{start_s:.3f}", "-t", f"{end_s - start_s:.3f}",
         "-i", str(flac_path), str(out_path),
+    ], check=True)
+
+
+def normalize(in_path: Path, out_path: Path) -> None:
+    """DC-Offset entfernen und auf -0.1 dBFS normalisieren."""
+    subprocess.run([
+        "sox", str(in_path), str(out_path), "highpass", "5", "norm", "-0.1"
     ], check=True)
 
 
@@ -466,10 +473,17 @@ def main():
     for f in to_cleanup:
         f.unlink(missing_ok=True)
 
+    # --- Phase 4: Normalisierung + DC-Offset ---
+    print("\n=== PHASE 4: NORMALISIERUNG ===")
+    final_flac = flac_path.parent / f"{flac_path.stem}_final.flac"
+    print(f"  DC-Offset entfernen + Peak-Normalisierung auf -0.1 dBFS...")
+    normalize(out_flac, final_flac)
+
     print(f"\n=== FERTIG ===")
-    print(f"  Ausgabe: {out_flac}")
+    print(f"  Vorbereitet: {out_flac.name}")
+    print(f"  Normalisiert: {final_flac.name}")
     print(f"  Original unverändert: {flac_path.name}")
-    print(f"\nWeiter mit: python3 interactive_cutter.py \"{out_flac}\"")
+    print(f"\nWeiter mit: python3 interactive_cutter.py \"{final_flac}\"")
 
 
 if __name__ == "__main__":

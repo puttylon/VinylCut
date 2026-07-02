@@ -2,6 +2,7 @@
 import sys
 import re
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -174,11 +175,27 @@ def cut_segment(flac_path: Path, out_path: Path, start_s: float, end_s: float) -
     ], check=True)
 
 
-def normalize(in_path: Path, out_path: Path) -> None:
-    """DC-Offset entfernen und auf -0.1 dBFS normalisieren."""
-    subprocess.run([
-        "sox", str(in_path), str(out_path), "highpass", "5", "norm", "-0.1"
-    ], check=True)
+def measure_channel_peaks(flac_path: Path) -> tuple:
+    """Gibt (left_db, right_db) Peak-Pegel zurück."""
+    result = subprocess.run(
+        ["sox", str(flac_path), "-n", "stats"],
+        capture_output=True, text=True
+    )
+    for line in result.stderr.splitlines():
+        if line.strip().startswith("Pk lev dB"):
+            parts = line.split()
+            return float(parts[-2]), float(parts[-1])
+    return 0.0, 0.0
+
+
+def normalize(in_path: Path, out_path: Path,
+              left_gain: float = 1.0, right_gain: float = 1.0) -> None:
+    """DC-Offset entfernen, optionaler Kanalausgleich, auf -0.1 dBFS normalisieren."""
+    remix = ["remix", f"1v{left_gain:.6f}", f"2v{right_gain:.6f}"]
+    subprocess.run(
+        ["sox", str(in_path), str(out_path)] + remix + ["highpass", "5", "norm", "-0.1"],
+        check=True
+    )
 
 
 def join_with_crossfade(seg1: Path, seg2: Path, out_path: Path, crossfade_sec: float = CROSSFADE_DURATION) -> None:
@@ -476,8 +493,23 @@ def main():
     # --- Phase 4: Normalisierung + DC-Offset ---
     print("\n=== PHASE 4: NORMALISIERUNG ===")
     final_flac = flac_path.parent / f"{flac_path.stem}_final.flac"
+
+    left_db, right_db = measure_channel_peaks(out_flac)
+    diff = right_db - left_db
+    print(f"  Kanalpeaks: Links {left_db:.2f} dBFS  |  Rechts {right_db:.2f} dBFS  |  Differenz {diff:+.2f} dB")
+
+    left_gain = right_gain = 1.0
+    if abs(diff) >= 0.1:
+        ans = input(f"  Kanalausgleich anwenden? [j/n]: ").strip().lower()
+        if ans == "j":
+            if diff < 0:
+                right_gain = 10 ** (-diff / 20)
+            else:
+                left_gain = 10 ** (diff / 20)
+            print(f"  Korrektur: Links ×{left_gain:.4f}  Rechts ×{right_gain:.4f}")
+
     print(f"  DC-Offset entfernen + Peak-Normalisierung auf -0.1 dBFS...")
-    normalize(out_flac, final_flac)
+    normalize(out_flac, final_flac, left_gain, right_gain)
 
     print(f"\n=== FERTIG ===")
     print(f"  Vorbereitet: {out_flac.name}")

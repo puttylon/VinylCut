@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0
@@ -150,6 +150,37 @@ def build_steps(music_start: float, music_end: float, silences: list) -> list:
         steps.append({"label": f"boundary_{i}_b", "desc": f"Grenze {i+1}/{len(silences)} — B (Anfang Musik Seite {i+2})", "suggested": s["end"]})
     steps.append({"label": "trim_end", "desc": "Ende — Musik endet hier", "suggested": music_end})
     return steps
+
+
+def get_segments(history: list, n_boundaries: int) -> list:
+    """Gibt Liste von (start, end) Tupeln für alle Segmente zurück."""
+    trim_start = history[0]["pos"]
+    trim_end = history[-1]["pos"]
+    if n_boundaries == 0:
+        return [(trim_start, trim_end)]
+    segments = []
+    segments.append((trim_start, history[1]["pos"]))
+    for j in range(n_boundaries - 1):
+        segments.append((history[2 + j * 2]["pos"], history[3 + j * 2]["pos"]))
+    segments.append((history[2 + (n_boundaries - 1) * 2]["pos"], trim_end))
+    return segments
+
+
+def cut_segment(flac_path: Path, out_path: Path, start_s: float, end_s: float) -> None:
+    subprocess.run([
+        "ffmpeg", "-v", "quiet", "-y",
+        "-ss", f"{start_s:.3f}", "-t", f"{end_s - start_s:.3f}",
+        "-i", str(flac_path), str(out_path),
+    ], check=True)
+
+
+def join_with_crossfade(seg1: Path, seg2: Path, out_path: Path, crossfade_sec: float = CROSSFADE_DURATION) -> None:
+    subprocess.run([
+        "ffmpeg", "-v", "quiet", "-y",
+        "-i", str(seg1), "-i", str(seg2),
+        "-filter_complex", f"[0:a][1:a]acrossfade=d={crossfade_sec}[out]",
+        "-map", "[out]", str(out_path),
+    ], check=True)
 
 
 def show_crossfade_status(j: int, n: int, a_pos: float, b_pos: float, active: str, normton: bool) -> None:
@@ -403,18 +434,42 @@ def main():
                         history[b_idx]["pos"] = b_pos
                     save_progress(progress_path, flac_path, history, cf_done)
 
-    # --- Zusammenfassung ---
-    print("\n=== ALLE PUNKTE BESTÄTIGT ===\n")
-    trim_start = history[0]["pos"]
-    trim_end = history[-1]["pos"]
-    print(f"  Anfang:  {fmt_time(trim_start)}  ({trim_start:.1f}s)")
-    for j in range(n_boundaries):
-        a = history[1 + j * 2]["pos"]
-        b = history[2 + j * 2]["pos"]
-        print(f"  Grenze {j+1}: A={fmt_time(a)} ({a:.1f}s)  →  B={fmt_time(b)} ({b:.1f}s)  |  Herausgeschnitten: {fmt_time(b - a)}")
-    print(f"  Ende:    {fmt_time(trim_end)}  ({trim_end:.1f}s)")
-    print(f"\nGespeichert in: {progress_path}")
-    print("Weiter mit: preparer.py v0.4 — Schneiden + Zusammenfügen")
+    # --- Phase 3: Schneiden + Zusammenfügen ---
+    print("\n=== PHASE 3: SCHNEIDEN + ZUSAMMENFÜGEN ===")
+    segments = get_segments(history, n_boundaries)
+    n_seg = len(segments)
+    temp_files: list[Path] = []
+    to_cleanup: list[Path] = []
+
+    print(f"  {n_seg} Segment(e) werden geschnitten...")
+    for i, (start, end) in enumerate(segments):
+        tmp = out_dir / f"_seg_{i:02d}.wav"
+        print(f"  Segment {i+1}/{n_seg}: {fmt_time(start)} → {fmt_time(end)}")
+        cut_segment(flac_path, tmp, start, end)
+        temp_files.append(tmp)
+        to_cleanup.append(tmp)
+
+    print(f"  Verbinde {n_seg} Segment(e) mit {CROSSFADE_DURATION}s Crossfade...")
+    current = temp_files[0]
+    for i in range(1, n_seg):
+        joined = out_dir / f"_joined_{i:02d}.wav"
+        join_with_crossfade(current, temp_files[i], joined)
+        to_cleanup.append(joined)
+        current = joined
+
+    out_flac = flac_path.parent / f"{flac_path.stem}_prepared.flac"
+    print(f"  Speichere als FLAC: {out_flac.name}")
+    subprocess.run([
+        "ffmpeg", "-v", "quiet", "-y", "-i", str(current), str(out_flac)
+    ], check=True)
+
+    for f in to_cleanup:
+        f.unlink(missing_ok=True)
+
+    print(f"\n=== FERTIG ===")
+    print(f"  Ausgabe: {out_flac}")
+    print(f"  Original unverändert: {flac_path.name}")
+    print(f"\nWeiter mit: python3 interactive_cutter.py \"{out_flac}\"")
 
 
 if __name__ == "__main__":

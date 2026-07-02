@@ -93,15 +93,35 @@ def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float =
 
 def play_crossfade_preview(flac_path: Path, a_pos: float, b_pos: float,
                            preview_sec: float = DEFAULT_CROSSFADE_PREVIEW_SEC,
-                           crossfade_sec: float = CROSSFADE_DURATION) -> None:
-    """Spielt Ende von Seite N + Crossfade + Anfang von Seite N+1 ab."""
-    cmd = [
-        "ffmpeg", "-v", "quiet",
-        "-ss", f"{max(0.0, a_pos - preview_sec):.3f}", "-t", f"{preview_sec:.3f}", "-i", str(flac_path),
-        "-ss", f"{b_pos:.3f}", "-t", f"{preview_sec:.3f}", "-i", str(flac_path),
-        "-filter_complex", f"[0:a][1:a]acrossfade=d={crossfade_sec}[out]",
-        "-map", "[out]", "-f", "wav", "pipe:1",
-    ]
+                           crossfade_sec: float = CROSSFADE_DURATION,
+                           normton: bool = False) -> None:
+    """Spielt [Ton +] Ende Seite N + Crossfade + [Ton +] Anfang Seite N+1."""
+    if normton:
+        filter_complex = (
+            "[0:a]aformat=channel_layouts=stereo[t1];"
+            "[1:a]aformat=channel_layouts=stereo[end];"
+            "[2:a]aformat=channel_layouts=stereo[start];"
+            "[3:a]aformat=channel_layouts=stereo[t2];"
+            f"[end][start]acrossfade=d={crossfade_sec}[cf];"
+            "[t1][cf][t2]concat=n=3:v=0:a=1[out]"
+        )
+        cmd = [
+            "ffmpeg", "-v", "quiet",
+            "-f", "lavfi", "-i", "sine=frequency=220:duration=0.25",
+            "-ss", f"{max(0.0, a_pos - preview_sec):.3f}", "-t", f"{preview_sec:.3f}", "-i", str(flac_path),
+            "-ss", f"{b_pos:.3f}", "-t", f"{preview_sec:.3f}", "-i", str(flac_path),
+            "-f", "lavfi", "-i", "sine=frequency=220:duration=0.25",
+            "-filter_complex", filter_complex,
+            "-map", "[out]", "-f", "wav", "pipe:1",
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-v", "quiet",
+            "-ss", f"{max(0.0, a_pos - preview_sec):.3f}", "-t", f"{preview_sec:.3f}", "-i", str(flac_path),
+            "-ss", f"{b_pos:.3f}", "-t", f"{preview_sec:.3f}", "-i", str(flac_path),
+            "-filter_complex", f"[0:a][1:a]acrossfade=d={crossfade_sec}[out]",
+            "-map", "[out]", "-f", "wav", "pipe:1",
+        ]
     ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
                    stdin=ffmpeg.stdout, stderr=subprocess.DEVNULL)
@@ -217,11 +237,36 @@ def main():
     ]))
 
     music_start, music_end = detect_trim_points(flac_path, total_duration)
-    silences = detect_silences(flac_path)
-    steps = build_steps(music_start, music_end, silences)
-    n_boundaries = len(silences)
+    all_silences = detect_silences(flac_path)
 
-    print(f"  Erkannt: {n_boundaries} Seitengrenze(n), {len(steps)} Punkte zu setzen.")
+    # Anzahl Seiten vom Nutzer bestätigen
+    n_detected = len(all_silences)
+    print(f"  Automatisch erkannte Grenzen: {n_detected} (= {n_detected + 1} Seite(n))")
+    while True:
+        ans = input(f"  Wie viele Seiten hat die Vinyl? [{n_detected + 1}]: ").strip()
+        if not ans:
+            n_sides = n_detected + 1
+            break
+        try:
+            n_sides = int(ans)
+            if n_sides >= 1:
+                break
+        except ValueError:
+            pass
+        print("  Bitte eine ganze Zahl eingeben.")
+
+    n_boundaries = n_sides - 1
+    # Beste Kandidaten nach Stillelänge auswählen, zeitlich sortiert
+    silences = sorted(
+        sorted(all_silences, key=lambda s: s["duration"], reverse=True)[:n_boundaries],
+        key=lambda s: s["start"]
+    )
+    if len(silences) < n_boundaries:
+        print(f"  Warnung: Nur {len(silences)} Grenze(n) gefunden, {n_boundaries} erwartet.")
+        n_boundaries = len(silences)
+
+    steps = build_steps(music_start, music_end, silences)
+    print(f"  Verwende {n_boundaries} Grenze(n), {len(steps)} Punkte zu setzen.")
 
     history: list = []
     cf_done: list = []
@@ -314,7 +359,7 @@ def main():
 
             while True:
                 show_crossfade_status(j, n_boundaries, a_pos, b_pos, active, normton_cf)
-                play_crossfade_preview(flac_path, a_pos, b_pos, preview_sec=cf_preview_sec)
+                play_crossfade_preview(flac_path, a_pos, b_pos, preview_sec=cf_preview_sec, normton=normton_cf)
                 action = input("  > ").strip().lower()
 
                 if action == 'p':

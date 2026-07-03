@@ -1,4 +1,4 @@
-from preparer import fmt_time, get_segments
+from preparer import fmt_time, get_segments, suggest_clean_name
 
 
 def h(label, pos):
@@ -78,3 +78,20 @@ class TestGetSegments:
             h("trim_end", 300.0),
         ]
         assert len(get_segments(history, 1)) == 2
+
+
+class TestSuggestCleanName:
+    def test_removes_dash_raw(self):
+        assert suggest_clean_name("The Subways - When I'm With You-raw") == "The Subways - When I'm With You"
+
+    def test_removes_underscore_raw(self):
+        assert suggest_clean_name("Artist - Album_raw") == "Artist - Album"
+
+    def test_no_raw_suffix(self):
+        assert suggest_clean_name("Artist - Album") == "Artist - Album"
+
+    def test_case_insensitive(self):
+        assert suggest_clean_name("Artist - Album-RAW") == "Artist - Album"
+
+    def test_raw_in_middle_unchanged(self):
+        assert suggest_clean_name("Raw Artist - Album") == "Raw Artist - Album"

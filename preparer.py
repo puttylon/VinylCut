@@ -6,6 +6,10 @@ import math
 import subprocess
 from pathlib import Path
 
+
+def suggest_clean_name(stem: str) -> str:
+    return re.sub(r'[-_]raw$', '', stem, flags=re.IGNORECASE).strip()
+
 __version__ = "0.6.0"
 
 SILENCE_NOISE_DB = -50
@@ -511,11 +515,28 @@ def main():
     print(f"  DC-Offset entfernen + Peak-Normalisierung auf -0.1 dBFS...")
     normalize(out_flac, final_flac, left_gain, right_gain)
 
+    # --- Umbenennen ---
+    suggested = suggest_clean_name(flac_path.stem)
+    print(f"\n  Vorschlag für Ausgabename: {suggested}.flac")
+    ans = input("  [Enter] übernehmen oder neuen Namen eingeben: ").strip()
+    clean_name = ans if ans else suggested
+    clean_flac = flac_path.parent / f"{clean_name}.flac"
+    if clean_flac.exists():
+        overwrite = input(f"  {clean_flac.name} existiert bereits. Überschreiben? [j/n]: ").strip().lower()
+        if overwrite != "j":
+            clean_flac = final_flac
+            print(f"  Beibehalten als: {final_flac.name}")
+        else:
+            clean_flac.unlink()
+    if clean_flac != final_flac:
+        final_flac.rename(clean_flac)
+        print(f"  Umbenannt: {final_flac.name} → {clean_flac.name}")
+
     print(f"\n=== FERTIG ===")
-    print(f"  Vorbereitet: {out_flac.name}")
-    print(f"  Normalisiert: {final_flac.name}")
-    print(f"  Original unverändert: {flac_path.name}")
-    print(f"\nWeiter mit: python3 interactive_cutter.py \"{final_flac}\"")
+    print(f"  Vorbereitet:  {out_flac.name}")
+    print(f"  Ausgabe:      {clean_flac.name}")
+    print(f"  Original:     {flac_path.name}  (unverändert)")
+    print(f"\nWeiter mit: python3 interactive_cutter.py \"{clean_flac}\"")
 
 
 if __name__ == "__main__":

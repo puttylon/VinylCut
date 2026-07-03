@@ -250,6 +250,18 @@ def main():
 
     if not best_cand: sys.exit("Fehler: Konnte keine validen Tracks laden.")
 
+    if not any(t.get("dur_s") for t in best_cand["tracks"]):
+        print("  Discogs-Release enthält keine Tracklängen — suche in MusicBrainz...")
+        mb_cands = search_musicbrainz(artist, album, flac_total)
+        if mb_cands:
+            mb_best = min(mb_cands, key=lambda c: score_release(c, flac_total, album))
+            if any(t.get("dur_s") for t in mb_best["tracks"]):
+                print("  ✓ MusicBrainz-Alternative mit Tracklängen gefunden.")
+                best_cand = mb_best
+                for c in mb_cands:
+                    if not any(x["id"] == c["id"] for x in all_cands):
+                        all_cands.append(c)
+
     # --- INTERAKTIVE SCHLEIFE ---
     current_cand = best_cand
     while True:

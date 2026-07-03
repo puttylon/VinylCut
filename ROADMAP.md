@@ -40,7 +40,7 @@ Ausgabe: `<Name>_prepared.flac` mit Crossfades an allen Nahtstellen. Original-FL
 DC-Offset (highpass 5 Hz) + Peak-Normalisierung auf -0,1 dBFS via sox. Optionaler Kanalausgleich nach Pegelmessung. Ergebnis in `<Name>_final.flac`.
 
 ## ✓ v0.6 — Polish
-Tests für `get_segments`, ROADMAP aktualisiert.
+Tests für `get_segments`, automatische Umbenennung der Ausgabedatei, ROADMAP aktualisiert.
 
-## v1.0 — Stabile Version
-Dokumentation nachgezogen, in Gesamtworkflow integriert.
+## ✓ v1.0 — Stabile Version
+README vollständig nachgezogen, Gesamtworkflow dokumentiert.

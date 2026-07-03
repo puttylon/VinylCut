@@ -10,7 +10,7 @@ from pathlib import Path
 def suggest_clean_name(stem: str) -> str:
     return re.sub(r'[-_]raw$', '', stem, flags=re.IGNORECASE).strip()
 
-__version__ = "0.6.0"
+__version__ = "1.0.0"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0

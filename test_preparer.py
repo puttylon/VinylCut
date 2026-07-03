@@ -1,4 +1,8 @@
-from preparer import fmt_time
+from preparer import fmt_time, get_segments
+
+
+def h(label, pos):
+    return {"label": label, "pos": pos}
 
 
 class TestFmtTime:
@@ -19,3 +23,58 @@ class TestFmtTime:
 
     def test_large(self):
         assert fmt_time(3661) == "61:01.00"
+
+
+class TestGetSegments:
+    def test_no_boundaries(self):
+        history = [h("trim_start", 10.0), h("trim_end", 3800.0)]
+        assert get_segments(history, 0) == [(10.0, 3800.0)]
+
+    def test_one_boundary(self):
+        history = [
+            h("trim_start", 10.0),
+            h("boundary_0_a", 1075.0),
+            h("boundary_0_b", 1168.0),
+            h("trim_end", 3800.0),
+        ]
+        assert get_segments(history, 1) == [(10.0, 1075.0), (1168.0, 3800.0)]
+
+    def test_two_boundaries(self):
+        history = [
+            h("trim_start", 10.0),
+            h("boundary_0_a", 1000.0),
+            h("boundary_0_b", 1100.0),
+            h("boundary_1_a", 2000.0),
+            h("boundary_1_b", 2100.0),
+            h("trim_end", 3800.0),
+        ]
+        result = get_segments(history, 2)
+        assert result == [(10.0, 1000.0), (1100.0, 2000.0), (2100.0, 3800.0)]
+
+    def test_three_boundaries(self):
+        history = [
+            h("trim_start", 5.0),
+            h("boundary_0_a", 900.0),
+            h("boundary_0_b", 1000.0),
+            h("boundary_1_a", 1900.0),
+            h("boundary_1_b", 2000.0),
+            h("boundary_2_a", 2900.0),
+            h("boundary_2_b", 3000.0),
+            h("trim_end", 3800.0),
+        ]
+        result = get_segments(history, 3)
+        assert result == [
+            (5.0, 900.0),
+            (1000.0, 1900.0),
+            (2000.0, 2900.0),
+            (3000.0, 3800.0),
+        ]
+
+    def test_segment_count(self):
+        history = [
+            h("trim_start", 0.0),
+            h("boundary_0_a", 100.0),
+            h("boundary_0_b", 200.0),
+            h("trim_end", 300.0),
+        ]
+        assert len(get_segments(history, 1)) == 2

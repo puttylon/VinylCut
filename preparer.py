@@ -6,7 +6,7 @@ import math
 import subprocess
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0

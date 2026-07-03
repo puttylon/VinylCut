@@ -140,6 +140,24 @@ def fetch_discogs_by_id(rel_id, token):
         "community_have": 0,
     }
 
+def search_musicbrainz(artist: str, album: str, flac_total: float, max_results: int = 5) -> list:
+    query = urllib.parse.quote(f'release:"{album}" AND artist:"{artist}"')
+    data = _get_mb_json(f"{MB_API}/release?query={query}&fmt=json&limit={max_results}")
+    if not data:
+        return []
+    cands = []
+    releases = data.get("releases", [])[:max_results]
+    for i, res in enumerate(releases, 1):
+        mbid = res.get("id")
+        if not mbid:
+            continue
+        print(f"  > Prüfe MB-Release {i}/{len(releases)} ({mbid[:8]}...)...")
+        cand = fetch_musicbrainz_by_id(mbid)
+        if cand:
+            cands.append(cand)
+    return cands
+
+
 def score_release(cand, flac_total, album):
     cand_durs = [t["dur_s"] for t in cand["tracks"]]
     have_durs = [d for d in cand_durs if d]
@@ -185,11 +203,16 @@ def main():
     plausible = [r for r in results if _name_matches(r.get("title", "").split(" - ")[-1], album)]
     plausible.sort(key=lambda r: (0 if "vinyl" in " ".join(r.get("format", [])).lower() else 1, -r.get("community", {}).get("have", 0)))
 
-    if not plausible: sys.exit("Fehler: Kein passendes Release gefunden.")
-
     best_cand = None
     best_score = 9999.0
     all_cands = []
+
+    if not plausible:
+        print("  Keine Discogs-Treffer — suche in MusicBrainz...")
+        all_cands = search_musicbrainz(artist, album, flac_total)
+        if not all_cands:
+            sys.exit("Fehler: Kein passendes Release gefunden (weder Discogs noch MusicBrainz).")
+        best_cand = min(all_cands, key=lambda c: score_release(c, flac_total, album))
 
     for i, res in enumerate(plausible[:DEFAULT_MAX_RELEASES], 1):
         rel_id = res.get("id")

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import re
 import json
 import urllib.request
 import urllib.parse
@@ -15,6 +16,9 @@ DISCOGS_API = "https://api.discogs.com"
 DISCOGS_UA  = "VinylCutter/2.0 (+https://localhost)"
 DEFAULT_MAX_RELEASES = 25
 DEFAULT_TRACK_LENGTH_S = 120.0
+
+MB_API = "https://musicbrainz.org/ws/2"
+MB_UA  = "VinylCut/1.0 (guido.ledermann@gmail.com)"
 
 def _get_json(url, token=None, retries=3):
     headers = {"User-Agent": DISCOGS_UA}
@@ -78,6 +82,46 @@ def fmt_dur(sec):
     if not sec: return "?:??"
     m, s = divmod(int(sec), 60)
     return f"{m}:{s:02d}"
+
+def _is_mbid(s: str) -> bool:
+    return bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', s.strip(), re.I))
+
+
+def _get_mb_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": MB_UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            time.sleep(1.1)
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def fetch_musicbrainz_by_id(mbid: str):
+    full = _get_mb_json(f"{MB_API}/release/{mbid}?inc=recordings&fmt=json")
+    if not full:
+        return None
+    tracks = []
+    for medium in full.get("media", []):
+        for t in medium.get("tracks", []):
+            track = {"title": (t.get("title") or "Track").strip()}
+            if t.get("length"):
+                track["dur_s"] = t["length"] / 1000.0
+            tracks.append(track)
+    if not tracks:
+        return None
+    media_fmts = [m.get("format", "") for m in full.get("media", [])]
+    fmts = ", ".join(f for f in media_fmts if f)
+    return {
+        "id": f"mb:{mbid}",
+        "title": full.get("title", ""),
+        "format": fmts or "MusicBrainz",
+        "is_vinyl": any("vinyl" in f.lower() for f in media_fmts),
+        "tracks": tracks,
+        "cover_url": f"https://coverartarchive.org/release/{mbid}/front",
+        "community_have": 0,
+    }
+
 
 def fetch_discogs_by_id(rel_id, token):
     full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
@@ -188,17 +232,26 @@ def main():
     while True:
         print(f"\n--- VORSCHLAG: {current_cand['title']} ---")
         print(f"Format: {current_cand['format']}")
-        print(f"Quelle: https://www.discogs.com/release/{current_cand['id']}")
+        cid = current_cand['id']
+        if cid.startswith("mb:"):
+            print(f"Quelle: https://musicbrainz.org/release/{cid[3:]}")
+        else:
+            print(f"Quelle: https://www.discogs.com/release/{cid}")
         print("Tracks:")
         for idx, t in enumerate(current_cand["tracks"], 1):
             print(f"  {idx:02d}. {t['title']} ({fmt_dur(t.get('dur_s'))})")
-        
-        ans = input("\n[Enter] Akzeptieren, oder Discogs-ID eingeben für Override: ").strip()
+
+        ans = input("\n[Enter] Akzeptieren, Discogs-ID oder MusicBrainz-ID eingeben: ").strip()
         if not ans:
             break
-        
-        print(f"Lade Discogs-ID {ans}...")
-        new_cand = fetch_discogs_by_id(ans, token)
+
+        if _is_mbid(ans):
+            print(f"Lade MusicBrainz-Release {ans}...")
+            new_cand = fetch_musicbrainz_by_id(ans)
+        else:
+            print(f"Lade Discogs-ID {ans}...")
+            new_cand = fetch_discogs_by_id(ans, token)
+
         if new_cand:
             current_cand = new_cand
             if not any(c["id"] == new_cand["id"] for c in all_cands):
@@ -210,8 +263,8 @@ def main():
     # ----------------------------
 
     for t in best_cand["tracks"]:
-        if not t["dur_s"]:
-            del t["dur_s"]
+        if not t.get("dur_s"):
+            t.pop("dur_s", None)
 
     with open(out_dir / "release.json", "w", encoding="utf-8") as f:
         json.dump({"artist": artist, "album": album, "release_id": best_cand["id"], "tracks": best_cand["tracks"]}, f, indent=2, ensure_ascii=False)

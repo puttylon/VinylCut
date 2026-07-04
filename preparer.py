@@ -323,8 +323,13 @@ def main():
         key=lambda s: s["start"]
     )
     if len(silences) < n_boundaries:
-        print(f"  Warnung: Nur {len(silences)} Grenze(n) gefunden, {n_boundaries} erwartet.")
-        n_boundaries = len(silences)
+        n_missing = n_boundaries - len(silences)
+        print(f"  Warnung: Nur {len(silences)} Grenze(n) gefunden, {n_missing} weitere geschätzt — bitte manuell anpassen.")
+        span = music_end - music_start
+        for k in range(1, n_missing + 1):
+            est = music_start + span * k / (n_missing + 1)
+            silences.append({"start": est, "end": est + 5.0, "duration": 0.0})
+        silences.sort(key=lambda s: s["start"])
 
     steps = build_steps(music_start, music_end, silences)
     print(f"  Verwende {n_boundaries} Grenze(n), {len(steps)} Punkte zu setzen.")

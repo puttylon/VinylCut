@@ -137,7 +137,7 @@ def play_crossfade_preview(flac_path: Path, a_pos: float, b_pos: float,
 
 def save_progress(progress_path: Path, flac_path: Path, history: list, cf_done: list) -> None:
     with open(progress_path, "w", encoding="utf-8") as f:
-        json.dump({"flac": str(flac_path), "history": history, "crossfade_confirmed": cf_done}, f, indent=2)
+        json.dump({"flac": flac_path.name, "history": history, "crossfade_confirmed": cf_done}, f, indent=2)
 
 
 def show_status(step: dict, current_pos: float, i: int, n_steps: int, normton: bool = False) -> None:
@@ -340,7 +340,7 @@ def main():
     if progress_path.exists():
         with open(progress_path, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        if saved.get("flac") == str(flac_path):
+        if saved.get("flac") == flac_path.name:
             history = saved.get("history", [])
             cf_done = saved.get("crossfade_confirmed", [])
             n_done = len(history)

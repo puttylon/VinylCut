@@ -64,7 +64,7 @@ python3 preparer.py "Artist - Album-raw.flac" --preview 12
 | `++` / `--` | Punkt ±2,0 s verschieben |
 | `ok` | Punkt bestätigen, weiter |
 | `u` | Letzten Schritt rückgängig |
-| `n` | Normton (220 Hz, 0,25 s) ein-/ausschalten |
+| `n` | Normton (220 Hz, 0,25 s) aus-/einschalten (Standard: EIN) |
 | Zahl oder `±m:ss` | Offset eingeben |
 
 **Steuerung Phase 2 (Crossfade):**
@@ -77,7 +77,7 @@ python3 preparer.py "Artist - Album-raw.flac" --preview 12
 | `++` / `--` | Aktiven Punkt ±2,0 s verschieben |
 | `ok` | Grenze bestätigen, weiter |
 | `u` | Vorherige Grenze nochmal |
-| `n` | Normton ein-/ausschalten |
+| `n` | Normton aus-/einschalten (Standard: EIN) |
 | Zahl oder `±m:ss` | Aktiven Punkt um Offset verschieben |
 
 Fortschritt wird nach jeder Bestätigung in `<Stem>/preparer.json` gespeichert und beim nächsten Start zum Fortsetzen angeboten.
@@ -128,7 +128,7 @@ python3 interactive_cutter.py "Artist - Album.flac" --preview 5
 | `++` / `--` | ±2 Sekunden |
 | `ok` | Startpunkt bestätigen, nächster Track |
 | `u` | Letztes `ok` rückgängig machen |
-| `n` | Normton (220 Hz, 0,25 s) vor Snippet ein-/ausschalten |
+| `n` | Normton (220 Hz, 0,25 s) vor Snippet aus-/einschalten (Standard: EIN) |
 | Zahl oder `±m:ss` | Startpunkt um Offset verschieben (z.B. `+2:34` oder `-30`) |
 
 Bei Abbruch wird der Fortschritt in `<Album>/progress.json` gespeichert und beim nächsten Start zum Fortsetzen angeboten.

@@ -359,7 +359,7 @@ def main():
 
     # --- Phase 1: Punkte setzen ---
     if len(history) < len(steps):
-        normton = False
+        normton = True
         i = len(history)
         while i < len(steps):
             step = steps[i]
@@ -414,7 +414,7 @@ def main():
         print("\n=== PHASE 2: CROSSFADE-VORSCHAU ===")
         print(f"Für jede der {n_boundaries} Grenzen: Übergang abhören, A/B mit [a]/[b] fokussieren und verschieben.\n")
 
-        normton_cf = False
+        normton_cf = True
         active = 'a'
         j = len(cf_done)
         while j < n_boundaries:

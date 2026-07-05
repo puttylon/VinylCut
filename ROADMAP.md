@@ -25,35 +25,33 @@ im Rich Live-Screen. Eingabe zeichenweise mit tty.setcbreak.
 
 Grundlage: ARCHITECTURE.md. Ziel: stabiler, testbarer, wartbarer Code.
 
-## Schritt 1 — cut_ui.py anlegen
-Alle Rich/tty-Abhängigkeiten aus interactive_cutter.py extrahieren:
-- build_cutting_panel() — umbenannt von build_panel()
+## ✓ Schritt 1 — cut_ui.py anlegen
+Alle Rich/tty-Abhängigkeiten aus interactive_cutter.py extrahiert:
+- build_cutting_panel() — umbenannt von build_panel(), est als Parameter
 - build_metadata_panel() — unverändert
-- _live_ask() → live_input() — gleiche Logik, sauberer Name
-- fmt_dur() — zieht mit rüber (Display-Hilfsfunktion)
-Ergebnis: eine Datei für alles Rich-spezifische.
+- live_input() — umbenannt von _live_ask()
+- fmt_dur() — Display-Hilfsfunktion
+Ergebnis: eine Datei für alles Rich-spezifische (Schicht 2).
 
-## Schritt 2 — Umbenennen der Skripte
-- interactive_cutter.py → cut.py
+## ✓ Schritt 2 — Umbenennen der Skripte
+- interactive_cutter.py → cut.py (v1.9.0)
 - preparer.py → assemble.py
-- cutter_ui.py → cut_ui.py
-- Alle Testdateien und README-Verweise entsprechend anpassen.
+- metadata_fetcher.py → fetch_metadata.py
+- songtext.py → fetch_songtext.py
+- Alle Testdateien und README-Verweise angepasst.
 
-## Schritt 3 — interactive_cutter.py / cut.py aufräumen
-Importiert jetzt aus cut_ui. Entfernt doppelten Code.
+## ✓ Schritt 3 — cut.py aufräumen
+Importiert jetzt aus cut_ui. Doppelter Code entfernt.
 Enthält: main(), run_metadata_search(), Logik-Funktionen, cut_and_tag(), play_snippet*()
-Ziel: ~350 Zeilen statt 671.
+Ergebnis: 280 Zeilen statt 671.
 
-## Schritt 4 — test_cut_ui.py schreiben
-Panel-Builder mit Console(force_terminal=False) + console.capture() testen.
+## ✓ Schritt 4 — test_cut_ui.py schreiben
+21 Tests mit Console(force_terminal=False) + capture().
 Läuft vollautomatisch mit pytest, kein Terminal nötig.
-Import-Pfade in test_interactive_cutter.py / test_cut.py anpassen.
 
-## Schritt 5 — test_smoke.py schreiben + pexpect recherchieren
-Smoke-Tests: --version, --help via subprocess.run().
-Parallel: pexpect in scratch/test_pexpect.py ausprobieren (manuell ausführen),
-Aufwand einschätzen, dann entscheiden ob E2E-Tests lohnen.
-Scratch-Datei danach löschen, Ergebnis in CLAUDE.md.
+## ✓ Schritt 5 — test_smoke.py schreiben
+7 Smoke-Tests: --version, --help, no-args für cut.py, assemble.py, fetch_songtext.py.
+pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 
 ---
 

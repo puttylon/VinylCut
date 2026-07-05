@@ -5,37 +5,37 @@ Pipeline zum Digitalisieren von Vinyl-Alben: Roh-Aufnahme vorbereiten, Metadaten
 ## Ablauf
 
 ```
-Roh-FLAC (alle Seiten) → preparer.py → Artist - Album.flac
+Roh-FLAC (alle Seiten) → assemble.py → Artist - Album.flac
                                                ↓
-                               interactive_cutter.py → einzelne getaggte FLACs + LRC-Dateien
+                               cut.py → einzelne getaggte FLACs + LRC-Dateien
 ```
 
 ### Schritt 1 — Aufnahme vorbereiten
 
 ```bash
-python3 preparer.py "Artist - Album-raw.flac"
+python3 assemble.py "Artist - Album-raw.flac"
 ```
 
 ### Schritt 2 — Tracks schneiden
 
 ```bash
-python3 interactive_cutter.py "Artist - Album.flac"
+python3 cut.py "Artist - Album.flac"
 ```
 
-`interactive_cutter.py` ruft `metadata_fetcher.py` und `songtext.py` automatisch auf.
+`cut.py` ruft `fetch_metadata.py` und `fetch_songtext.py` automatisch auf.
 
 ---
 
 ## Skripte
 
-### `preparer.py`
+### `assemble.py`
 Bereitet eine Roh-FLAC (alle Vinyl-Seiten in einer Datei) non-destruktiv für den Schnitt vor. Erkennt Seitengrenzen automatisch via Stille-Erkennung, lässt Schnitt- und Trim-Punkte interaktiv setzen, zeigt Crossfade-Übergänge zur Feinkorrektur, fügt Segmente zusammen und normalisiert.
 
 Ausgabe: `Artist - Album.flac` (bereinigt, normalisiert). Original bleibt unverändert.
 
 ```bash
-python3 preparer.py "Artist - Album-raw.flac"
-python3 preparer.py "Artist - Album-raw.flac" --preview 12
+python3 assemble.py "Artist - Album-raw.flac"
+python3 assemble.py "Artist - Album-raw.flac" --preview 12
 ```
 
 **Optionen:**
@@ -84,7 +84,7 @@ Fortschritt wird nach jeder Bestätigung in `<Stem>/preparer.json` gespeichert u
 
 ---
 
-### `metadata_fetcher.py`
+### `fetch_metadata.py`
 Sucht das Album auf Discogs, wählt die beste Pressung per Score (Vinyl bevorzugt, Gesamtdauer, fehlende Längen), zeigt die Trackliste interaktiv an und ermöglicht einen manuellen Discogs-ID-Override. Lädt das Cover vom popularsten Vinyl-Release (nach `community.have`).
 
 Ausgabe in `<Album>/`:
@@ -92,21 +92,21 @@ Ausgabe in `<Album>/`:
 - `cover.jpg` — Albumcover
 
 ```bash
-python3 metadata_fetcher.py "Artist - Album.flac"
+python3 fetch_metadata.py "Artist - Album.flac"
 ```
 
 Benötigt: `DISCOGS_TOKEN` als Umgebungsvariable.
 
 ---
 
-### `interactive_cutter.py`
-Liest `release.json`, lässt dich für jeden Track den Startpunkt per Tastatur feinjustieren (Playback via ffplay), schneidet sample-genau mit SoX und taggt jede FLAC mit metaflac. Speichert Fortschritt nach jedem bestätigten Track. Ruft danach automatisch `songtext.py` auf.
+### `cut.py`
+Liest `release.json`, lässt dich für jeden Track den Startpunkt per Tastatur feinjustieren (Playback via ffplay), schneidet sample-genau mit SoX und taggt jede FLAC mit metaflac. Speichert Fortschritt nach jedem bestätigten Track. Ruft danach automatisch `fetch_songtext.py` auf.
 
 ```bash
-python3 interactive_cutter.py "Artist - Album.flac"
-python3 interactive_cutter.py "Artist - Album.flac" --out "/Ziel/Verzeichnis"
-python3 interactive_cutter.py "Artist - Album.flac" --no-songtext
-python3 interactive_cutter.py "Artist - Album.flac" --preview 5
+python3 cut.py "Artist - Album.flac"
+python3 cut.py "Artist - Album.flac" --out "/Ziel/Verzeichnis"
+python3 cut.py "Artist - Album.flac" --no-songtext
+python3 cut.py "Artist - Album.flac" --preview 5
 ```
 
 **Optionen:**
@@ -137,11 +137,11 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 
 ---
 
-### `songtext.py`
+### `fetch_songtext.py`
 Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics` und speichert sie als `.lrc`-Datei.
 
 ```bash
-python3 songtext.py "Artist - Album/"
+python3 fetch_songtext.py "Artist - Album/"
 ```
 
 Optionaler Genius-Token (bessere Trefferquote): Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.

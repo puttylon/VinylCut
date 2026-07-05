@@ -93,17 +93,24 @@ def cut_and_tag(flac_path, out_file, track_num, title, artist, album, start_s, l
 
 
 def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
-                current_i: int, current_pos: float, normton: bool, last_gap: float) -> Panel:
+                current_i: int, current_pos: float, normton: bool, last_gap: float,
+                phase: str = "cutting",
+                export_status: list = None, lrc_status: list = None) -> Panel:
     n = len(tracks)
     total_dur = sum(t.get("dur_s", 0.0) for t in tracks)
 
-    # Compute display starts: confirmed + current + chained estimates for future tracks
-    display_starts = list(confirmed_starts) + [current_pos]
-    prev = current_pos
-    for i in range(current_i + 1, n):
-        dur = tracks[i - 1].get("dur_s")
-        prev = prev + dur + last_gap if dur is not None else prev
-        display_starts.append(prev)
+    if phase == "cutting":
+        display_starts = list(confirmed_starts) + [current_pos]
+        prev = current_pos
+        for i in range(current_i + 1, n):
+            dur = tracks[i - 1].get("dur_s")
+            prev = prev + dur + last_gap if dur is not None else prev
+            display_starts.append(prev)
+    else:
+        display_starts = list(confirmed_starts)
+
+    show_export = export_status is not None
+    show_lrc = lrc_status is not None
 
     table = Table(box=box.SIMPLE, show_header=True, expand=True,
                   padding=(0, 1), show_edge=False)
@@ -112,41 +119,70 @@ def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
     table.add_column("Länge", width=7, justify="right")
     table.add_column("Start", width=10, justify="right")
     table.add_column("", width=2, justify="center")
+    if show_export:
+        table.add_column("Export", width=7, justify="center")
+    if show_lrc:
+        table.add_column("LRC", width=5, justify="center")
 
     for i, track in enumerate(tracks):
         dur_str = fmt_dur(track["dur_s"]) if "dur_s" in track else "?:??"
         start_val = display_starts[i] if i < len(display_starts) else 0.0
 
-        if i < current_i:
-            start_text = Text(fmt_dur(start_val), style="dim green")
-            status = Text("✓", style="dim green")
+        if phase != "cutting" or i < current_i:
+            start_text = Text(fmt_dur(start_val))
+            status = Text("✓", style="green")
             row_style = "dim"
         elif i == current_i:
             start_text = Text(fmt_dur(start_val), style="bold")
             status = Text("→", style="bold cyan")
             row_style = "bold"
         else:
-            start_text = Text("~" + fmt_dur(start_val), style="dim")
+            start_text = Text("~" + fmt_dur(start_val))
             status = Text("○", style="dim yellow")
             row_style = "dim"
 
-        table.add_row(f"{i+1:02d}", track["title"], dur_str, start_text, status,
-                      style=row_style)
+        row = [f"{i+1:02d}", track["title"], dur_str, start_text, status]
+        if show_export:
+            exp = export_status[i] if i < len(export_status) else ""
+            row.append(Text(exp, style="green" if exp == "✓" else "dim"))
+        if show_lrc:
+            lrc = lrc_status[i] if i < len(lrc_status) else ""
+            row.append(Text(lrc, style="green" if lrc == "✓" else ("red" if lrc == "✗" else "dim")))
 
-    # Info section below separator
-    track = tracks[current_i]
-    est = estimate_start(current_i, tracks, confirmed_starts, last_gap)
-    delta = current_pos - est
-    delta_style = "green" if abs(delta) <= 1.0 else ("yellow" if abs(delta) <= 5.0 else "red")
+        table.add_row(*row, style=row_style)
 
-    info = Text()
-    info.append(f"Track {current_i+1:02d} · {track['title']}\n", style="bold cyan")
-    info.append(f"Position: {fmt_dur(current_pos)}   Schätzung: {fmt_dur(est)}   ")
-    info.append(f"Δ {delta:+.2f}s\n", style=delta_style)
-    info.append("Normton: ", style="dim")
-    info.append("EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim")
-    info.append("[p] abspielen  [+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
-                "[u] rückgängig  [n] Normton  Offset: ±m:ss", style="dim")
+    # Info section
+    if phase == "cutting":
+        track = tracks[current_i]
+        est = estimate_start(current_i, tracks, confirmed_starts, last_gap)
+        delta = current_pos - est
+        delta_style = "green" if abs(delta) <= 1.0 else ("yellow" if abs(delta) <= 5.0 else "red")
+        info = Text()
+        info.append(f"Track {current_i+1:02d} · {track['title']}\n", style="bold cyan")
+        info.append(f"Position: {fmt_dur(current_pos)}   Schätzung: {fmt_dur(est)}   ")
+        info.append(f"Δ {delta:+.2f}s\n", style=delta_style)
+        info.append("Normton: ", style="dim")
+        info.append("EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim")
+        info.append("[p] abspielen  [+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
+                    "[u] rückgängig  [n] Normton  Offset: ±m:ss", style="dim")
+    elif phase == "export":
+        done = sum(1 for s in (export_status or []) if s == "✓")
+        info = Text()
+        info.append(f"Exportiere Tracks: {done}/{n}\n", style="bold")
+        info.append("✓ Abgeschlossen." if done == n else "Bitte warten...", style="green" if done == n else "dim")
+    elif phase == "songtext":
+        found = sum(1 for s in (lrc_status or []) if s == "✓")
+        missing = sum(1 for s in (lrc_status or []) if s == "✗")
+        checked = found + missing
+        info = Text()
+        info.append(f"Suche Songtexte: {checked}/{n}\n", style="bold")
+        if checked == 0:
+            info.append("Bitte warten...", style="dim")
+        else:
+            result_style = "green" if missing == 0 else "yellow"
+            info.append(f"✓ {found} gefunden, {missing} nicht gefunden.", style=result_style)
+    else:
+        info = Text("✓ Fertig.", style="bold green")
 
     total_str = fmt_dur(total_dur) if total_dur else "?:??"
     return Panel(
@@ -256,14 +292,22 @@ def main():
     normton = True
     i = len(starts)
 
+    n = len(data["tracks"])
+
+    def panel(phase="cutting", export_status=None, lrc_status=None):
+        return build_panel(data["artist"], data["album"], data["tracks"],
+                           starts, i, current_start if phase == "cutting" else 0.0,
+                           normton, last_gap, phase, export_status, lrc_status)
+
     with Live(console=console, screen=True, auto_refresh=False) as live:
-        while i < len(data["tracks"]):
+        current_start = 0.0
+
+        # --- Schneiden ---
+        while i < n:
             current_start = estimate_start(i, data["tracks"], starts, last_gap)
 
             while True:
-                live.update(build_panel(
-                    data["artist"], data["album"], data["tracks"],
-                    starts, i, current_start, normton, last_gap))
+                live.update(panel())
                 live.refresh()
 
                 if normton:
@@ -271,9 +315,7 @@ def main():
                 else:
                     play_snippet(flac_path, current_start, preview_duration)
 
-                live.update(build_panel(
-                    data["artist"], data["album"], data["tracks"],
-                    starts, i, current_start, normton, last_gap))
+                live.update(panel())
                 live.refresh()
 
                 action = console.input("  > ").strip().lower()
@@ -312,44 +354,47 @@ def main():
                     except ValueError:
                         pass
 
-    progress_path.unlink(missing_ok=True)
+        progress_path.unlink(missing_ok=True)
 
-    n = len(data["tracks"])
-    print("\n=== TRACKS EXPORTIEREN ===")
-    for i, track in enumerate(data["tracks"]):
-        print(f"  [{i+1:02d}/{n:02d}] {track['title']}...")
-        start_smp = round(starts[i] * sr)
-        if i < len(starts) - 1:
-            len_smp = round((starts[i + 1] - starts[i]) * sr)
-        else:
-            total_dur = float(subprocess.check_output([
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)]))
-            len_smp = round((total_dur * sr) - start_smp)
-        cut_and_tag(
-            flac_path,
-            track_out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac",
-            i + 1, track["title"], data["artist"], data["album"],
-            start_smp, len_smp, out_dir / "cover.jpg")
+        # --- Export ---
+        export_status = [""] * n
+        for idx, track in enumerate(data["tracks"]):
+            live.update(panel("export", export_status))
+            live.refresh()
+            start_smp = round(starts[idx] * sr)
+            if idx < len(starts) - 1:
+                len_smp = round((starts[idx + 1] - starts[idx]) * sr)
+            else:
+                total_dur_s = float(subprocess.check_output([
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)]))
+                len_smp = round((total_dur_s * sr) - start_smp)
+            cut_and_tag(
+                flac_path,
+                track_out_dir / f"{idx+1:02d} - {track['title'].replace('/', '_')}.flac",
+                idx + 1, track["title"], data["artist"], data["album"],
+                start_smp, len_smp, out_dir / "cover.jpg")
+            export_status[idx] = "✓"
 
-    if no_songtext:
-        print("\n(Songtexte übersprungen: --no-songtext)")
-    else:
-        print("\n=== SONGTEXTE LADEN ===")
-        print(f"=== Suche in: {out_dir} ===")
-        result = subprocess.run(["python3", "songtext.py", str(out_dir)],
-                                capture_output=True, text=True)
-        if result.returncode == 0:
-            print("✓ Songtexte erfolgreich verarbeitet.")
-            if result.stdout:
-                print(result.stdout)
-        else:
-            print("✗ Fehler beim Suchen der Songtexte:")
-            print(result.stderr)
-            print("\nBitte prüfe 'songtext.py' auf Import-Fehler.")
+        live.update(panel("export", export_status))
+        live.refresh()
 
-    print(f"\n=== ALLES FERTIG! ===")
-    print(f"Dein fertiges Album liegt in: {out_dir}")
+        # --- Songtexte ---
+        lrc_status = None
+        if not no_songtext:
+            lrc_status = [""] * n
+            live.update(panel("songtext", export_status, lrc_status))
+            live.refresh()
+            subprocess.run(["python3", "songtext.py", str(track_out_dir)],
+                           capture_output=True, text=True)
+            for idx, track in enumerate(data["tracks"]):
+                safe = track["title"].replace("/", "_")
+                lrc_path = track_out_dir / f"{idx+1:02d} - {safe}.lrc"
+                lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
+            live.update(panel("songtext", export_status, lrc_status))
+            live.refresh()
+
+        console.input("\n  [Enter] zum Beenden")
 
 
 if __name__ == "__main__":

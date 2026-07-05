@@ -1,5 +1,6 @@
 import pytest
-from interactive_cutter import parse_offset, fmt_dur, estimate_start
+from cut import parse_offset, estimate_start
+from cut_ui import fmt_dur
 
 
 class TestParseOffset:

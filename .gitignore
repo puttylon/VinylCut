@@ -1,6 +1,7 @@
 *.flac
 input/
 cut_out/
+flacs/
 __pycache__/
 .DS_Store
 genius_token

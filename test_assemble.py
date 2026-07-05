@@ -1,4 +1,4 @@
-from preparer import fmt_time, get_segments, suggest_clean_name
+from assemble import fmt_time, get_segments, suggest_clean_name
 
 
 def h(label, pos):

@@ -22,6 +22,22 @@ DEFAULT_PLAY_DURATION_SEC = 3.0
 console = Console()
 
 
+def _input(prompt: str = "") -> str:
+    """Liest eine Zeile von stdin ohne stdout zu schreiben (funktioniert in screen=True)."""
+    return sys.stdin.readline().rstrip("\n").strip()
+
+
+def _live_ask(live, renderable, prompt: str = "") -> str:
+    """Rendert Inhalt + Prompt-Zeile + 2 Leerzeilen als Puffer, liest dann stdin.
+
+    Die Pufferzeilen stellen sicher, dass der Cursor nie auf der letzten
+    Terminalzeile landet und das Panel durch Enter nach oben scrollt.
+    """
+    live.update(Group(renderable, Text(f"  {prompt}"), Text(""), Text("")))
+    live.refresh()
+    return _input()
+
+
 def parse_offset(s: str) -> float:
     s = s.strip()
     sign = 1.0
@@ -181,8 +197,9 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
         refresh()
         all_cands = mf.search_musicbrainz(artist, album, flac_total)
         if not all_cands:
-            refresh(error="Kein passendes Release gefunden (weder Discogs noch MusicBrainz).")
-            input("\n  [Enter] zum Beenden")
+            _live_ask(live, build_metadata_panel(
+                artist, album, status, error="Kein passendes Release gefunden (weder Discogs noch MusicBrainz)."),
+                "[Enter] zum Beenden")
             sys.exit(1)
         best_cand = min(all_cands, key=lambda c: mf.score_release(c, flac_total, album))
         status.append(f"✓ MusicBrainz: {len(all_cands)} Release(s) gefunden.")
@@ -230,8 +247,9 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
                 break
 
         if not best_cand:
-            refresh(error="Konnte keine validen Tracks laden.")
-            input("\n  [Enter] zum Beenden")
+            _live_ask(live, build_metadata_panel(
+                artist, album, status, error="Konnte keine validen Tracks laden."),
+                "[Enter] zum Beenden")
             sys.exit(1)
 
         # MB fallback wenn keine Tracklängen
@@ -252,8 +270,9 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
     # Interaktiver Override-Loop
     current_cand = best_cand
     while True:
-        refresh(current_cand)
-        ans = input("\n  [Enter] Akzeptieren, Discogs-ID oder MB-ID: ").strip()
+        ans = _live_ask(live,
+                        build_metadata_panel(artist, album, status, current_cand),
+                        "[Enter] Akzeptieren, Discogs-ID oder MB-ID: ")
         if not ans:
             break
         if mf._is_mbid(ans):
@@ -511,9 +530,12 @@ def main():
                 starts, i, estimate_start(i, data["tracks"], starts, last_gap),
                 normton, last_gap))
             live.refresh()
-            ans = input(
-                f"\n  Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
-            ).strip().lower()
+            ans = _live_ask(live,
+                            build_panel(data["artist"], data["album"], data["tracks"],
+                                        starts, i, estimate_start(i, data["tracks"], starts, last_gap),
+                                        True, last_gap),
+                            f"Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
+                            ).lower()
             if ans != "j":
                 history, starts, last_gap, i = [], [], 0.0, 0
                 progress_path.unlink()
@@ -537,10 +559,7 @@ def main():
                 else:
                     play_snippet(flac_path, current_start, preview_duration)
 
-                live.update(panel())
-                live.refresh()
-
-                action = input("  > ").strip().lower()
+                action = _live_ask(live, panel(), "> ")
 
                 if action == 'p':
                     continue
@@ -616,7 +635,10 @@ def main():
             live.update(panel("songtext", export_status, lrc_status))
             live.refresh()
 
-        input("\n  [Enter] zum Beenden")
+        last_phase = "songtext" if not no_songtext else "export"
+        last_es = export_status
+        last_lrc = lrc_status
+        _live_ask(live, panel(last_phase, last_es, last_lrc), "[Enter] zum Beenden")
 
 
 if __name__ == "__main__":

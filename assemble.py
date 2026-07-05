@@ -10,7 +10,7 @@ from pathlib import Path
 def suggest_clean_name(stem: str) -> str:
     return re.sub(r'[-_]raw$', '', stem, flags=re.IGNORECASE).strip()
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0
@@ -233,16 +233,16 @@ def show_crossfade_status(j: int, n: int, a_pos: float, b_pos: float, active: st
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(
-            f"VinylCut Preparer v{__version__}\n"
+            f"VinylCut Assemble v{__version__}\n"
             "\nNutzung:\n"
-            "  python3 preparer.py \"Pfad/zur/Aufnahme.flac\"\n"
+            "  python3 assemble.py \"Pfad/zur/Aufnahme.flac\"\n"
             "\nOptionen:\n"
             "  -h, --help          Diese Hilfe anzeigen\n"
             "  -V, --version       Versionsnummer ausgeben\n"
             "  --preview <Sek>     Crossfade-Vorschau-Länge in Sekunden (Standard: 8)\n"
             "\nPhase 1: Schnitt-/Trim-Punkte interaktiv setzen.\n"
             "Phase 2: Crossfade-Vorschau je Seitengrenze, Feinschneiden.\n"
-            "Ergebnis non-destruktiv in preparer.json gespeichert.\n"
+            "Ergebnis non-destruktiv in assemble.json gespeichert.\n"
             "\nPhase-1-Steuerung:\n"
             "  [p]         Snippet abspielen\n"
             "  [+] / [-]   Punkt ±0,5 s verschieben\n"
@@ -265,7 +265,7 @@ def main():
         sys.exit(0 if len(sys.argv) >= 2 else 1)
 
     if sys.argv[1] in ("-V", "--version"):
-        print(f"preparer.py {__version__}")
+        print(f"assemble.py {__version__}")
         sys.exit(0)
 
     args = sys.argv[1:]
@@ -293,9 +293,9 @@ def main():
 
     out_dir = flac_path.parent / flac_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = out_dir / "preparer.json"
+    progress_path = out_dir / "assemble.json"
 
-    print(f"\n=== VinylCut Preparer v{__version__} ===")
+    print(f"\n=== VinylCut Assemble v{__version__} ===")
     print(f"Datei: {flac_path.name}")
     print("\nAnalysiere...")
 

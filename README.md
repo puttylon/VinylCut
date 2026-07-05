@@ -80,7 +80,7 @@ python3 assemble.py "Artist - Album-raw.flac" --preview 12
 | `n` | Normton aus-/einschalten (Standard: EIN) |
 | Zahl oder `±m:ss` | Aktiven Punkt um Offset verschieben |
 
-Fortschritt wird nach jeder Bestätigung in `<Stem>/preparer.json` gespeichert und beim nächsten Start zum Fortsetzen angeboten.
+Fortschritt wird nach jeder Bestätigung in `<Stem>/assemble.json` gespeichert und beim nächsten Start zum Fortsetzen angeboten.
 
 ---
 

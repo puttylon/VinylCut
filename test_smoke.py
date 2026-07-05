@@ -33,7 +33,7 @@ class TestAssembleSmoke:
     def test_version(self):
         result = run("assemble.py", "--version")
         assert result.returncode == 0
-        assert "assemble.py" in result.stdout or "preparer" in result.stdout.lower()
+        assert "assemble.py" in result.stdout
 
     def test_help(self):
         result = run("assemble.py", "--help")

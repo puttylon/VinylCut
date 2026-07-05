@@ -15,12 +15,25 @@ Dieses Dokument dient als Leitfaden für die KI-Unterstützung in diesem Reposit
   - Abhängigkeiten: `pip install -r requirements.txt`
   - Tests ausführen: `pytest`
   - Code prüfen/formatieren: `ruff check --fix` und `ruff format`
-  - Dokumentation nachziehen — Reihenfolge: **Roadmap → Code → Tests → Dokumentation → Commit**
+- **Dokumentation nachziehen** — Reihenfolge: **Roadmap → Code → Tests → Dokumentation → Commit**
     - Implementiertes Feature in ROADMAP.md als erledigt markieren
     - README.md auf aktuelle Flags, Befehle und Abhängigkeiten aktualisieren
 	-- help auf dann aktuelle Funktionen und Änderung anpassen
+	- jeder Bugfix erhöht die Versionsnummer x.y.n n um eins.
+	
 
-## 3. Code-Stil & Qualität
+## 3. Bibliotheken & Terminal-Code
+
+- **Recherche vor Integration:** Bevor eine neue Bibliothek oder ein neues Framework eingebaut wird, relevante Dokumentation und bekannte Fallstricke prüfen — insbesondere für Terminal-, UI- und I/O-Bibliotheken. Nicht blind draufloscodieren.
+- **Scratch-Skript zuerst:** Neues Bibliotheks-Verhalten (z.B. `rich.Live`, `tty`, ANSI-Escapes) zuerst in einem isolierten Wegwerf-Skript verstehen und manuell testen. Erst danach in Produktionscode integrieren.
+- **Terminal/UI-Änderungen brauchen manuellen Test:** `pytest` prüft keine Terminal-Ausgabe. Änderungen an `rich`, `tty`, `termios` oder ANSI-Escapes sind erst abgeschlossen, wenn der User sie im laufenden Programm bestätigt hat — nicht wenn die Tests grün sind.
+- **Bekannte Rich-Fallen (screen=True):**
+  - `tty.setcbreak()` verwenden, nie `tty.setraw()` — `setraw()` deaktiviert `OPOST`, `\n` wird nicht mehr zu `\r\n` übersetzt, Rich rendert leer.
+  - `input()` und `console.input()` funktionieren nicht korrekt im `Live(screen=True)`-Kontext.
+  - Zeichenweise Eingabe: `sys.stdin.buffer.read(1)` in einer `setcbreak`-Session, Echo manuell im Panel rendern.
+- **UI-Bugfixes erhöhen ebenfalls x.y.N** — auch wenn `pytest` gar nichts davon mitbekommt.
+
+## 4. Code-Stil & Qualität
 - **Stil:** Halte dich an PEP 8 (Standard-Formatierung via Ruff). Nutze sprechende Variablen- und Funktionsnamen in `snake_case`.
 - **Typisierung:** Verwende Type-Hints, um die Lesbarkeit und Wartbarkeit zu verbessern, aber erzwinge sie nicht dogmatisch bei trivialen Skripten.
 - **Dokumentation:** Schreibe Docstrings und Kommentare nur für komplexe, nicht selbsterklärende Logik. Keine Zeit mit dem Dokumentieren von Offensichtlichkeiten verschwenden.

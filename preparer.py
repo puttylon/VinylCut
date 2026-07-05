@@ -10,7 +10,7 @@ from pathlib import Path
 def suggest_clean_name(stem: str) -> str:
     return re.sub(r'[-_]raw$', '', stem, flags=re.IGNORECASE).strip()
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 SILENCE_NOISE_DB = -50
 SILENCE_MIN_DURATION = 5.0
@@ -148,12 +148,17 @@ def show_status(step: dict, current_pos: float, i: int, n_steps: int, normton: b
     print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl oder ±m:ss")
 
 
+def side_letter(index: int) -> str:
+    return chr(ord('A') + index)
+
+
 def build_steps(music_start: float, music_end: float, silences: list) -> list:
-    steps = [{"label": "trim_start", "desc": "Anfang — Musik beginnt hier", "suggested": music_start}]
+    last = side_letter(len(silences))
+    steps = [{"label": "trim_start", "desc": f"Anfang Seite {side_letter(0)} — Musik beginnt hier", "suggested": music_start}]
     for i, s in enumerate(silences):
-        steps.append({"label": f"boundary_{i}_a", "desc": f"Grenze {i+1}/{len(silences)} — A (Ende Musik Seite {i+1})", "suggested": s["start"]})
-        steps.append({"label": f"boundary_{i}_b", "desc": f"Grenze {i+1}/{len(silences)} — B (Anfang Musik Seite {i+2})", "suggested": s["end"]})
-    steps.append({"label": "trim_end", "desc": "Ende — Musik endet hier", "suggested": music_end})
+        steps.append({"label": f"boundary_{i}_a", "desc": f"Übergang {side_letter(i)}→{side_letter(i+1)} — Ende Seite {side_letter(i)}", "suggested": s["start"]})
+        steps.append({"label": f"boundary_{i}_b", "desc": f"Übergang {side_letter(i)}→{side_letter(i+1)} — Anfang Seite {side_letter(i+1)}", "suggested": s["end"]})
+    steps.append({"label": "trim_end", "desc": f"Ende Seite {last} — Musik endet hier", "suggested": music_end})
     return steps
 
 
@@ -214,13 +219,15 @@ def join_with_crossfade(seg1: Path, seg2: Path, out_path: Path, crossfade_sec: f
 def show_crossfade_status(j: int, n: int, a_pos: float, b_pos: float, active: str, normton: bool) -> None:
     a_marker = " ←" if active == 'a' else ""
     b_marker = " ←" if active == 'b' else ""
+    left = side_letter(j)
+    right = side_letter(j + 1)
     normton_str = "EIN" if normton else "aus"
     print()
-    print(f"  === Crossfade-Vorschau: Grenze {j+1}/{n} ===")
-    print(f"  A (Ende Musik):    {fmt_time(a_pos)}  ({a_pos:.1f}s){a_marker}")
-    print(f"  B (Anfang Musik):  {fmt_time(b_pos)}  ({b_pos:.1f}s){b_marker}")
+    print(f"  === Crossfade-Vorschau: Seite {left} → {right} ({j+1}/{n}) ===")
+    print(f"  Ende Seite {left}:    {fmt_time(a_pos)}  ({a_pos:.1f}s){a_marker}")
+    print(f"  Anfang Seite {right}: {fmt_time(b_pos)}  ({b_pos:.1f}s){b_marker}")
     print(f"  Herausgeschnitten: {fmt_time(b_pos - a_pos)}")
-    print(f"  [a]/[b] Fokus | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl oder ±m:ss")
+    print(f"  [a] Ende {left} / [b] Anfang {right} | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl oder ±m:ss")
 
 
 def main():

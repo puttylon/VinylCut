@@ -182,7 +182,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
         all_cands = mf.search_musicbrainz(artist, album, flac_total)
         if not all_cands:
             refresh(error="Kein passendes Release gefunden (weder Discogs noch MusicBrainz).")
-            console.input("\n  [Enter] zum Beenden")
+            input("\n  [Enter] zum Beenden")
             sys.exit(1)
         best_cand = min(all_cands, key=lambda c: mf.score_release(c, flac_total, album))
         status.append(f"✓ MusicBrainz: {len(all_cands)} Release(s) gefunden.")
@@ -231,7 +231,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
 
         if not best_cand:
             refresh(error="Konnte keine validen Tracks laden.")
-            console.input("\n  [Enter] zum Beenden")
+            input("\n  [Enter] zum Beenden")
             sys.exit(1)
 
         # MB fallback wenn keine Tracklängen
@@ -253,7 +253,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
     current_cand = best_cand
     while True:
         refresh(current_cand)
-        ans = console.input("\n  [Enter] Akzeptieren, Discogs-ID oder MB-ID: ").strip()
+        ans = input("\n  [Enter] Akzeptieren, Discogs-ID oder MB-ID: ").strip()
         if not ans:
             break
         if mf._is_mbid(ans):
@@ -511,7 +511,7 @@ def main():
                 starts, i, estimate_start(i, data["tracks"], starts, last_gap),
                 normton, last_gap))
             live.refresh()
-            ans = console.input(
+            ans = input(
                 f"\n  Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
             ).strip().lower()
             if ans != "j":
@@ -540,7 +540,7 @@ def main():
                 live.update(panel())
                 live.refresh()
 
-                action = console.input("  > ").strip().lower()
+                action = input("  > ").strip().lower()
 
                 if action == 'p':
                     continue
@@ -616,7 +616,7 @@ def main():
             live.update(panel("songtext", export_status, lrc_status))
             live.refresh()
 
-        console.input("\n  [Enter] zum Beenden")
+        input("\n  [Enter] zum Beenden")
 
 
 if __name__ == "__main__":

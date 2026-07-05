@@ -43,7 +43,7 @@ def _live_ask(live, renderable, prompt: str = "") -> str:
         return Group(renderable, Rule(style="dim"), inp, Text(""))
 
     try:
-        tty.setraw(fd)
+        tty.setcbreak(fd)  # setraw würde OPOST deaktivieren → Rich rendert falsch
         while True:
             live.update(_render())
             live.refresh()

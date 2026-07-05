@@ -128,7 +128,7 @@ def build_metadata_panel(artist: str, album: str, status_lines: list,
         table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
         table.add_column("Länge", width=7, justify="right", style="dim")
         for idx, t in enumerate(candidate["tracks"], 1):
-            dur = fmt_dur(t["dur_s"]) if "dur_s" in t else "?:??"
+            dur = fmt_dur(t["dur_s"]) if t.get("dur_s") else "?:??"
             table.add_row(f"{idx:02d}", t["title"], dur)
         parts.append(table)
 

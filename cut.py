@@ -39,6 +39,21 @@ def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float
     return starts[i - 1]
 
 
+_LRC_PROVIDERS = [["lrclib"], ["musixmatch"], []]
+
+
+def fetch_lrc(query: str, lrc_path: Path, env: dict) -> bool:
+    """Waterfall: lrclib → musixmatch → alle Provider. Gibt True zurück wenn gefunden."""
+    for providers in _LRC_PROVIDERS:
+        cmd = ["syncedlyrics", query, "-o", str(lrc_path)]
+        if providers:
+            cmd += ["-p"] + providers
+        subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if lrc_path.exists():
+            return True
+    return False
+
+
 def save_progress(progress_path: Path, history: list) -> None:
     with open(progress_path, "w", encoding="utf-8") as f:
         json.dump({"history": history}, f)
@@ -487,7 +502,9 @@ def main():
             )
             live.refresh()
             if i >= n:
-                prompt = f"Alle {n} Tracks bestätigt, Export fehlt noch. Fortsetzen? [j/n]: "
+                prompt = (
+                    f"Alle {n} Tracks bestätigt, Export fehlt noch. Fortsetzen? [j/n]: "
+                )
             else:
                 prompt = f"Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
             ans = live_input(
@@ -583,7 +600,9 @@ def main():
 
         # --- Songtexte vorab fragen ---
         if not no_songtext:
-            ans = live_input(live, panel("export", ["✓"] * n), "Songtexte suchen? [j/n]: ")
+            ans = live_input(
+                live, panel("export", ["✓"] * n), "Songtexte suchen? [j/n]: "
+            )
             if ans.lower() != "j":
                 no_songtext = True
 
@@ -653,12 +672,7 @@ def main():
                 live.update(panel("songtext", export_status, lrc_status))
                 live.refresh()
                 try:
-                    subprocess.run(
-                        ["syncedlyrics", query, "-o", str(lrc_path)],
-                        capture_output=True,
-                        text=True,
-                        env=env,
-                    )
+                    fetch_lrc(query, lrc_path, env)
                 except FileNotFoundError:
                     lrc_status[idx] = "✗"
                     for j in range(idx + 1, n):

@@ -211,13 +211,12 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
     else:
         n_check = min(len(plausible), mf.DEFAULT_MAX_RELEASES)
         status.append(f"Discogs: {len(results)} Ergebnisse, {len(plausible)} plausibel — prüfe bis zu {n_check}...")
+        status.append("")  # Platzhalter — wird pro Pressung überschrieben
         refresh()
 
         for idx, res in enumerate(plausible[:mf.DEFAULT_MAX_RELEASES], 1):
             rel_id = res.get("id")
-            status.append(f"  Pressung {idx}/{n_check} (ID: {rel_id})...")
-            if len(status) > 10:
-                status.pop(0)
+            status[-1] = f"  Pressung {idx}/{n_check} (ID: {rel_id})..."
             refresh(best_cand)
 
             full = mf._get_json(f"{mf.DISCOGS_API}/releases/{rel_id}", token)
@@ -246,7 +245,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
                 best_cand = cand
                 refresh(best_cand)
             if score <= 5.0 and cand["is_vinyl"]:
-                status.append(f"✓ Perfekter Match (Score: {score:.1f}).")
+                status[-1] = f"✓ Perfekter Match (Score: {score:.1f})."
                 refresh(best_cand)
                 break
 

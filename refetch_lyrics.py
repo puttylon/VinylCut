@@ -17,7 +17,7 @@ from pathlib import Path
 from fetch_songtext import _load_env, fetch_lrc
 
 
-def _preview(lrc_path: Path, lines: int = 5) -> str:
+def _preview(lrc_path: Path, lines: int = 20) -> str:
     try:
         content = lrc_path.read_text(encoding="utf-8").strip().splitlines()
         return "\n".join(f"  {line}" for line in content[:lines])

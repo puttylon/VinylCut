@@ -15,6 +15,48 @@ Ausgabeverzeichnis für geschnittene Tracks frei wählbar statt fest neben der Q
 ## ✓ v1.6.0 — Preview-Dauer konfigurierbar (`--preview`)
 Snippet-Länge frei wählbar statt fix 3 Sekunden (z.B. `--preview 5`).
 
+## ✓ v1.7.0–v1.8.x — Rich Vollbild-UI
+Metadatensuche, Schneiden, Export und Songtext-Suche laufen vollständig
+im Rich Live-Screen. Eingabe zeichenweise mit tty.setcbreak.
+
+---
+
+# Refactoring-Roadmap (Architektur-Umbau)
+
+Grundlage: ARCHITECTURE.md. Ziel: stabiler, testbarer, wartbarer Code.
+
+## Schritt 1 — cut_ui.py anlegen
+Alle Rich/tty-Abhängigkeiten aus interactive_cutter.py extrahieren:
+- build_cutting_panel() — umbenannt von build_panel()
+- build_metadata_panel() — unverändert
+- _live_ask() → live_input() — gleiche Logik, sauberer Name
+- fmt_dur() — zieht mit rüber (Display-Hilfsfunktion)
+Ergebnis: eine Datei für alles Rich-spezifische.
+
+## Schritt 2 — Umbenennen der Skripte
+- interactive_cutter.py → cut.py
+- preparer.py → assemble.py
+- cutter_ui.py → cut_ui.py
+- Alle Testdateien und README-Verweise entsprechend anpassen.
+
+## Schritt 3 — interactive_cutter.py / cut.py aufräumen
+Importiert jetzt aus cut_ui. Entfernt doppelten Code.
+Enthält: main(), run_metadata_search(), Logik-Funktionen, cut_and_tag(), play_snippet*()
+Ziel: ~350 Zeilen statt 671.
+
+## Schritt 4 — test_cut_ui.py schreiben
+Panel-Builder mit Console(force_terminal=False) + console.capture() testen.
+Läuft vollautomatisch mit pytest, kein Terminal nötig.
+Import-Pfade in test_interactive_cutter.py / test_cut.py anpassen.
+
+## Schritt 5 — test_smoke.py schreiben + pexpect recherchieren
+Smoke-Tests: --version, --help via subprocess.run().
+Parallel: pexpect in scratch/test_pexpect.py ausprobieren (manuell ausführen),
+Aufwand einschätzen, dann entscheiden ob E2E-Tests lohnen.
+Scratch-Datei danach löschen, Ergebnis in CLAUDE.md.
+
+---
+
 ## Zurückgestellt
 - **Android/Termux-Port** — auf unbestimmte Zeit verschoben.
 

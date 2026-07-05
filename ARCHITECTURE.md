@@ -35,41 +35,41 @@ Regel: Schicht 3 darf Schicht 2 und 1 importieren.
 
 ## 2. Alle Module — Ist → Soll
 
-### `interactive_cutter.py`  [?]
+### `interactive_cutter.py`  [ok neuer name cut.py]
 - Jetzt: 671 Zeilen, alles gemischt (Panels, Input, Logik, API-Calls)
 - Soll: ~350 Zeilen — nur noch Orchestrierung + Logik-Funktionen
   (parse_offset, fmt_dur, estimate_start, cut_and_tag, play_snippet*)
 - Rich und tty werden vollständig nach cutter_ui.py ausgelagert
 
-### `cutter_ui.py`  (neue Datei)  [?]
+### `cutter_ui.py`  (neue Datei)  [ok name ist cut_ui.py]
 - Enthält: build_cutting_panel(), build_metadata_panel(), live_input()
 - Keine API-Calls, kein Dateisystem, kein subprocess
 - Einzige Rich/tty-Abhängigkeit im gesamten Projekt (außer preparer)
 
-### `metadata_fetcher.py`  [?]
+### `metadata_fetcher.py`  [ok]
 - Jetzt: 321 Zeilen, API + Daten-Transformation
 - Soll: unverändert
 - Anmerkung: search_musicbrainz() hat interne print()-Aufrufe die stören
   könnten — bleibt aber für jetzt so (kein Breaking Change)
 
-### `preparer.py`  [?]
+### `preparer.py`  [ok neuer name ist assemble.py]
 - Soll: unverändert
 - Hat eigene Terminal-Interaktion (print/input) — kein Rich, kein Problem
 
-### `songtext.py`  [?]
+### `songtext.py`  [ok]
 - Soll: unverändert
 
 ---
 
 ## 3. Tests — Ist → Soll
 
-### `test_preparer.py`  [?]
+### `test_preparer.py`  [ok]
 - Soll: unverändert (25 Tests, laufen sauber)
 
-### `test_interactive_cutter.py`  [?]
+### `test_interactive_cutter.py`  [ok]
 - Soll: bleibt, ggf. Import-Pfad anpassen wenn fmt_dur nach cutter_ui wandert
 
-### `test_cutter_ui.py`  (neue Datei)  [?]
+### `test_cutter_ui.py`  (neue Datei)  [ok, die tests laufen automatisch oder mit user-interaktion]
 - Testet Panel-Builder ohne echtes Terminal
 - Technik: Console(force_terminal=False) + console.capture()
   → prüft dass Panels ohne Exception rendern und Pflichtfelder enthalten
@@ -80,7 +80,7 @@ Regel: Schicht 3 darf Schicht 2 und 1 importieren.
         console.print(panel)
     assert "Gary Numan" in cap.get()
 
-### `test_smoke.py`  (neue Datei)  [?]
+### `test_smoke.py`  (neue Datei)  [ok]
 - Startet das Programm als subprocess, prüft Exit-Code und Ausgabe
 - Abgedeckt: --version, --help
 - NICHT abgedeckt: echte Terminal-Interaktion (würde pexpect brauchen)
@@ -116,7 +116,7 @@ Für dynamische Panels (z.B. Live-Update während Suche): normale Funktion
 
 ## 5. Rich recherchieren  [?]
 
-### Option A — Scratch-Skript (empfohlen)
+### Option A — Scratch-Skript (empfohlen A: ok)
 - Einmaliges scratch/test_live.py das konkret prüft:
   Wo steht der Cursor nach live.refresh() mit screen=True?
 - Du führst es aus, ich lese die Ausgabe (~15 Minuten, einmalig)
@@ -130,7 +130,7 @@ Für dynamische Panels (z.B. Live-Update während Suche): normale Funktion
 
 ---
 
-## 6. Reihenfolge der Umsetzung  [?]
+## 6. Reihenfolge der Umsetzung  [ok]
 
 Schritt 1: cutter_ui.py anlegen — Panel-Builder + live_input() rein
 Schritt 2: interactive_cutter.py aufräumen — importiert aus cutter_ui

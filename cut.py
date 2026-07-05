@@ -564,6 +564,12 @@ def main():
 
         progress_path.unlink(missing_ok=True)
 
+        # --- Songtexte vorab fragen ---
+        if not no_songtext:
+            ans = live_input(live, panel("cutting"), "Songtexte suchen? [j/n]: ")
+            if ans.lower() != "j":
+                no_songtext = True
+
         # --- Export ---
         export_status = [""] * n
         for idx, track in enumerate(data["tracks"]):
@@ -609,12 +615,8 @@ def main():
         lrc_status = None
         if not no_songtext:
             lrc_status = [""] * n
-            ans = live_input(live, panel("export", export_status), "Songtexte suchen? [j/n]: ")
-            if ans.lower() != "j":
-                no_songtext = True
-            else:
-                live.update(panel("songtext", export_status, lrc_status))
-                live.refresh()
+            live.update(panel("songtext", export_status, lrc_status))
+            live.refresh()
 
         if not no_songtext:
             token_path = Path(__file__).parent / "genius_token"

@@ -566,7 +566,7 @@ def main():
 
         # --- Songtexte vorab fragen ---
         if not no_songtext:
-            ans = live_input(live, panel("cutting"), "Songtexte suchen? [j/n]: ")
+            ans = live_input(live, panel("export", ["✓"] * n), "Songtexte suchen? [j/n]: ")
             if ans.lower() != "j":
                 no_songtext = True
 

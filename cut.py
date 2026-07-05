@@ -140,6 +140,21 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
         live.update(build_metadata_panel(artist, album, status, cand, error))
         live.refresh()
 
+    release_path = out_dir / "release.json"
+    if release_path.exists():
+        with open(release_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        n_tracks = len(saved.get("tracks", []))
+        status.append(f"release.json gefunden — {n_tracks} Tracks.")
+        refresh()
+        ans = live_input(
+            live,
+            build_metadata_panel(artist, album, status),
+            "Gespeicherte Metadaten verwenden? [j/n]: ",
+        )
+        if ans.lower() == "j":
+            return saved
+
     flac_total = mf.get_flac_duration(flac_path)
     status.append(f"Dateidauer: {flac_total / 60:.1f} min — suche Discogs...")
     refresh()

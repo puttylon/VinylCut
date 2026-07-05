@@ -128,7 +128,12 @@ def build_cutting_panel(
         table.add_column("LRC", width=5, justify="center")
 
     for i, track in enumerate(tracks):
-        dur_str = fmt_dur(track["dur_s"]) if "dur_s" in track else "?:??"
+        if i + 1 < len(display_starts):
+            dur_str = fmt_dur(display_starts[i + 1] - display_starts[i])
+        elif "dur_s" in track:
+            dur_str = fmt_dur(track["dur_s"])
+        else:
+            dur_str = "?:??"
         start_val = display_starts[i] if i < len(display_starts) else 0.0
 
         if phase != "cutting" or i < current_i:

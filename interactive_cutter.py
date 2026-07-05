@@ -28,13 +28,17 @@ def _input(prompt: str = "") -> str:
 
 
 def _live_ask(live, renderable, prompt: str = "") -> str:
-    """Rendert Inhalt + Prompt-Zeile + 2 Leerzeilen als Puffer, liest dann stdin.
+    """Rendert Inhalt, positioniert Cursor auf vorletzter Zeile, liest stdin.
 
-    Die Pufferzeilen stellen sicher, dass der Cursor nie auf der letzten
-    Terminalzeile landet und das Panel durch Enter nach oben scrollt.
+    Rich mit screen=True füllt den Bildschirm mit Padding und lässt den
+    Cursor am Ende der letzten Zeile. Per ANSI-Escape setzen wir ihn gezielt
+    auf terminal_height - 2, damit Enter keinen Scroll auslöst.
     """
-    live.update(Group(renderable, Text(f"  {prompt}"), Text(""), Text("")))
+    live.update(renderable)
     live.refresh()
+    h = console.height
+    sys.stdout.write(f"\x1b[{h - 1};1H\x1b[2K  {prompt}")
+    sys.stdout.flush()
     return _input()
 
 

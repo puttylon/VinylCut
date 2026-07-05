@@ -156,6 +156,8 @@ pip install -r requirements.txt
 pip install syncedlyrics
 ```
 
+`requirements.txt` enthält: `pytest`, `rich`
+
 **Systemprogramme:**
 - `ffprobe` / `ffplay` / `ffmpeg` — Analyse, Playback, Crossfade, Normton
 - `sox` — Schneiden, Normalisierung, DC-Offset, Kanalausgleich

@@ -4,9 +4,19 @@ import json
 import subprocess
 from pathlib import Path
 
-__version__ = "1.6.0"
+from rich.console import Console, Group
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.rule import Rule
+from rich import box
+
+__version__ = "1.7.0"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
+
+console = Console()
 
 
 def parse_offset(s: str) -> float:
@@ -30,19 +40,6 @@ def fmt_dur(seconds: float) -> str:
     return f"{sign}{m}:{s:05.2f}"
 
 
-def show_status(i: int, data: dict, current_start: float, starts: list, last_gap: float, normton: bool = False) -> None:
-    tracks = data["tracks"]
-    n = len(tracks)
-    print()
-    if i > 0:
-        prev = tracks[i - 1]
-        laenge = current_start - starts[i - 1]
-        soll = f"  (Soll: {fmt_dur(prev['dur_s'])})" if "dur_s" in prev else ""
-        print(f"  Tracklänge [{i:02d}/{n:02d}] \"{prev['title']}\": {fmt_dur(laenge)}{soll}")
-    print(f"  Startpunkt [{i+1:02d}/{n:02d}] \"{tracks[i]['title']}\": {fmt_dur(current_start)}")
-    normton_str = "EIN" if normton else "aus"
-    print(f"  [p]lay | [+] +0.5s | [-] -0.5s | [++] +2s | [--] -2s | [ok] bestätigen | [u]ndo | [n]ormton: {normton_str} | Offset: Zahl in s oder ±m:ss")
-
 def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float:
     if i == 0:
         return 0.0
@@ -57,8 +54,10 @@ def save_progress(progress_path: Path, history: list) -> None:
 
 
 def play_snippet(flac_path: Path, start_time: float, duration: float) -> None:
-    subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet",
-                    "-ss", f"{start_time:.3f}", "-t", str(duration), str(flac_path)])
+    subprocess.run(
+        ["ffplay", "-nodisp", "-autoexit", "-v", "quiet",
+         "-ss", f"{start_time:.3f}", "-t", str(duration), str(flac_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) -> None:
@@ -76,15 +75,88 @@ def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) 
     ]
     ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
-                   stdin=ffmpeg.stdout, stderr=subprocess.DEVNULL)
+                   stdin=ffmpeg.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     ffmpeg.wait()
+
 
 def cut_and_tag(flac_path, out_file, track_num, title, artist, album, start_s, length_s, cover_path):
     comment = f"interactive_cutter.py v{__version__}"
-    subprocess.run(["sox", str(flac_path), str(out_file), "trim", f"{start_s}s", f"{length_s}s"], capture_output=True)
-    subprocess.run(["metaflac", "--remove-all-tags", f"--set-tag=ARTIST={artist}", f"--set-tag=ALBUM={album}", f"--set-tag=TITLE={title}", f"--set-tag=TRACKNUMBER={track_num}", f"--set-tag=COMMENT={comment}", str(out_file)], capture_output=True)
+    subprocess.run(["sox", str(flac_path), str(out_file), "trim", f"{start_s}s", f"{length_s}s"],
+                   capture_output=True)
+    subprocess.run(["metaflac", "--remove-all-tags",
+                    f"--set-tag=ARTIST={artist}", f"--set-tag=ALBUM={album}",
+                    f"--set-tag=TITLE={title}", f"--set-tag=TRACKNUMBER={track_num}",
+                    f"--set-tag=COMMENT={comment}", str(out_file)], capture_output=True)
     if cover_path.exists():
-        subprocess.run(["metaflac", f"--import-picture-from={cover_path}", str(out_file)], capture_output=True)
+        subprocess.run(["metaflac", f"--import-picture-from={cover_path}", str(out_file)],
+                       capture_output=True)
+
+
+def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
+                current_i: int, current_pos: float, normton: bool, last_gap: float) -> Panel:
+    n = len(tracks)
+    total_dur = sum(t.get("dur_s", 0.0) for t in tracks)
+
+    # Compute display starts: confirmed + current + chained estimates for future tracks
+    display_starts = list(confirmed_starts) + [current_pos]
+    prev = current_pos
+    for i in range(current_i + 1, n):
+        dur = tracks[i - 1].get("dur_s")
+        prev = prev + dur + last_gap if dur is not None else prev
+        display_starts.append(prev)
+
+    table = Table(box=box.SIMPLE, show_header=True, expand=True,
+                  padding=(0, 1), show_edge=False)
+    table.add_column("#", width=3, justify="right")
+    table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
+    table.add_column("Länge", width=7, justify="right")
+    table.add_column("Start", width=10, justify="right")
+    table.add_column("", width=2, justify="center")
+
+    for i, track in enumerate(tracks):
+        dur_str = fmt_dur(track["dur_s"]) if "dur_s" in track else "?:??"
+        start_val = display_starts[i] if i < len(display_starts) else 0.0
+
+        if i < current_i:
+            start_text = Text(fmt_dur(start_val), style="dim green")
+            status = Text("✓", style="dim green")
+            row_style = "dim"
+        elif i == current_i:
+            start_text = Text(fmt_dur(start_val), style="bold")
+            status = Text("→", style="bold cyan")
+            row_style = "bold"
+        else:
+            start_text = Text("~" + fmt_dur(start_val), style="dim")
+            status = Text("○", style="dim yellow")
+            row_style = "dim"
+
+        table.add_row(f"{i+1:02d}", track["title"], dur_str, start_text, status,
+                      style=row_style)
+
+    # Info section below separator
+    track = tracks[current_i]
+    est = estimate_start(current_i, tracks, confirmed_starts, last_gap)
+    delta = current_pos - est
+    delta_style = "green" if abs(delta) <= 1.0 else ("yellow" if abs(delta) <= 5.0 else "red")
+
+    info = Text()
+    info.append(f"Track {current_i+1:02d} · {track['title']}\n", style="bold cyan")
+    info.append(f"Position: {fmt_dur(current_pos)}   Schätzung: {fmt_dur(est)}   ")
+    info.append(f"Δ {delta:+.2f}s\n", style=delta_style)
+    info.append("Normton: ", style="dim")
+    info.append("EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim")
+    info.append("[p] abspielen  [+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
+                "[u] rückgängig  [n] Normton  Offset: ±m:ss", style="dim")
+
+    total_str = fmt_dur(total_dur) if total_dur else "?:??"
+    return Panel(
+        Group(table, Rule(style="dim"), info),
+        title=f"[bold]{artist} · {album}[/bold]",
+        subtitle=f"[dim]{n} Tracks · {total_str}[/dim]",
+        expand=True,
+        border_style="blue dim",
+    )
+
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
@@ -104,7 +176,7 @@ def main():
             "  [++]/[--]   Start ±2,0 s verschieben\n"
             "  [ok]        Startpunkt bestätigen, nächster Track\n"
             "  [u]         Letztes ok rückgängig machen\n"
-            "  [n]         Normton (440 Hz, 0,25 s) vor Snippet ein-/ausschalten\n"
+            "  [n]         Normton (220 Hz, 0,25 s) vor Snippet aus-/einschalten (Standard: EIN)\n"
             "  Zahl/±m:ss  Start um Offset verschieben (z.B. +2:34 oder -30)"
         )
         sys.exit(0 if len(sys.argv) >= 2 else 1)
@@ -147,22 +219,23 @@ def main():
     out_dir = flac_path.parent / flac_path.stem
     track_out_dir = Path(out_arg).resolve() if out_arg else out_dir
     track_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Metadaten holen
+
     subprocess.run(["python3", "metadata_fetcher.py", str(flac_path)])
-    
+
     with open(out_dir / "release.json", "r", encoding="utf-8") as f:
         data = json.load(f)
-        
-    # Robustes Laden der Längen
+
     for track in data["tracks"]:
         if "dur_s" not in track and "duration" in track:
             m, s = map(int, track["duration"].split(":"))
             track["dur_s"] = m * 60 + s
-    
-    probe = json.loads(subprocess.run(["ffprobe", "-v", "quiet", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "json", str(flac_path)], capture_output=True, text=True).stdout)
+
+    probe = json.loads(subprocess.run(
+        ["ffprobe", "-v", "quiet", "-select_streams", "a:0",
+         "-show_entries", "stream=sample_rate", "-of", "json", str(flac_path)],
+        capture_output=True, text=True).stdout)
     sr = int(probe["streams"][0]["sample_rate"])
-    
+
     progress_path = out_dir / "progress.json"
     history: list = []
     starts: list = []
@@ -182,52 +255,63 @@ def main():
 
     normton = True
     i = len(starts)
-    while i < len(data["tracks"]):
-        current_start = estimate_start(i, data["tracks"], starts, last_gap)
 
-        while True:
-            show_status(i, data, current_start, starts, last_gap, normton)
-            if normton:
-                play_snippet_with_tone(flac_path, current_start, preview_duration)
-            else:
-                play_snippet(flac_path, current_start, preview_duration)
-            action = input("  > ").strip().lower()
-            if action == 'p':
-                continue
-            elif action == '+':
-                current_start += 0.5
-            elif action == '-':
-                current_start = max(0.0, current_start - 0.5)
-            elif action == '++':
-                current_start += 2.0
-            elif action == '--':
-                current_start = max(0.0, current_start - 2.0)
-            elif action == 'n':
-                normton = not normton
-            elif action == 'u':
-                if i == 0:
-                    print("  Kein vorheriger Track.")
+    with Live(console=console, screen=True, auto_refresh=False) as live:
+        while i < len(data["tracks"]):
+            current_start = estimate_start(i, data["tracks"], starts, last_gap)
+
+            while True:
+                live.update(build_panel(
+                    data["artist"], data["album"], data["tracks"],
+                    starts, i, current_start, normton, last_gap))
+                live.refresh()
+
+                if normton:
+                    play_snippet_with_tone(flac_path, current_start, preview_duration)
                 else:
-                    history.pop()
-                    starts = [h["start"] for h in history]
-                    last_gap = history[-1]["last_gap"] if history else 0.0
+                    play_snippet(flac_path, current_start, preview_duration)
+
+                live.update(build_panel(
+                    data["artist"], data["album"], data["tracks"],
+                    starts, i, current_start, normton, last_gap))
+                live.refresh()
+
+                action = console.input("  > ").strip().lower()
+
+                if action == 'p':
+                    continue
+                elif action == '+':
+                    current_start += 0.5
+                elif action == '-':
+                    current_start = max(0.0, current_start - 0.5)
+                elif action == '++':
+                    current_start += 2.0
+                elif action == '--':
+                    current_start = max(0.0, current_start - 2.0)
+                elif action == 'n':
+                    normton = not normton
+                elif action == 'u':
+                    if i > 0:
+                        history.pop()
+                        starts = [h["start"] for h in history]
+                        last_gap = history[-1]["last_gap"] if history else 0.0
+                        save_progress(progress_path, history)
+                        i -= 1
+                        break
+                elif action == 'ok':
+                    starts.append(current_start)
+                    if i > 0 and "dur_s" in data["tracks"][i - 1]:
+                        last_gap = current_start - (starts[i - 1] + data["tracks"][i - 1]["dur_s"])
+                    history.append({"start": current_start, "last_gap": last_gap})
                     save_progress(progress_path, history)
-                    i -= 1
+                    i += 1
                     break
-            elif action == 'ok':
-                starts.append(current_start)
-                if i > 0 and "dur_s" in data["tracks"][i-1]:
-                    last_gap = current_start - (starts[i-1] + data["tracks"][i-1]["dur_s"])
-                history.append({"start": current_start, "last_gap": last_gap})
-                save_progress(progress_path, history)
-                i += 1
-                break
-            else:
-                try:
-                    current_start = max(0.0, current_start + parse_offset(action))
-                except ValueError:
-                    print("  Ungültige Eingabe.")
-                                               
+                else:
+                    try:
+                        current_start = max(0.0, current_start + parse_offset(action))
+                    except ValueError:
+                        pass
+
     progress_path.unlink(missing_ok=True)
 
     n = len(data["tracks"])
@@ -236,18 +320,25 @@ def main():
         print(f"  [{i+1:02d}/{n:02d}] {track['title']}...")
         start_smp = round(starts[i] * sr)
         if i < len(starts) - 1:
-            len_smp = round((starts[i+1] - starts[i]) * sr)
+            len_smp = round((starts[i + 1] - starts[i]) * sr)
         else:
-            total_dur = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)]))
+            total_dur = float(subprocess.check_output([
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(flac_path)]))
             len_smp = round((total_dur * sr) - start_smp)
-        cut_and_tag(flac_path, track_out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac", i+1, track["title"], data["artist"], data["album"], start_smp, len_smp, out_dir / "cover.jpg")
+        cut_and_tag(
+            flac_path,
+            track_out_dir / f"{i+1:02d} - {track['title'].replace('/', '_')}.flac",
+            i + 1, track["title"], data["artist"], data["album"],
+            start_smp, len_smp, out_dir / "cover.jpg")
 
     if no_songtext:
         print("\n(Songtexte übersprungen: --no-songtext)")
     else:
         print("\n=== SONGTEXTE LADEN ===")
         print(f"=== Suche in: {out_dir} ===")
-        result = subprocess.run(["python3", "songtext.py", str(out_dir)], capture_output=True, text=True)
+        result = subprocess.run(["python3", "songtext.py", str(out_dir)],
+                                capture_output=True, text=True)
         if result.returncode == 0:
             print("✓ Songtexte erfolgreich verarbeitet.")
             if result.stdout:
@@ -259,6 +350,7 @@ def main():
 
     print(f"\n=== ALLES FERTIG! ===")
     print(f"Dein fertiges Album liegt in: {out_dir}")
+
 
 if __name__ == "__main__":
     main()

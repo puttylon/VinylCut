@@ -77,17 +77,27 @@ def main():
             not_found += 1
             continue
 
-        print(_preview(tmp_path))
+        new_content = tmp_path.read_bytes()
+        old_content = lrc_path.read_bytes() if lrc_path.exists() else None
 
-        ans = input("   [Enter] übernehmen  [s] überspringen: ").strip().lower()
-        if ans == "s":
+        if old_content == new_content:
+            print("   = unverändert.")
             tmp_path.unlink(missing_ok=True)
             skipped += 1
-        else:
-            lrc_path.write_bytes(tmp_path.read_bytes())
-            tmp_path.unlink(missing_ok=True)
-            print("   ✓ gespeichert.")
-            updated += 1
+            continue
+
+        if old_content is not None:
+            print(_preview(tmp_path))
+            ans = input("   [Enter] übernehmen  [s] überspringen: ").strip().lower()
+            if ans == "s":
+                tmp_path.unlink(missing_ok=True)
+                skipped += 1
+                continue
+
+        lrc_path.write_bytes(new_content)
+        tmp_path.unlink(missing_ok=True)
+        print("   ✓ gespeichert.")
+        updated += 1
 
         print()
 

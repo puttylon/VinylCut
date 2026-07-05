@@ -84,7 +84,8 @@ def main():
             tmp_path.unlink(missing_ok=True)
             skipped += 1
         else:
-            tmp_path.replace(lrc_path)
+            lrc_path.write_bytes(tmp_path.read_bytes())
+            tmp_path.unlink(missing_ok=True)
             print("   ✓ gespeichert.")
             updated += 1
 

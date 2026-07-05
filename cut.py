@@ -611,17 +611,37 @@ def main():
             lrc_status = [""] * n
             live.update(panel("songtext", export_status, lrc_status))
             live.refresh()
-            subprocess.run(
-                ["python3", "fetch_songtext.py", str(track_out_dir)],
-                capture_output=True,
-                text=True,
-            )
+
+            token_path = Path(__file__).parent / "genius_token"
+            env = os.environ.copy()
+            if token_path.exists():
+                token = token_path.read_text().strip()
+                if token:
+                    env["GENIUS_ACCESS_TOKEN"] = token
+
+            artist = data.get("artist", "")
             for idx, track in enumerate(data["tracks"]):
                 safe = track["title"].replace("/", "_")
                 lrc_path = track_out_dir / f"{idx + 1:02d} - {safe}.lrc"
+                query = f"{artist} {track['title']}".strip()
+                lrc_status[idx] = "…"
+                live.update(panel("songtext", export_status, lrc_status))
+                live.refresh()
+                try:
+                    subprocess.run(
+                        ["syncedlyrics", query, "-o", str(lrc_path)],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                    )
+                except FileNotFoundError:
+                    lrc_status[idx] = "✗"
+                    for j in range(idx + 1, n):
+                        lrc_status[j] = "✗"
+                    break
                 lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
-            live.update(panel("songtext", export_status, lrc_status))
-            live.refresh()
+                live.update(panel("songtext", export_status, lrc_status))
+                live.refresh()
 
         last_phase = "songtext" if not no_songtext else "export"
         last_es = export_status

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import sys
 import json
+import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
+import metadata_fetcher as mf
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
@@ -12,7 +15,7 @@ from rich.text import Text
 from rich.rule import Rule
 from rich import box
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 
@@ -92,6 +95,221 @@ def cut_and_tag(flac_path, out_file, track_num, title, artist, album, start_s, l
                        capture_output=True)
 
 
+# ---------------------------------------------------------------------------
+# Metadata panel
+# ---------------------------------------------------------------------------
+
+def build_metadata_panel(artist: str, album: str, status_lines: list,
+                          candidate: dict = None, error: str = None) -> Panel:
+    parts = []
+
+    status_text = Text()
+    for line in status_lines[-8:]:
+        status_text.append(line + "\n", style="dim")
+    parts.append(status_text)
+
+    if error:
+        parts.append(Text(f"\n✗ {error}", style="bold red"))
+    elif candidate:
+        parts.append(Rule(style="dim"))
+
+        cid = candidate["id"]
+        source = (f"https://musicbrainz.org/release/{cid[3:]}"
+                  if cid.startswith("mb:") else
+                  f"https://www.discogs.com/release/{cid}")
+        info = Text()
+        info.append(f"{candidate['title']}\n", style="bold")
+        info.append(f"Format: {candidate['format']}   Quelle: {source}\n", style="dim")
+        parts.append(info)
+
+        table = Table(box=box.SIMPLE, show_header=False, expand=True,
+                      padding=(0, 1), show_edge=False)
+        table.add_column("#", width=3, justify="right", style="dim")
+        table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
+        table.add_column("Länge", width=7, justify="right", style="dim")
+        for idx, t in enumerate(candidate["tracks"], 1):
+            dur = fmt_dur(t["dur_s"]) if "dur_s" in t else "?:??"
+            table.add_row(f"{idx:02d}", t["title"], dur)
+        parts.append(table)
+
+    return Panel(
+        Group(*parts),
+        title=f"[bold]{artist} · {album}[/bold]",
+        subtitle="[dim]Metadatensuche[/dim]",
+        expand=True,
+        border_style="blue dim",
+    )
+
+
+def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dict:
+    stem = flac_path.stem
+    artist, album = stem.split(" - ", 1) if " - " in stem else ("Unknown", stem)
+    status: list[str] = []
+    best_cand = None
+    all_cands: list = []
+
+    def refresh(cand=None, error=None):
+        live.update(build_metadata_panel(artist, album, status, cand, error))
+        live.refresh()
+
+    flac_total = mf.get_flac_duration(flac_path)
+    status.append(f"Dateidauer: {flac_total / 60:.1f} min — suche Discogs...")
+    refresh()
+
+    # Discogs search
+    import urllib.parse
+    results = []
+    for page in range(1, 3):
+        query = urllib.parse.quote(f"{artist} {album}")
+        data = mf._get_json(
+            f"{mf.DISCOGS_API}/database/search?type=release&q={query}&per_page=50&page={page}", token)
+        if not data:
+            break
+        results += data.get("results", [])
+        if page >= data.get("pagination", {}).get("pages", 1):
+            break
+
+    plausible = [r for r in results if mf._name_matches(r.get("title", "").split(" - ")[-1], album)]
+    plausible.sort(key=lambda r: (
+        0 if "vinyl" in " ".join(r.get("format", [])).lower() else 1,
+        -r.get("community", {}).get("have", 0)))
+
+    best_score = 9999.0
+
+    if not plausible:
+        status.append("Keine Discogs-Treffer — suche MusicBrainz...")
+        refresh()
+        all_cands = mf.search_musicbrainz(artist, album, flac_total)
+        if not all_cands:
+            refresh(error="Kein passendes Release gefunden (weder Discogs noch MusicBrainz).")
+            console.input("\n  [Enter] zum Beenden")
+            sys.exit(1)
+        best_cand = min(all_cands, key=lambda c: mf.score_release(c, flac_total, album))
+        status.append(f"✓ MusicBrainz: {len(all_cands)} Release(s) gefunden.")
+        refresh(best_cand)
+    else:
+        n_check = min(len(plausible), mf.DEFAULT_MAX_RELEASES)
+        status.append(f"Discogs: {len(results)} Ergebnisse, {len(plausible)} plausibel — prüfe bis zu {n_check}...")
+        refresh()
+
+        for idx, res in enumerate(plausible[:mf.DEFAULT_MAX_RELEASES], 1):
+            rel_id = res.get("id")
+            status.append(f"  Pressung {idx}/{n_check} (ID: {rel_id})...")
+            if len(status) > 10:
+                status.pop(0)
+            refresh(best_cand)
+
+            full = mf._get_json(f"{mf.DISCOGS_API}/releases/{rel_id}", token)
+            if not full:
+                continue
+            tracks = [{"title": (t.get("title") or "Track").strip(),
+                       "dur_s": mf._parse_discogs_duration(t.get("duration", ""))}
+                      for t in full.get("tracklist", []) if t.get("type_") in (None, "track")]
+            if not tracks:
+                continue
+            fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
+            cand = {
+                "id": str(rel_id),
+                "title": full.get("title", ""),
+                "format": fmts,
+                "is_vinyl": "vinyl" in fmts.lower(),
+                "tracks": tracks,
+                "cover_url": (full.get("images") or [{}])[0].get("uri"),
+                "community_have": (res.get("community", {}).get("have", 0)
+                                   if isinstance(res.get("community"), dict) else 0),
+            }
+            all_cands.append(cand)
+            score = mf.score_release(cand, flac_total, album)
+            if score < best_score:
+                best_score = score
+                best_cand = cand
+                refresh(best_cand)
+            if score <= 5.0 and cand["is_vinyl"]:
+                status.append(f"✓ Perfekter Match (Score: {score:.1f}).")
+                refresh(best_cand)
+                break
+
+        if not best_cand:
+            refresh(error="Konnte keine validen Tracks laden.")
+            console.input("\n  [Enter] zum Beenden")
+            sys.exit(1)
+
+        # MB fallback wenn keine Tracklängen
+        if not any(t.get("dur_s") for t in best_cand["tracks"]):
+            status.append("Keine Tracklängen — suche MusicBrainz...")
+            refresh(best_cand)
+            mb_cands = mf.search_musicbrainz(artist, album, flac_total)
+            if mb_cands:
+                mb_best = min(mb_cands, key=lambda c: mf.score_release(c, flac_total, album))
+                if any(t.get("dur_s") for t in mb_best["tracks"]):
+                    status.append("✓ MusicBrainz-Alternative mit Tracklängen.")
+                    best_cand = mb_best
+                    for c in mb_cands:
+                        if not any(x["id"] == c["id"] for x in all_cands):
+                            all_cands.append(c)
+                    refresh(best_cand)
+
+    # Interaktiver Override-Loop
+    current_cand = best_cand
+    while True:
+        refresh(current_cand)
+        ans = console.input("\n  [Enter] Akzeptieren, Discogs-ID oder MB-ID: ").strip()
+        if not ans:
+            break
+        if mf._is_mbid(ans):
+            status.append(f"Lade MB-Release {ans[:8]}...")
+            refresh(current_cand)
+            new_cand = mf.fetch_musicbrainz_by_id(ans)
+        else:
+            status.append(f"Lade Discogs-ID {ans}...")
+            refresh(current_cand)
+            new_cand = mf.fetch_discogs_by_id(ans, token)
+        if new_cand:
+            current_cand = new_cand
+            if not any(c["id"] == new_cand["id"] for c in all_cands):
+                all_cands.append(new_cand)
+        else:
+            status.append("✗ Fehler: ID nicht gefunden oder keine validen Tracks.")
+
+    best_cand = current_cand
+    for t in best_cand["tracks"]:
+        if not t.get("dur_s"):
+            t.pop("dur_s", None)
+
+    # release.json schreiben
+    with open(out_dir / "release.json", "w", encoding="utf-8") as f:
+        json.dump({"artist": artist, "album": album,
+                   "release_id": best_cand["id"], "tracks": best_cand["tracks"]},
+                  f, indent=2, ensure_ascii=False)
+
+    # Cover herunterladen
+    cover_sorted = sorted(all_cands,
+                          key=lambda c: (0 if c["is_vinyl"] else 1, -c["community_have"]))
+    for c in cover_sorted:
+        if not c.get("cover_url"):
+            continue
+        try:
+            with urllib.request.urlopen(
+                    urllib.request.Request(c["cover_url"],
+                                          headers={"User-Agent": mf.DISCOGS_UA}),
+                    timeout=20) as r:
+                (out_dir / "cover.jpg").write_bytes(r.read())
+                status.append("✓ Cover gespeichert.")
+            break
+        except Exception:
+            continue
+    else:
+        status.append("⚠ Cover-Download fehlgeschlagen.")
+
+    refresh(current_cand)
+    return {"artist": artist, "album": album,
+            "release_id": best_cand["id"], "tracks": best_cand["tracks"]}
+
+
+# ---------------------------------------------------------------------------
+# Cutting panel
+# ---------------------------------------------------------------------------
+
 def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
                 current_i: int, current_pos: float, normton: bool, last_gap: float,
                 phase: str = "cutting",
@@ -130,28 +348,26 @@ def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
 
         if phase != "cutting" or i < current_i:
             start_text = Text(fmt_dur(start_val))
-            status = Text("✓", style="green")
+            status_sym = Text("✓", style="green")
             row_style = "dim"
         elif i == current_i:
             start_text = Text(fmt_dur(start_val), style="bold")
-            status = Text("→", style="bold cyan")
+            status_sym = Text("→", style="bold cyan")
             row_style = "bold"
         else:
             start_text = Text("~" + fmt_dur(start_val))
-            status = Text("○", style="dim yellow")
+            status_sym = Text("○", style="dim yellow")
             row_style = "dim"
 
-        row = [f"{i+1:02d}", track["title"], dur_str, start_text, status]
+        row = [f"{i+1:02d}", track["title"], dur_str, start_text, status_sym]
         if show_export:
             exp = export_status[i] if i < len(export_status) else ""
             row.append(Text(exp, style="green" if exp == "✓" else "dim"))
         if show_lrc:
             lrc = lrc_status[i] if i < len(lrc_status) else ""
             row.append(Text(lrc, style="green" if lrc == "✓" else ("red" if lrc == "✗" else "dim")))
-
         table.add_row(*row, style=row_style)
 
-    # Info section
     if phase == "cutting":
         track = tracks[current_i]
         est = estimate_start(current_i, tracks, confirmed_starts, last_gap)
@@ -169,7 +385,8 @@ def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
         done = sum(1 for s in (export_status or []) if s == "✓")
         info = Text()
         info.append(f"Exportiere Tracks: {done}/{n}\n", style="bold")
-        info.append("✓ Abgeschlossen." if done == n else "Bitte warten...", style="green" if done == n else "dim")
+        info.append("✓ Abgeschlossen." if done == n else "Bitte warten...",
+                    style="green" if done == n else "dim")
     elif phase == "songtext":
         found = sum(1 for s in (lrc_status or []) if s == "✓")
         missing = sum(1 for s in (lrc_status or []) if s == "✗")
@@ -179,8 +396,8 @@ def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
         if checked == 0:
             info.append("Bitte warten...", style="dim")
         else:
-            result_style = "green" if missing == 0 else "yellow"
-            info.append(f"✓ {found} gefunden, {missing} nicht gefunden.", style=result_style)
+            info.append(f"✓ {found} gefunden, {missing} nicht gefunden.",
+                        style="green" if missing == 0 else "yellow")
     else:
         info = Text("✓ Fertig.", style="bold green")
 
@@ -193,6 +410,10 @@ def build_panel(artist: str, album: str, tracks: list, confirmed_starts: list,
         border_style="blue dim",
     )
 
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
@@ -255,52 +476,53 @@ def main():
     out_dir = flac_path.parent / flac_path.stem
     track_out_dir = Path(out_arg).resolve() if out_arg else out_dir
     track_out_dir.mkdir(parents=True, exist_ok=True)
-
-    subprocess.run(["python3", "metadata_fetcher.py", str(flac_path)])
-
-    with open(out_dir / "release.json", "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    for track in data["tracks"]:
-        if "dur_s" not in track and "duration" in track:
-            m, s = map(int, track["duration"].split(":"))
-            track["dur_s"] = m * 60 + s
-
-    probe = json.loads(subprocess.run(
-        ["ffprobe", "-v", "quiet", "-select_streams", "a:0",
-         "-show_entries", "stream=sample_rate", "-of", "json", str(flac_path)],
-        capture_output=True, text=True).stdout)
-    sr = int(probe["streams"][0]["sample_rate"])
-
-    progress_path = out_dir / "progress.json"
-    history: list = []
-    starts: list = []
-    last_gap = 0.0
-
-    if progress_path.exists():
-        with open(progress_path, "r", encoding="utf-8") as f:
-            saved = json.load(f)
-        history = saved["history"]
-        starts = [h["start"] for h in history]
-        last_gap = history[-1]["last_gap"] if history else 0.0
-        n_done, n_total = len(starts), len(data["tracks"])
-        ans = input(f"\n=== Fortschritt gefunden ({n_done}/{n_total} Tracks). Fortsetzen? [j/n] ===\n> ").strip().lower()
-        if ans != "j":
-            history, starts, last_gap = [], [], 0.0
-            progress_path.unlink()
-
-    normton = True
-    i = len(starts)
-
-    n = len(data["tracks"])
-
-    def panel(phase="cutting", export_status=None, lrc_status=None):
-        return build_panel(data["artist"], data["album"], data["tracks"],
-                           starts, i, current_start if phase == "cutting" else 0.0,
-                           normton, last_gap, phase, export_status, lrc_status)
+    token = os.environ.get("DISCOGS_TOKEN", "")
 
     with Live(console=console, screen=True, auto_refresh=False) as live:
+
+        # --- Metadaten ---
+        data = run_metadata_search(live, flac_path, out_dir, token)
+
+        # FLAC-Samplerate
+        probe = json.loads(subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "a:0",
+             "-show_entries", "stream=sample_rate", "-of", "json", str(flac_path)],
+            capture_output=True, text=True).stdout)
+        sr = int(probe["streams"][0]["sample_rate"])
+
+        n = len(data["tracks"])
+        progress_path = out_dir / "progress.json"
+        history: list = []
+        starts: list = []
+        last_gap = 0.0
+        i = 0
+        normton = True
         current_start = 0.0
+
+        if progress_path.exists():
+            with open(progress_path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            history = saved["history"]
+            starts = [h["start"] for h in history]
+            last_gap = history[-1]["last_gap"] if history else 0.0
+            i = len(starts)
+            live.update(build_panel(
+                data["artist"], data["album"], data["tracks"],
+                starts, i, estimate_start(i, data["tracks"], starts, last_gap),
+                normton, last_gap))
+            live.refresh()
+            ans = console.input(
+                f"\n  Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
+            ).strip().lower()
+            if ans != "j":
+                history, starts, last_gap, i = [], [], 0.0, 0
+                progress_path.unlink()
+
+        def panel(phase="cutting", export_status=None, lrc_status=None):
+            return build_panel(
+                data["artist"], data["album"], data["tracks"],
+                starts, i, current_start if phase == "cutting" else 0.0,
+                normton, last_gap, phase, export_status, lrc_status)
 
         # --- Schneiden ---
         while i < n:

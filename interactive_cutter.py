@@ -22,24 +22,47 @@ DEFAULT_PLAY_DURATION_SEC = 3.0
 console = Console()
 
 
-def _input(prompt: str = "") -> str:
-    """Liest eine Zeile von stdin ohne stdout zu schreiben (funktioniert in screen=True)."""
-    return sys.stdin.readline().rstrip("\n").strip()
-
-
 def _live_ask(live, renderable, prompt: str = "") -> str:
-    """Rendert Inhalt, positioniert Cursor auf vorletzter Zeile, liest stdin.
+    """Zeichenweise lesen; Prompt + aktuelle Eingabe werden im Panel angezeigt.
 
-    Rich mit screen=True füllt den Bildschirm mit Padding und lässt den
-    Cursor am Ende der letzten Zeile. Per ANSI-Escape setzen wir ihn gezielt
-    auf terminal_height - 2, damit Enter keinen Scroll auslöst.
+    Kein externer Cursor ausserhalb des Panels: tty.setraw() + zeichenweise
+    Ausgabe in einem Group(renderable, Rule, input_line) löst das
+    screen=True-Cursor-Problem sauber ohne ANSI-Escape-Hacks.
     """
-    live.update(renderable)
-    live.refresh()
-    h = console.height
-    sys.stdout.write(f"\x1b[{h - 1};1H\x1b[2K  {prompt}")
-    sys.stdout.flush()
-    return _input()
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    chars: list[str] = []
+
+    def _render():
+        inp = Text()
+        inp.append(f"  {prompt}", style="dim")
+        inp.append("".join(chars), style="bold")
+        inp.append("▌", style="dim")
+        return Group(renderable, Rule(style="dim"), inp, Text(""))
+
+    try:
+        tty.setraw(fd)
+        while True:
+            live.update(_render())
+            live.refresh()
+            ch = sys.stdin.buffer.read(1)
+            if ch in (b"\r", b"\n"):
+                break
+            if ch == b"\x03":
+                raise KeyboardInterrupt
+            if ch in (b"\x7f", b"\x08"):
+                if chars:
+                    chars.pop()
+            elif ch == b"\x1b":
+                sys.stdin.buffer.read(2)  # Escape-Sequenz (Pfeiltasten etc.) verwerfen
+            elif ch and 32 <= ch[0] < 128:
+                chars.append(ch.decode("ascii"))
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    return "".join(chars)
 
 
 def parse_offset(s: str) -> float:

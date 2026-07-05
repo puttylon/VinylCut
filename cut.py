@@ -486,6 +486,10 @@ def main():
                 )
             )
             live.refresh()
+            if i >= n:
+                prompt = f"Alle {n} Tracks bestätigt, Export fehlt noch. Fortsetzen? [j/n]: "
+            else:
+                prompt = f"Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
             ans = live_input(
                 live,
                 build_cutting_panel(
@@ -493,13 +497,13 @@ def main():
                     data["album"],
                     data["tracks"],
                     starts,
-                    i,
+                    min(i, n - 1),
                     est,
                     True,
                     last_gap,
                     est,
                 ),
-                f"Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: ",
+                prompt,
             ).lower()
             if ans != "j":
                 history, starts, last_gap, i = [], [], 0.0, 0
@@ -577,8 +581,6 @@ def main():
                     except ValueError:
                         pass
 
-        progress_path.unlink(missing_ok=True)
-
         # --- Songtexte vorab fragen ---
         if not no_songtext:
             ans = live_input(live, panel("export", ["✓"] * n), "Songtexte suchen? [j/n]: ")
@@ -625,6 +627,7 @@ def main():
 
         live.update(panel("export", export_status))
         live.refresh()
+        progress_path.unlink(missing_ok=True)
 
         # --- Songtexte ---
         lrc_status = None

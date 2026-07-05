@@ -60,6 +60,19 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 
 ---
 
+## Ideen (nicht geplant)
+
+### Unified Toolchain (`vinylcut`)
+Einziger Einstiegspunkt für die gesamte Pipeline. Fragt beim Start (oder per Flag `--from 1/2/3`), an welchem Schritt begonnen werden soll:
+
+1. **Record** — Aufnahme direkt aus der Befehlszeile via ffmpeg (Audiointerface → FLAC), mit Pegelanzeige und Start/Stop per Taste. Würde Audacity ersetzen.
+2. **Assemble** — wie heute `assemble.py`
+3. **Cut** — wie heute `cut.py`
+
+Checkpoint-Logik: Das Tool erkennt anhand vorhandener Dateien, welcher Schritt als nächstes sinnvoll ist, und schlägt ihn vor.
+
+---
+
 # assemble.py — Roadmap
 
 Werkzeug zur non-destruktiven Vorbereitung einer Roh-FLAC (alle Seiten in einer Datei) vor dem Schneiden mit `cut.py`. Die Original-FLAC wird nie verändert. Alle Schnittdaten landen in `assemble.json`, Zwischenergebnisse in neuen Dateien.
@@ -84,3 +97,8 @@ Tests für `get_segments`, automatische Umbenennung der Ausgabedatei, ROADMAP ak
 
 ## ✓ v1.0 — Stabile Version
 README vollständig nachgezogen, Gesamtworkflow dokumentiert.
+
+## ✓ v1.1 — Rich Vollbild-UI
+assemble_ui.py (Schicht 2) mit 5 Panel-Buildern für alle Phasen. assemble.py
+nutzt jetzt Rich Live(screen=True) + live_input() für alle interaktiven Schritte.
+25 Tests in test_assemble_ui.py, laufen ohne Terminal.

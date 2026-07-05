@@ -57,9 +57,11 @@ def main():
 
         print(f"── {flac.parent.name} / {flac.stem}")
 
-        # In temporäre Datei laden, damit das Original nicht sofort überschrieben wird
+        # Nur den Pfad reservieren — Datei darf noch nicht existieren,
+        # damit fetch_lrc's exists()-Check korrekt funktioniert
         with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
             tmp_path = Path(tmp.name)
+        tmp_path.unlink()
 
         try:
             found = fetch_lrc(query, tmp_path, env)

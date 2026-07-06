@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__version__ = "1.2.6"
+__version__ = "1.2.7"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 
@@ -23,6 +23,24 @@ _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
 
 _whisper_model = None  # lazy singleton — einmal laden, für alle Tracks wiederverwenden
 _last_whisper_score: float = 0.0  # letzter Overlap-Score, für Ausgabe in main()
+
+
+def _read_flac_tags(flac_path: Path) -> tuple[str, str]:
+    """Liest ARTIST und TITLE aus FLAC-Metadaten via metaflac. Gibt ('', '') bei Fehler."""
+    try:
+        r = subprocess.run(
+            ["metaflac", "--show-tag=ARTIST", "--show-tag=TITLE", str(flac_path)],
+            capture_output=True,
+            text=True,
+        )
+        tags: dict[str, str] = {}
+        for line in r.stdout.splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                tags[key.upper()] = value
+        return tags.get("ARTIST", ""), tags.get("TITLE", "")
+    except Exception:
+        return "", ""
 
 
 def _load_env() -> dict:
@@ -301,8 +319,10 @@ def main() -> None:
             current_parent = flac.parent
             artist, tracks_by_title = _load_release(flac.parent)
 
-        title = flac.stem.split(" - ", 1)[-1] if " - " in flac.stem else flac.stem
-        query = f"{artist} {title}".strip()
+        meta_artist, meta_title = _read_flac_tags(flac)
+        title = meta_title or (flac.stem.split(" - ", 1)[-1] if " - " in flac.stem else flac.stem)
+        query_artist = meta_artist or artist
+        query = f"{query_artist} {title}".strip()
         expected_dur = tracks_by_title.get(title, 0.0)
 
         if args.recursive:

@@ -153,7 +153,8 @@ Alle vier Provider werden gleichzeitig befragt: `lrclib`, `musixmatch`, `netease
    - Whisper transkribiert die ersten 30 Sekunden ab dem Beginn des ersten Lyrics-Timestamps (`_WHISPER_PRE_ROLL = 2s` vor dem ersten `[mm:ss.xx]`)
    - Wort-Overlap (Jaccard) zwischen Transkription und LRC-Anfang bestimmt den Gewinner
    - Liegt der beste Overlap unter `_WHISPER_MIN_OVERLAP` (12 %) → **keine LRC gespeichert**
-   - Modell (`_WHISPER_MODEL = "tiny"`) wird beim ersten Aufruf geladen und für alle Tracks wiederverwendet
+   - Modell (`_WHISPER_MODEL = "base"`) wird beim ersten Aufruf geladen und für alle Tracks wiederverwendet
+   - Liefert Whisper keine Transkription (z. B. lange Instrumental-Intro), fällt das Skript auf Dauer-Scoring zurück
 
 2. **Fallback ohne Whisper** (wenn `faster-whisper` nicht installiert):
    - Scoring nach `(valid, synced, lines)` — lexikographisch, höher = besser

@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 
@@ -17,7 +17,7 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 
 # Whisper: erst ab Mindest-Overlap gilt eine LRC als verifiziert.
 _WHISPER_MIN_OVERLAP = 0.12
-_WHISPER_MODEL = "tiny"
+_WHISPER_MODEL = "base"
 _WHISPER_CONTEXT_SEC = 30  # Sekunden Audio die transkribiert werden
 _WHISPER_PRE_ROLL = 2.0  # Sekunden vor erstem LRC-Timestamp starten
 
@@ -227,11 +227,15 @@ def fetch_lrc(
 
     if flac_path and flac_path.exists():
         result = _whisper_best(flac_path, all_candidates)
-        best_content = (
-            result[0].read_bytes()
-            if result and result[1] >= _WHISPER_MIN_OVERLAP
-            else None
-        )
+        if result and result[1] >= _WHISPER_MIN_OVERLAP:
+            best_content = result[0].read_bytes()
+        elif result is None:
+            # Whisper konnte nicht transkribieren (leeres Audio, Modellfehler) →
+            # Dauer-Scoring als Fallback
+            best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
+            best_content = best.read_bytes()
+        else:
+            best_content = None
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()

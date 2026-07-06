@@ -126,3 +126,30 @@ LRC darf bis zu 40 % kürzer enden (Instrumental-Outro), höchstens 10 % länger
 ## ✓ v1.0 refetch_lyrics.py — Rekursives Neu-Laden
 Durchsucht alle Unterordner nach FLACs, lädt Songtexte neu. Zeigt Vorschau
 nur wenn sich der Inhalt ändert, speichert still wenn kein Unterschied.
+
+## ✓ v1.2.9 — Provider-Abfragen parallelisiert
+Alle vier Provider werden jetzt gleichzeitig via ThreadPoolExecutor befragt statt
+nacheinander. Reihenfolge der Ergebnisse bleibt deterministisch.
+
+## ✓ v1.2.8 — Robustere Whisper-Verifikation
+Diagnostische Ausgabe: Provider-Anzahl, Whisper-Wörterzahl und Overlap pro Track sichtbar.
+Overlap-Schwellwert von 12 % auf 6 % gesenkt (deckt Grenzfälle wie gemischtsprachige Songs ab).
+Neuer Fallback: Whisper erkennt keine Sprache, aber ≥ 2 Provider und ≥ 10 Lyrics-Zeilen → LRC
+trotzdem gespeichert (Vokalsong mit ungewöhnlichem Vokalstil, z. B. Falco "Vienna Calling").
+Artist/Titel-Abfrage nutzt FLAC-Metadaten (seit v1.2.7) statt Dateinamen.
+
+## ✓ v1.2.11 — Marker-Logik korrigiert: vorhandene LRCs werden ohne Marker immer geprüft
+Ohne Marker werden alle Tracks verarbeitet — auch solche mit bestehender LRC (Whisper-Verifikation).
+Der Marker ist der einzige Skip-Mechanismus. Die frühere Sonderbehandlung
+„im Normalmode vorhandene LRCs nicht anfassen" entfällt.
+
+## ✓ v1.2.10 — Verarbeitungsmarker (Skip bereits geprüfter Ordner)
+Nach der Verarbeitung eines Ordners wird `.fetch_songtext_v<version>` angelegt.
+Folgeläufe überspringen Ordner mit kompatiblem Marker automatisch.
+Kompatibel ab `_MARKER_MIN_VERSION` (aktuell 1.2.0) — kein Massenneulauf bei Bugfix-Versionen.
+Neues Flag `--force` / `-f` ignoriert alle Marker und verarbeitet alles neu.
+
+## v1.3 — Unterstützung weiterer Audioformate (MP3, Opus, OGG, M4A …)
+Aktuell werden nur `.flac`-Dateien verarbeitet. Erweiterung auf alle gängigen
+Audioformate via `mutagen` (ersetzt `metaflac` für Metadaten-Lesen) und
+erweiterter Dateisuche (`*.mp3`, `*.opus`, `*.ogg`, `*.m4a` etc.).

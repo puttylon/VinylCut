@@ -152,9 +152,11 @@ Alle vier Provider werden gleichzeitig befragt: `lrclib`, `musixmatch`, `netease
 1. **Whisper-Verifikation** (wenn `faster-whisper` installiert und FLAC verfügbar):
    - Whisper transkribiert 60 Sekunden ab dem ersten Lyrics-Timestamp (`_WHISPER_PRE_ROLL = 0 s`, direkt beim ersten `[mm:ss.xx]`)
    - Wort-Overlap (Jaccard) zwischen Transkription und LRC-Anfang bestimmt den Gewinner
-   - Liegt der beste Overlap unter `_WHISPER_MIN_OVERLAP` (12 %) → **keine LRC gespeichert**
+   - Liegt der beste Overlap unter `_WHISPER_MIN_OVERLAP` (6 %) → **keine LRC gespeichert** (falscher Song)
    - Modell (`_WHISPER_MODEL = "base"`) wird beim ersten Aufruf geladen und für alle Tracks wiederverwendet
-   - Liefert Whisper keine Transkription (z. B. rein instrumentaler Track), wird keine LRC gespeichert
+   - Liefert Whisper keine Transkription: Fallback-Prüfung — ≥ 2 Provider **und** ≥ 10 Lyrics-Zeilen → LRC trotzdem gespeichert (Vokalsong, den Whisper nicht erkannt hat, z. B. ungewöhnlicher Vokalstil)
+   - Andernfalls (echtes Instrumental oder zu wenig Provider-Übereinstimmung) → **keine LRC gespeichert**
+   - Ausgabe zeigt immer: Provider-Anzahl, Whisper-Wörterzahl und Overlap
 
 2. **Fallback ohne Whisper** (wenn `faster-whisper` nicht installiert):
    - Scoring nach `(valid, synced, lines)` — lexikographisch, höher = besser
@@ -168,7 +170,7 @@ Alle vier Provider werden gleichzeitig befragt: `lrclib`, `musixmatch`, `netease
 **`--recursive` Modus** (ersetzt `refetch_lyrics.py`): Durchsucht alle Unterordner, lädt LRCs neu. Pro Track:
 - `✓ gespeichert` — neues, verifiziertes Ergebnis
 - `= unverändert` — identischer Inhalt wie vorher
-- `✗ Kein Treffer` — kein Provider hat etwas gefunden oder Whisper-Overlap zu niedrig
+- `✗ Kein Treffer` — kein Provider hat etwas gefunden, Whisper-Overlap zu niedrig (falscher Song), oder Whisper erkannte keine Sprache ohne ausreichende Provider-Bestätigung
 
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 
@@ -180,6 +182,7 @@ Alle vier Provider werden gleichzeitig befragt: `lrclib`, `musixmatch`, `netease
 ```bash
 pip install -r requirements.txt
 pip install syncedlyrics
+pip install faster-whisper   # optional — verbessert LRC-Treffsicherheit via Whisper
 ```
 
 `requirements.txt` enthält: `pytest`, `rich`

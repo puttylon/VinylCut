@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 
@@ -113,69 +113,61 @@ def _word_overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _whisper_best(flac_path: Path, candidates: list[Path]) -> tuple[Path, float] | None:
-    """Transkribiert Anfang des Tracks, gibt (bester Kandidat, Overlap) zurück.
-
-    Startet ab dem frühesten ersten Timestamp aller Kandidaten minus _WHISPER_PRE_ROLL,
-    damit Whisper genau dort einsetzt wo der Gesang beginnt.
-    """
+def _transcribe(flac_path: Path, start: float) -> list[str]:
+    """Transkribiert _WHISPER_CONTEXT_SEC Sekunden ab start, gibt Wortliste zurück."""
     model = _get_whisper_model()
     if model is None:
-        return None
-
-    # Frühesten ersten Timestamp über alle Kandidaten bestimmen
-    earliest = float("inf")
-    for p in candidates:
-        try:
-            ft = _first_timestamp(p.read_text(encoding="utf-8"))
-            if ft > 0:
-                earliest = min(earliest, ft)
-        except Exception:
-            pass
-    start_offset = max(
-        0.0, (earliest if earliest < float("inf") else 0.0) - _WHISPER_PRE_ROLL
-    )
-
+        return []
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_wav = Path(tmp.name)
     try:
         subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(flac_path),
-                "-ss",
-                str(start_offset),
-                "-t",
-                str(_WHISPER_CONTEXT_SEC),
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                str(tmp_wav),
-            ],
+            ["ffmpeg", "-y", "-i", str(flac_path), "-ss", str(start),
+             "-t", str(_WHISPER_CONTEXT_SEC), "-ar", "16000", "-ac", "1", str(tmp_wav)],
             capture_output=True,
         )
         segments, _ = model.transcribe(str(tmp_wav), beam_size=1)
-        transcript_words = re.findall(
-            r"[^\W\d_]+", " ".join(s.text for s in segments).lower()
-        )
+        return re.findall(r"[^\W\d_]+", " ".join(s.text for s in segments).lower())
     except Exception:
-        return None
+        return []
     finally:
         tmp_wav.unlink(missing_ok=True)
 
-    if not transcript_words:
+
+def _whisper_best(flac_path: Path, candidates: list[Path]) -> tuple[Path, float] | None:
+    """Gibt (bester Kandidat, Overlap) zurück.
+
+    Jeder Kandidat wird gegen die Transkription seines eigenen Start-Offsets
+    gescored. Gleiche Offsets (±3 s) teilen sich eine Transkription.
+    """
+    if _get_whisper_model() is None:
         return None
+
+    # Start-Offset pro Kandidat bestimmen
+    candidate_starts: list[tuple[Path, float]] = []
+    for p in candidates:
+        try:
+            ft = _first_timestamp(p.read_text(encoding="utf-8"))
+            start = max(0.0, (ft if ft > 0 else 0.0) - _WHISPER_PRE_ROLL)
+        except Exception:
+            start = 0.0
+        candidate_starts.append((p, start))
+
+    # Transkriptionen cachen: key = start auf 3 s gerundet
+    transcript_cache: dict[int, list[str]] = {}
+    for _, start in candidate_starts:
+        key = round(start / 3)
+        if key not in transcript_cache:
+            transcript_cache[key] = _transcribe(flac_path, start)
 
     best_path: Path | None = None
     best_score = 0.0
-    for p in candidates:
+    for p, start in candidate_starts:
+        words = transcript_cache.get(round(start / 3), [])
+        if not words:
+            continue
         try:
-            score = _word_overlap(
-                transcript_words, _extract_lrc_words(p.read_text(encoding="utf-8"))
-            )
+            score = _word_overlap(words, _extract_lrc_words(p.read_text(encoding="utf-8")))
         except Exception:
             score = 0.0
         if score > best_score:

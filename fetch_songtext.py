@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 
@@ -45,12 +45,16 @@ def _last_timestamp(content: str) -> float:
 
 
 def _first_timestamp(content: str) -> float:
-    """Ersten LRC-Timestamp in Sekunden, 0.0 wenn keiner gefunden."""
-    matches = re.findall(r"\[(\d+):(\d+\.\d+)\]", content)
-    if not matches:
-        return 0.0
-    m, s = matches[0]
-    return int(m) * 60 + float(s)
+    """Ersten Lyric-Timestamp in Sekunden; überspringt Metadaten-Zeilen (z.B. '作词 : …')."""
+    for line in content.splitlines():
+        match = re.match(r"\[(\d+):(\d+\.\d+)\](.*)", line)
+        if not match:
+            continue
+        text = match.group(3).strip()
+        if not text or " : " in text:
+            continue
+        return int(match.group(1)) * 60 + float(match.group(2))
+    return 0.0
 
 
 def _score_lrc(path: Path, expected_dur: float = 0.0) -> tuple[int, int, int]:

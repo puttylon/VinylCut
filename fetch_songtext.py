@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__version__ = "1.2.5"
+__version__ = "1.2.6"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 
@@ -18,7 +18,7 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 # Whisper: erst ab Mindest-Overlap gilt eine LRC als verifiziert.
 _WHISPER_MIN_OVERLAP = 0.12
 _WHISPER_MODEL = "base"
-_WHISPER_CONTEXT_SEC = 30  # Sekunden Audio die transkribiert werden
+_WHISPER_CONTEXT_SEC = 60  # Sekunden Audio die transkribiert werden
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
 
 _whisper_model = None  # lazy singleton — einmal laden, für alle Tracks wiederverwenden

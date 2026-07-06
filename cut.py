@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-import re
 import sys
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import fetch_metadata as mf
@@ -12,8 +10,9 @@ from rich.console import Console
 from rich.live import Live
 
 from cut_ui import build_cutting_panel, build_metadata_panel, live_input
+from fetch_songtext import fetch_lrc, _load_env
 
-__version__ = "1.9.1"
+__version__ = "1.9.2"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 
@@ -39,68 +38,6 @@ def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float
     if "dur_s" in tracks[i - 1]:
         return starts[i - 1] + tracks[i - 1]["dur_s"] + last_gap
     return starts[i - 1]
-
-
-_ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
-_LRC_TOO_SHORT_TOLERANCE = 0.40
-_LRC_TOO_LONG_TOLERANCE = 0.10
-
-
-def _last_timestamp(content: str) -> float:
-    matches = re.findall(r"\[(\d+):(\d+\.\d+)\]", content)
-    if not matches:
-        return 0.0
-    m, s = matches[-1]
-    return int(m) * 60 + float(s)
-
-
-def _score_lrc(path: Path, expected_dur: float = 0.0) -> tuple[int, int, int]:
-    """(nicht_disqualifiziert, synchronisiert, Zeilenanzahl) — höher ist besser."""
-    try:
-        content = path.read_text(encoding="utf-8")
-    except Exception:
-        return (0, 0, 0)
-    synced = 1 if re.search(r"\[\d+:\d+\.\d+\]", content) else 0
-    lines = sum(1 for ln in content.splitlines() if ln.strip())
-    valid = 1
-    if expected_dur > 0 and synced:
-        last_ts = _last_timestamp(content)
-        if last_ts > 0:
-            ratio = (last_ts - expected_dur) / expected_dur
-            if ratio > _LRC_TOO_LONG_TOLERANCE or ratio < -_LRC_TOO_SHORT_TOLERANCE:
-                valid = 0
-    return (valid, synced, lines)
-
-
-def fetch_lrc(query: str, lrc_path: Path, env: dict, expected_dur: float = 0.0) -> bool:
-    """Alle Provider befragen, bestes Ergebnis (Dauer-geprüft, synchronisiert, meiste Zeilen) speichern."""
-    candidates: list[Path] = []
-    for provider in _ALL_PROVIDERS:
-        with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        tmp_path.unlink()
-        try:
-            subprocess.run(
-                ["syncedlyrics", query, "-o", str(tmp_path), "-p", provider],
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-        except FileNotFoundError:
-            for p in candidates:
-                p.unlink(missing_ok=True)
-            raise
-        if tmp_path.exists():
-            candidates.append(tmp_path)
-
-    if not candidates:
-        return False
-
-    best = max(candidates, key=lambda p: _score_lrc(p, expected_dur))
-    lrc_path.write_bytes(best.read_bytes())
-    for p in candidates:
-        p.unlink(missing_ok=True)
-    return True
 
 
 def save_progress(progress_path: Path, history: list) -> None:
@@ -705,23 +642,18 @@ def main():
             live.refresh()
 
         if not no_songtext:
-            token_path = Path(__file__).parent / "genius_token"
-            env = os.environ.copy()
-            if token_path.exists():
-                token = token_path.read_text().strip()
-                if token:
-                    env["GENIUS_ACCESS_TOKEN"] = token
-
+            env = _load_env()
             artist = data.get("artist", "")
             for idx, track in enumerate(data["tracks"]):
                 safe = track["title"].replace("/", "_")
                 lrc_path = track_out_dir / f"{idx + 1:02d} - {safe}.lrc"
+                flac_path = track_out_dir / f"{idx + 1:02d} - {safe}.flac"
                 query = f"{artist} {track['title']}".strip()
                 lrc_status[idx] = "…"
                 live.update(panel("songtext", export_status, lrc_status))
                 live.refresh()
                 try:
-                    fetch_lrc(query, lrc_path, env, track.get("dur_s", 0.0))
+                    fetch_lrc(query, lrc_path, env, track.get("dur_s", 0.0), flac_path)
                 except FileNotFoundError:
                     lrc_status[idx] = "✗"
                     for j in range(idx + 1, n):

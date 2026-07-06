@@ -138,50 +138,38 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 ---
 
 ### `fetch_songtext.py`
-Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics` und speichert sie als `.lrc`-Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
+Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics`, verifiziert das Ergebnis mit Whisper und speichert es als `.lrc`-Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
 
 ```bash
-python3 fetch_songtext.py "Artist - Album/"
+python3 fetch_songtext.py "Artist - Album/"           # einzelnes Album
+python3 fetch_songtext.py --recursive "/Musik/"       # alle Unterordner neu laden
 ```
 
 **Suchverfahren:**
 
-Für jeden Track werden alle vier Provider gleichzeitig befragt: `lrclib`, `musixmatch`, `netease`, `genius`. Das beste Ergebnis gewinnt nach folgendem Scoring (lexikographisch, höher = besser):
+Alle vier Provider werden gleichzeitig befragt: `lrclib`, `musixmatch`, `netease`, `genius`. Danach entscheidet Whisper welcher Kandidat zum Audio passt.
 
-| Kriterium | Beschreibung |
-|-----------|-------------|
-| `valid` | 1 wenn die LRC nicht disqualifiziert ist, sonst 0 |
-| `synced` | 1 wenn die LRC Zeitstempel enthält (`[mm:ss.xx]`), sonst 0 |
-| `lines` | Anzahl nicht-leerer Zeilen |
+1. **Whisper-Verifikation** (wenn `faster-whisper` installiert und FLAC verfügbar):
+   - Whisper transkribiert die ersten 30 Sekunden ab dem Beginn des ersten Lyrics-Timestamps (`_WHISPER_PRE_ROLL = 2s` vor dem ersten `[mm:ss.xx]`)
+   - Wort-Overlap (Jaccard) zwischen Transkription und LRC-Anfang bestimmt den Gewinner
+   - Liegt der beste Overlap unter `_WHISPER_MIN_OVERLAP` (12 %) → **keine LRC gespeichert**
+   - Modell (`_WHISPER_MODEL = "tiny"`) wird beim ersten Aufruf geladen und für alle Tracks wiederverwendet
 
-**Disqualifikation:** Eine synchronisierte LRC wird als `valid=0` gewertet, wenn ihr letzter Zeitstempel die Trackdauer aus `release.json` um mehr als die konfigurierten Toleranzen über- oder unterschreitet:
+2. **Fallback ohne Whisper** (wenn `faster-whisper` nicht installiert):
+   - Scoring nach `(valid, synced, lines)` — lexikographisch, höher = besser
+   - `valid = 0` wenn letzter Timestamp die Trackdauer um mehr als die Toleranzwerte über- oder unterschreitet:
 
 | Richtung | Konstante | Wert | Begründung |
 |----------|-----------|------|------------|
-| LRC endet zu spät (`last_ts > dur`) | `_LRC_TOO_LONG_TOLERANCE` | 10 % | Falscher (längerer) Song; echte LRCs enden kaum nach dem Track |
-| LRC endet zu früh (`last_ts < dur`) | `_LRC_TOO_SHORT_TOLERANCE` | 40 % | Legitim: viele Songs haben Instrumental-Outro ohne Text |
+| LRC endet zu spät | `_LRC_TOO_LONG_TOLERANCE` | 10 % | Falscher (längerer) Song |
+| LRC endet zu früh | `_LRC_TOO_SHORT_TOLERANCE` | 40 % | Legitim: Instrumental-Outro ohne Text |
 
-Texte ohne Zeitstempel (Genius) können nicht über die Dauer geprüft werden und werden nie disqualifiziert — sie verlieren aber immer gegen eine valide synchronisierte LRC.
+**`--recursive` Modus** (ersetzt `refetch_lyrics.py`): Durchsucht alle Unterordner, lädt LRCs neu. Pro Track:
+- `✓ gespeichert` — neues, verifiziertes Ergebnis
+- `= unverändert` — identischer Inhalt wie vorher
+- `✗ Kein Treffer` — kein Provider hat etwas gefunden oder Whisper-Overlap zu niedrig
 
-**Suchanfrage:** `"<Artist> <Titel>"` — Artist aus `release.json`, Titel aus dem Dateinamen (`NN - Titel.flac`).
-
-**Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen. Ohne Token findet Genius nichts.
-
----
-
-### `refetch_lyrics.py`
-Durchsucht rekursiv alle Unterordner nach FLACs und lädt Songtexte neu. Nützlich um bereits vorhandene LRC-Dateien nachträglich mit besseren Ergebnissen zu überschreiben.
-
-```bash
-python3 refetch_lyrics.py "/Pfad/zum/Musik-Ordner"
-```
-
-Verwendet dasselbe Suchverfahren wie `fetch_songtext.py` (alle Provider, Scoring, Dauer-Validierung). Pro Track:
-
-- **Kein Ergebnis** → vorhandene LRC bleibt unverändert, Meldung `✗ Kein Ergebnis gefunden.`
-- **Identisches Ergebnis** → keine Aktion, Meldung `= unverändert.`
-- **Neues Ergebnis, noch keine LRC vorhanden** → still gespeichert
-- **Neues Ergebnis, LRC hat sich geändert** → 20-Zeilen-Vorschau wird angezeigt, Bestätigung erforderlich (`[Enter]` übernehmen, `[s]` überspringen)
+**Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 
 ---
 

@@ -330,9 +330,13 @@ def main() -> None:
         if args.recursive:
             score_str = f"  ({_last_whisper_score:.0%})" if _last_whisper_score > 0 else ""
             if not found:
-                print(f"   ✗ Kein Treffer.{score_str}")
                 dest.unlink(missing_ok=True)
-                not_found += 1
+                if lrc_path.exists():
+                    print(f"   = vorhandene LRC behalten.{score_str}")
+                    skipped += 1
+                else:
+                    print(f"   ✗ Kein Treffer.{score_str}")
+                    not_found += 1
             else:
                 new_content = dest.read_bytes()
                 old_content = lrc_path.read_bytes() if lrc_path.exists() else None

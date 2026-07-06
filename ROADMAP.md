@@ -126,3 +126,8 @@ LRC darf bis zu 40 % kürzer enden (Instrumental-Outro), höchstens 10 % länger
 ## ✓ v1.0 refetch_lyrics.py — Rekursives Neu-Laden
 Durchsucht alle Unterordner nach FLACs, lädt Songtexte neu. Zeigt Vorschau
 nur wenn sich der Inhalt ändert, speichert still wenn kein Unterschied.
+
+## ✓ v1.3.0 — Unterstützung weiterer Audioformate (MP3, Opus, OGG, M4A …)
+`metaflac` ersetzt durch `mutagen` (easy=True) für formatunabhängiges Tag-Lesen.
+Dateisuche findet jetzt: `.flac`, `.mp3`, `.ogg`, `.opus`, `.m4a`, `.aac`, `.wav`.
+Abhängigkeit: `mutagen` (in requirements.txt ergänzt).

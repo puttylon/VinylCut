@@ -6,9 +6,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-__version__ = "1.2.7"
+__version__ = "1.3.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
+_AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
 
 # LRC-Timestamps enden oft vor dem Track-Ende (Instrumental-Outro → kein Text).
 # Asymmetrische Toleranz: zu kurz ist normal, zu lang bedeutet falscher Song.
@@ -25,20 +26,16 @@ _whisper_model = None  # lazy singleton — einmal laden, für alle Tracks wiede
 _last_whisper_score: float = 0.0  # letzter Overlap-Score, für Ausgabe in main()
 
 
-def _read_flac_tags(flac_path: Path) -> tuple[str, str]:
-    """Liest ARTIST und TITLE aus FLAC-Metadaten via metaflac. Gibt ('', '') bei Fehler."""
+def _read_audio_tags(audio_path: Path) -> tuple[str, str]:
+    """Liest ARTIST und TITLE via mutagen (FLAC, MP3, OGG, M4A …). Gibt ('', '') bei Fehler."""
     try:
-        r = subprocess.run(
-            ["metaflac", "--show-tag=ARTIST", "--show-tag=TITLE", str(flac_path)],
-            capture_output=True,
-            text=True,
-        )
-        tags: dict[str, str] = {}
-        for line in r.stdout.splitlines():
-            if "=" in line:
-                key, _, value = line.partition("=")
-                tags[key.upper()] = value
-        return tags.get("ARTIST", ""), tags.get("TITLE", "")
+        from mutagen import File as MutagenFile
+        tags = MutagenFile(audio_path, easy=True)
+        if tags is None:
+            return "", ""
+        artist = str(tags.get("artist", [""])[0])
+        title = str(tags.get("title", [""])[0])
+        return artist, title
     except Exception:
         return "", ""
 
@@ -290,14 +287,17 @@ def main() -> None:
     args = parser.parse_args()
 
     root = Path(args.path).resolve()
-    flac_files = sorted(root.rglob("*.flac") if args.recursive else root.glob("*.flac"))
+    audio_files = sorted(
+        p for p in (root.rglob("*") if args.recursive else root.glob("*"))
+        if p.suffix.lower() in _AUDIO_EXTENSIONS
+    )
 
-    if not flac_files:
-        print("Keine FLAC-Dateien gefunden.")
+    if not audio_files:
+        print("Keine Audiodateien gefunden.")
         return
 
     mode = "rekursiv" if args.recursive else "Album"
-    print(f"\n=== SONGTEXTE ({mode}, {len(flac_files)} Dateien) ===\n")
+    print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")
 
     env = _load_env()
     updated = skipped = not_found = errors = 0
@@ -306,8 +306,8 @@ def main() -> None:
     artist = ""
     tracks_by_title: dict = {}
 
-    for flac in flac_files:
-        lrc_path = flac.with_suffix(".lrc")
+    for audio in audio_files:
+        lrc_path = audio.with_suffix(".lrc")
 
         # Im normalen Modus: vorhandene LRCs nicht anfassen
         if not args.recursive and lrc_path.exists():
@@ -315,18 +315,18 @@ def main() -> None:
             continue
 
         # release.json nur neu laden wenn Albumordner wechselt
-        if flac.parent != current_parent:
-            current_parent = flac.parent
-            artist, tracks_by_title = _load_release(flac.parent)
+        if audio.parent != current_parent:
+            current_parent = audio.parent
+            artist, tracks_by_title = _load_release(audio.parent)
 
-        meta_artist, meta_title = _read_flac_tags(flac)
-        title = meta_title or (flac.stem.split(" - ", 1)[-1] if " - " in flac.stem else flac.stem)
+        meta_artist, meta_title = _read_audio_tags(audio)
+        title = meta_title or (audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem)
         query_artist = meta_artist or artist
         query = f"{query_artist} {title}".strip()
         expected_dur = tracks_by_title.get(title, 0.0)
 
         if args.recursive:
-            print(f"── {flac.parent.name} / {flac.stem}")
+            print(f"── {audio.parent.name} / {audio.stem}")
             # In temp-Datei schreiben, danach mit vorhandener LRC vergleichen
             with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
                 dest = Path(tmp.name)
@@ -336,7 +336,7 @@ def main() -> None:
             dest = lrc_path
 
         try:
-            found = fetch_lrc(query, dest, env, expected_dur, flac_path=flac, existing_lrc=lrc_path)
+            found = fetch_lrc(query, dest, env, expected_dur, flac_path=audio, existing_lrc=lrc_path)
         except FileNotFoundError:
             print("   ✗ syncedlyrics nicht gefunden — Abbruch.")
             dest.unlink(missing_ok=True)
@@ -366,10 +366,10 @@ def main() -> None:
                     updated += 1
         else:
             if found:
-                print(f"  ✓ {flac.stem}.lrc")
+                print(f"  ✓ {audio.stem}.lrc")
                 updated += 1
             else:
-                print(f"  ✗ {flac.stem} — kein Treffer")
+                print(f"  ✗ {audio.stem} — kein Treffer")
                 not_found += 1
 
     if args.recursive:

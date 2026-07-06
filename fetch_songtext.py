@@ -7,9 +7,10 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-__version__ = "1.2.11"
+__version__ = "1.3.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
+_AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
 
 # LRC-Timestamps enden oft vor dem Track-Ende (Instrumental-Outro → kein Text).
 # Asymmetrische Toleranz: zu kurz ist normal, zu lang bedeutet falscher Song.
@@ -33,20 +34,16 @@ _whisper_model = None  # lazy singleton — einmal laden, für alle Tracks wiede
 _last_whisper_score: float = 0.0  # letzter Overlap-Score, für Ausgabe in main()
 
 
-def _read_flac_tags(flac_path: Path) -> tuple[str, str]:
-    """Liest ARTIST und TITLE aus FLAC-Metadaten via metaflac. Gibt ('', '') bei Fehler."""
+def _read_audio_tags(audio_path: Path) -> tuple[str, str]:
+    """Liest ARTIST und TITLE via mutagen (FLAC, MP3, OGG, M4A …). Gibt ('', '') bei Fehler."""
     try:
-        r = subprocess.run(
-            ["metaflac", "--show-tag=ARTIST", "--show-tag=TITLE", str(flac_path)],
-            capture_output=True,
-            text=True,
-        )
-        tags: dict[str, str] = {}
-        for line in r.stdout.splitlines():
-            if "=" in line:
-                key, _, value = line.partition("=")
-                tags[key.upper()] = value
-        return tags.get("ARTIST", ""), tags.get("TITLE", "")
+        from mutagen import File as MutagenFile
+        tags = MutagenFile(audio_path, easy=True)
+        if tags is None:
+            return "", ""
+        artist = str(tags.get("artist", [""])[0])
+        title = str(tags.get("title", [""])[0])
+        return artist, title
     except Exception:
         return "", ""
 
@@ -405,14 +402,17 @@ def main() -> None:
     args = parser.parse_args()
 
     root = Path(args.path).resolve()
-    flac_files = sorted(root.rglob("*.flac") if args.recursive else root.glob("*.flac"))
+    audio_files = sorted(
+        p for p in (root.rglob("*") if args.recursive else root.glob("*"))
+        if p.suffix.lower() in _AUDIO_EXTENSIONS
+    )
 
-    if not flac_files:
-        print("Keine FLAC-Dateien gefunden.")
+    if not audio_files:
+        print("Keine Audiodateien gefunden.")
         return
 
     mode = "rekursiv" if args.recursive else "Album"
-    print(f"\n=== SONGTEXTE ({mode}, {len(flac_files)} Dateien) ===\n")
+    print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")
 
     env = _load_env()
     updated = skipped = not_found = errors = 0
@@ -424,34 +424,34 @@ def main() -> None:
     artist = ""
     tracks_by_title: dict = {}
 
-    for flac in flac_files:
-        lrc_path = flac.with_suffix(".lrc")
+    for audio in audio_files:
+        lrc_path = audio.with_suffix(".lrc")
 
         # Albumordner wechselt → release.json neu laden + Marker prüfen
-        if flac.parent != current_parent:
-            current_parent = flac.parent
-            artist, tracks_by_title = _load_release(flac.parent)
-            if not args.force and _is_marker_valid(flac.parent):
+        if audio.parent != current_parent:
+            current_parent = audio.parent
+            artist, tracks_by_title = _load_release(audio.parent)
+            if not args.force and _is_marker_valid(audio.parent):
                 skip_current_dir = True
                 skipped_dirs += 1
-                marker_ver = _find_marker_version(flac.parent)
+                marker_ver = _find_marker_version(audio.parent)
                 if args.recursive:
-                    print(f"── {flac.parent.name} (übersprungen, v{marker_ver})")
+                    print(f"── {audio.parent.name} (übersprungen, v{marker_ver})")
                 else:
                     print(
                         f"Ordner bereits mit v{marker_ver} verarbeitet — nutze --force zum Neuladen."
                     )
             else:
                 skip_current_dir = False
-                processed_dirs.add(flac.parent)
+                processed_dirs.add(audio.parent)
 
         if skip_current_dir:
             skipped += 1
             continue
 
-        meta_artist, meta_title = _read_flac_tags(flac)
+        meta_artist, meta_title = _read_audio_tags(audio)
         title = meta_title or (
-            flac.stem.split(" - ", 1)[-1] if " - " in flac.stem else flac.stem
+            audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem
         )
         query_artist = meta_artist or artist
         query = f"{query_artist} {title}".strip()
@@ -462,7 +462,7 @@ def main() -> None:
         use_compare = args.recursive or lrc_path.exists()
         if use_compare:
             if args.recursive:
-                print(f"── {flac.parent.name} / {flac.stem}")
+                print(f"── {audio.parent.name} / {audio.stem}")
             else:
                 print(f"Suche: {query}")
             with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
@@ -474,7 +474,7 @@ def main() -> None:
 
         try:
             found = fetch_lrc(
-                query, dest, env, expected_dur, flac_path=flac, existing_lrc=lrc_path
+                query, dest, env, expected_dur, flac_path=audio, existing_lrc=lrc_path
             )
         except FileNotFoundError:
             print("   ✗ syncedlyrics nicht gefunden — Abbruch.")
@@ -507,10 +507,10 @@ def main() -> None:
                     updated += 1
         else:
             if found:
-                print(f"  ✓ {flac.stem}.lrc")
+                print(f"  ✓ {audio.stem}.lrc")
                 updated += 1
             else:
-                print(f"  ✗ {flac.stem} — kein Treffer")
+                print(f"  ✗ {audio.stem} — kein Treffer")
                 not_found += 1
 
     for folder in processed_dirs:

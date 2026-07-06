@@ -44,16 +44,21 @@ def main():
     for flac in flac_files:
         lrc_path = flac.with_suffix(".lrc")
 
-        # Künstler aus release.json des Elternordners
+        # Künstler + Dauer aus release.json des Elternordners
         artist = ""
+        tracks_by_title: dict = {}
         try:
             with open(flac.parent / "release.json", "r", encoding="utf-8") as f:
-                artist = json.load(f).get("artist", "")
+                data = json.load(f)
+                artist = data.get("artist", "")
+                for t in data.get("tracks", []):
+                    tracks_by_title[t["title"]] = t.get("dur_s", 0.0)
         except Exception:
             pass
 
         title = flac.stem.split(" - ", 1)[-1] if " - " in flac.stem else flac.stem
         query = f"{artist} {title}".strip()
+        expected_dur = tracks_by_title.get(title, 0.0)
 
         print(f"── {flac.parent.name} / {flac.stem}")
 
@@ -64,7 +69,7 @@ def main():
         tmp_path.unlink()
 
         try:
-            found = fetch_lrc(query, tmp_path, env)
+            found = fetch_lrc(query, tmp_path, env, expected_dur)
         except FileNotFoundError:
             print("   ✗ syncedlyrics nicht gefunden — Abbruch.")
             tmp_path.unlink(missing_ok=True)

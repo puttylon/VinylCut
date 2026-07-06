@@ -5,7 +5,7 @@ Ziel: Rich Live(screen=True) wie in cut.py. Gleiche Bibliothek, gleiche Schichte
 
 ---
 
-## Variante A — Maximale Ähnlichkeit zu cut.py  [?]
+## Variante A — Maximale Ähnlichkeit zu cut.py  [ja, gewünscht]
 
 Vollbild-Panel, identischer Aufbau: Tabelle oben, Info-Block unten, Eingabezeile ganz unten
 via live_input(). Alle vier Phasen laufen im selben Panel-Container, nur der Inhalt wechselt.
@@ -149,7 +149,7 @@ python3 assemble.py "Artist - Album-raw.flac"
 
 ---
 
-## Empfehlung  [?]
+## Empfehlung  [Variante A]
 
 **Variante A** wenn du einen vollständig konsistenten Look willst (wie cut.py).
 **Variante C** wenn du schnell fertig sein möchtest und den Bruch Print→Rich akzeptierst.
@@ -158,9 +158,9 @@ Variante B ist ein Mittelweg, aber der Zusatzaufwand gegenüber A ist gering.
 
 ---
 
-## Offene Fragen  [?]
+## Offene Fragen  [antworte ich inline]
 
-1. Soll die Seitenanzahl-Frage ("Wie viele Seiten?") ins Panel oder bleibt sie davor?
-2. Phase 4 (Normalisierung): Kanalausgleich-Frage als live_input() im Panel, oder reicht print/input?
-3. assemble_ui.py als neues Modul (analog cut_ui.py), oder gemeinsames assemble_ui.py in cut_ui.py?
-   (Gemeinsam würde fmt_dur() teilen, aber die Panels sind sehr verschieden.)
+1. Soll die Seitenanzahl-Frage ("Wie viele Seiten?") ins Panel oder bleibt sie davor? A: Dazu baust du ein Bild in Phase 0 (vor phase 1)
+2. Phase 4 (Normalisierung): Kanalausgleich-Frage als live_input() im Panel, oder reicht print/input? A: verstehe den unterschied nicht. aus sicht des useres egal, oder?
+3. assemble_ui.py als neues Modul (analog cut_ui.py), oder gemeinsames assemble_ui.py in cut_ui.py? 
+   (Gemeinsam würde fmt_dur() teilen, aber die Panels sind sehr verschieden.) A: unterschiedlich

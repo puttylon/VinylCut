@@ -138,13 +138,50 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 ---
 
 ### `fetch_songtext.py`
-Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics` und speichert sie als `.lrc`-Datei.
+Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics` und speichert sie als `.lrc`-Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
 
 ```bash
 python3 fetch_songtext.py "Artist - Album/"
 ```
 
-Optionaler Genius-Token (bessere Trefferquote): Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
+**Suchverfahren:**
+
+Für jeden Track werden alle vier Provider gleichzeitig befragt: `lrclib`, `musixmatch`, `netease`, `genius`. Das beste Ergebnis gewinnt nach folgendem Scoring (lexikographisch, höher = besser):
+
+| Kriterium | Beschreibung |
+|-----------|-------------|
+| `valid` | 1 wenn die LRC nicht disqualifiziert ist, sonst 0 |
+| `synced` | 1 wenn die LRC Zeitstempel enthält (`[mm:ss.xx]`), sonst 0 |
+| `lines` | Anzahl nicht-leerer Zeilen |
+
+**Disqualifikation:** Eine synchronisierte LRC wird als `valid=0` gewertet, wenn ihr letzter Zeitstempel die Trackdauer aus `release.json` um mehr als die konfigurierten Toleranzen über- oder unterschreitet:
+
+| Richtung | Konstante | Wert | Begründung |
+|----------|-----------|------|------------|
+| LRC endet zu spät (`last_ts > dur`) | `_LRC_TOO_LONG_TOLERANCE` | 10 % | Falscher (längerer) Song; echte LRCs enden kaum nach dem Track |
+| LRC endet zu früh (`last_ts < dur`) | `_LRC_TOO_SHORT_TOLERANCE` | 40 % | Legitim: viele Songs haben Instrumental-Outro ohne Text |
+
+Texte ohne Zeitstempel (Genius) können nicht über die Dauer geprüft werden und werden nie disqualifiziert — sie verlieren aber immer gegen eine valide synchronisierte LRC.
+
+**Suchanfrage:** `"<Artist> <Titel>"` — Artist aus `release.json`, Titel aus dem Dateinamen (`NN - Titel.flac`).
+
+**Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen. Ohne Token findet Genius nichts.
+
+---
+
+### `refetch_lyrics.py`
+Durchsucht rekursiv alle Unterordner nach FLACs und lädt Songtexte neu. Nützlich um bereits vorhandene LRC-Dateien nachträglich mit besseren Ergebnissen zu überschreiben.
+
+```bash
+python3 refetch_lyrics.py "/Pfad/zum/Musik-Ordner"
+```
+
+Verwendet dasselbe Suchverfahren wie `fetch_songtext.py` (alle Provider, Scoring, Dauer-Validierung). Pro Track:
+
+- **Kein Ergebnis** → vorhandene LRC bleibt unverändert, Meldung `✗ Kein Ergebnis gefunden.`
+- **Identisches Ergebnis** → keine Aktion, Meldung `= unverändert.`
+- **Neues Ergebnis, noch keine LRC vorhanden** → still gespeichert
+- **Neues Ergebnis, LRC hat sich geändert** → 20-Zeilen-Vorschau wird angezeigt, Bestätigung erforderlich (`[Enter]` übernehmen, `[s]` überspringen)
 
 ---
 

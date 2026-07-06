@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import re
 import sys
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import fetch_metadata as mf
@@ -11,7 +13,7 @@ from rich.live import Live
 
 from cut_ui import build_cutting_panel, build_metadata_panel, live_input
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 
@@ -39,26 +41,39 @@ def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float
     return starts[i - 1]
 
 
-_ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "megalobiz", "genius"]
+_ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
+_LRC_TOO_SHORT_TOLERANCE = 0.40
+_LRC_TOO_LONG_TOLERANCE = 0.10
 
 
-def _score_lrc(path: Path) -> tuple[int, int]:
-    """(synchronisiert, Zeilenanzahl) — höher ist besser."""
-    import re
+def _last_timestamp(content: str) -> float:
+    matches = re.findall(r"\[(\d+):(\d+\.\d+)\]", content)
+    if not matches:
+        return 0.0
+    m, s = matches[-1]
+    return int(m) * 60 + float(s)
 
+
+def _score_lrc(path: Path, expected_dur: float = 0.0) -> tuple[int, int, int]:
+    """(nicht_disqualifiziert, synchronisiert, Zeilenanzahl) — höher ist besser."""
     try:
         content = path.read_text(encoding="utf-8")
     except Exception:
-        return (0, 0)
+        return (0, 0, 0)
     synced = 1 if re.search(r"\[\d+:\d+\.\d+\]", content) else 0
     lines = sum(1 for ln in content.splitlines() if ln.strip())
-    return (synced, lines)
+    valid = 1
+    if expected_dur > 0 and synced:
+        last_ts = _last_timestamp(content)
+        if last_ts > 0:
+            ratio = (last_ts - expected_dur) / expected_dur
+            if ratio > _LRC_TOO_LONG_TOLERANCE or ratio < -_LRC_TOO_SHORT_TOLERANCE:
+                valid = 0
+    return (valid, synced, lines)
 
 
-def fetch_lrc(query: str, lrc_path: Path, env: dict) -> bool:
-    """Alle Provider befragen, bestes Ergebnis (synchronisiert + meiste Zeilen) speichern."""
-    import tempfile
-
+def fetch_lrc(query: str, lrc_path: Path, env: dict, expected_dur: float = 0.0) -> bool:
+    """Alle Provider befragen, bestes Ergebnis (Dauer-geprüft, synchronisiert, meiste Zeilen) speichern."""
     candidates: list[Path] = []
     for provider in _ALL_PROVIDERS:
         with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
@@ -81,7 +96,7 @@ def fetch_lrc(query: str, lrc_path: Path, env: dict) -> bool:
     if not candidates:
         return False
 
-    best = max(candidates, key=_score_lrc)
+    best = max(candidates, key=lambda p: _score_lrc(p, expected_dur))
     lrc_path.write_bytes(best.read_bytes())
     for p in candidates:
         p.unlink(missing_ok=True)
@@ -706,7 +721,7 @@ def main():
                 live.update(panel("songtext", export_status, lrc_status))
                 live.refresh()
                 try:
-                    fetch_lrc(query, lrc_path, env)
+                    fetch_lrc(query, lrc_path, env, track.get("dur_s", 0.0))
                 except FileNotFoundError:
                     lrc_status[idx] = "✗"
                     for j in range(idx + 1, n):

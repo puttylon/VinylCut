@@ -62,6 +62,13 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 
 ## Ideen (nicht geplant)
 
+### Whisper-Verifikation
+Die ersten ~30 Sekunden eines Tracks via `faster-whisper` transkribieren und
+das Ergebnis mit dem Anfang der LRC-Kandidaten abgleichen. Bester Wort-Overlap
+gewinnt. Kein Match → keine LRC (keine eigene Transkription erstellen).
+Würde Fehlgriffe eliminieren die durch Dauer-Heuristik nicht erkannt werden.
+Abhängigkeit: `faster-whisper`, Modell ~500 MB (base) bis 1,5 GB (medium).
+
 ### Unified Toolchain (`vinylcut`)
 Einziger Einstiegspunkt für die gesamte Pipeline. Fragt beim Start (oder per Flag `--from 1/2/3`), an welchem Schritt begonnen werden soll:
 
@@ -102,3 +109,20 @@ README vollständig nachgezogen, Gesamtworkflow dokumentiert.
 assemble_ui.py (Schicht 2) mit 5 Panel-Buildern für alle Phasen. assemble.py
 nutzt jetzt Rich Live(screen=True) + live_input() für alle interaktiven Schritte.
 25 Tests in test_assemble_ui.py, laufen ohne Terminal.
+
+---
+
+# fetch_songtext.py / refetch_lyrics.py — Roadmap
+
+## ✓ v1.0 — Grundfunktion
+Songtext-Suche via syncedlyrics, LRC-Dateien neben FLAC speichern.
+
+## ✓ v1.1 — Alle Provider, bestes Ergebnis
+Alle vier Provider (lrclib, musixmatch, netease, genius) gleichzeitig befragen.
+Scoring: (valid, synced, lines) — höher ist besser. megalobiz entfernt (lieferte
+konsequent falsche Songs). Asymmetrische Dauer-Validierung gegen release.json:
+LRC darf bis zu 40 % kürzer enden (Instrumental-Outro), höchstens 10 % länger.
+
+## ✓ v1.0 refetch_lyrics.py — Rekursives Neu-Laden
+Durchsucht alle Unterordner nach FLACs, lädt Songtexte neu. Zeigt Vorschau
+nur wenn sich der Inhalt ändert, speichert still wenn kein Unterschied.

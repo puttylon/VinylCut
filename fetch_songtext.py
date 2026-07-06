@@ -88,14 +88,14 @@ def _get_whisper_model():
 
 
 def _extract_lrc_words(content: str, max_lines: int = 15) -> list[str]:
-    """Ersten max_lines Textzeilen einer LRC als Wortliste (nur a-z)."""
+    """Ersten max_lines Textzeilen einer LRC als Wortliste (Unicode-Buchstaben)."""
     words: list[str] = []
     for line in content.splitlines():
         if re.match(r"\[[a-z]+:", line.lower()):
             continue  # Metadaten-Tags überspringen
         text = re.sub(r"\[\d+:\d+\.\d+\]", "", line).strip()
         if text:
-            words.extend(re.findall(r"[a-z']+", text.lower()))
+            words.extend(re.findall(r"[^\W\d_]+", text.lower()))
             if len(words) >= max_lines * 8:
                 break
     return words
@@ -155,7 +155,7 @@ def _whisper_best(flac_path: Path, candidates: list[Path]) -> tuple[Path, float]
         )
         segments, _ = model.transcribe(str(tmp_wav), beam_size=1)
         transcript_words = re.findall(
-            r"[a-z']+", " ".join(s.text for s in segments).lower()
+            r"[^\W\d_]+", " ".join(s.text for s in segments).lower()
         )
     except Exception:
         return None
@@ -198,6 +198,8 @@ def fetch_lrc(
     Liegt der beste Overlap unter _WHISPER_MIN_OVERLAP wird nichts gespeichert.
     Ohne flac_path (oder faster-whisper nicht installiert): Fallback auf Dauer-Scoring.
     """
+    global _last_whisper_score
+    _last_whisper_score = 0.0  # zurücksetzen, damit kein alter Score vom Vorgänger-Track angezeigt wird
     candidates: list[Path] = []
     for provider in _ALL_PROVIDERS:
         with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:

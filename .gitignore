@@ -1,4 +1,5 @@
 *.flac
+*.lrc
 input/
 cut_out/
 flacs/

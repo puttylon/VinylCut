@@ -22,6 +22,7 @@ _WHISPER_CONTEXT_SEC = 30  # Sekunden Audio die transkribiert werden
 _WHISPER_PRE_ROLL = 2.0  # Sekunden vor erstem LRC-Timestamp starten
 
 _whisper_model = None  # lazy singleton — einmal laden, für alle Tracks wiederverwenden
+_last_whisper_score: float = 0.0  # letzter Overlap-Score, für Ausgabe in main()
 
 
 def _load_env() -> dict:
@@ -78,9 +79,11 @@ def _get_whisper_model():
             from faster_whisper import WhisperModel
         except ImportError:
             return None
-        _whisper_model = WhisperModel(
-            _WHISPER_MODEL, device="auto", compute_type="default"
-        )
+        print(f"   Lade Whisper-Modell ({_WHISPER_MODEL})...", end=" ", flush=True)
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        # int8: schneller auf CPU, vermeidet float16-Warnung von ctranslate2
+        _whisper_model = WhisperModel(_WHISPER_MODEL, device="auto", compute_type="int8")
+        print("bereit.")
     return _whisper_model
 
 
@@ -175,6 +178,8 @@ def _whisper_best(flac_path: Path, candidates: list[Path]) -> tuple[Path, float]
             best_score = score
             best_path = p
 
+    global _last_whisper_score
+    _last_whisper_score = best_score
     return (best_path, best_score) if best_path else None
 
 
@@ -316,8 +321,9 @@ def main() -> None:
             break
 
         if args.recursive:
+            score_str = f"  ({_last_whisper_score:.0%})" if _last_whisper_score > 0 else ""
             if not found:
-                print("   ✗ Kein Treffer.")
+                print(f"   ✗ Kein Treffer.{score_str}")
                 dest.unlink(missing_ok=True)
                 not_found += 1
             else:
@@ -325,11 +331,11 @@ def main() -> None:
                 old_content = lrc_path.read_bytes() if lrc_path.exists() else None
                 dest.unlink(missing_ok=True)
                 if old_content == new_content:
-                    print("   = unverändert.")
+                    print(f"   = unverändert.{score_str}")
                     skipped += 1
                 else:
                     lrc_path.write_bytes(new_content)
-                    print("   ✓ gespeichert.")
+                    print(f"   ✓ gespeichert.{score_str}")
                     updated += 1
         else:
             if found:

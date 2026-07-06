@@ -189,11 +189,13 @@ def fetch_lrc(
     env: dict,
     expected_dur: float = 0.0,
     flac_path: Path | None = None,
+    existing_lrc: Path | None = None,
 ) -> bool:
     """Alle Provider befragen, bestes Ergebnis via Whisper oder Dauer-Scoring wählen.
 
-    Mit flac_path: Whisper transkribiert Anfang des Tracks und prüft Wort-Overlap.
-    Liegt der beste Overlap unter _WHISPER_MIN_OVERLAP wird keine LRC gespeichert.
+    Mit flac_path: Whisper bewertet alle Kandidaten inkl. existing_lrc (falls vorhanden).
+    Die vorhandene LRC tritt gleichberechtigt an — nur wer den höchsten Overlap hat gewinnt.
+    Liegt der beste Overlap unter _WHISPER_MIN_OVERLAP wird nichts gespeichert.
     Ohne flac_path (oder faster-whisper nicht installiert): Fallback auf Dauer-Scoring.
     """
     candidates: list[Path] = []
@@ -215,21 +217,24 @@ def fetch_lrc(
         if tmp_path.exists():
             candidates.append(tmp_path)
 
-    if not candidates:
+    # Vorhandene LRC als Kandidat einbeziehen (wird nicht gelöscht)
+    all_candidates = candidates + ([existing_lrc] if existing_lrc and existing_lrc.exists() else [])
+
+    if not all_candidates:
         return False
 
     if flac_path and flac_path.exists():
-        result = _whisper_best(flac_path, candidates)
+        result = _whisper_best(flac_path, all_candidates)
         best_content = (
             result[0].read_bytes()
             if result and result[1] >= _WHISPER_MIN_OVERLAP
             else None
         )
     else:
-        best = max(candidates, key=lambda p: _score_lrc(p, expected_dur))
+        best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()
 
-    for p in candidates:
+    for p in candidates:  # nur temp-Dateien löschen, nie existing_lrc
         p.unlink(missing_ok=True)
 
     if best_content is None:
@@ -313,7 +318,7 @@ def main() -> None:
             dest = lrc_path
 
         try:
-            found = fetch_lrc(query, dest, env, expected_dur, flac_path=flac)
+            found = fetch_lrc(query, dest, env, expected_dur, flac_path=flac, existing_lrc=lrc_path)
         except FileNotFoundError:
             print("   ✗ syncedlyrics nicht gefunden — Abbruch.")
             dest.unlink(missing_ok=True)

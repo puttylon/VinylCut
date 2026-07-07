@@ -3,6 +3,7 @@ import sys
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import fetch_metadata as mf
@@ -10,9 +11,16 @@ from rich.console import Console
 from rich.live import Live
 
 from cut_ui import build_cutting_panel, build_metadata_panel, live_input
-from fetch_songtext import fetch_lrc, _load_env
+from fetch_songtext import (
+    fetch_lrc,
+    _load_env,
+    _load_cache,
+    _save_cache,
+    _cache_entry_valid,
+)
+from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.2"
+__version__ = "1.9.5"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 
@@ -644,22 +652,45 @@ def main():
         if not no_songtext:
             env = _load_env()
             artist = data.get("artist", "")
+            lrc_cache = _load_cache(track_out_dir)
             for idx, track in enumerate(data["tracks"]):
                 safe = track["title"].replace("/", "_")
+                audio_name = f"{idx + 1:02d} - {safe}.flac"
                 lrc_path = track_out_dir / f"{idx + 1:02d} - {safe}.lrc"
                 flac_path = track_out_dir / f"{idx + 1:02d} - {safe}.flac"
                 query = f"{artist} {track['title']}".strip()
+                entry = lrc_cache.get(audio_name)
+                if (
+                    entry
+                    and _cache_entry_valid(entry)
+                    and (entry.get("r") != "ok" or lrc_path.exists())
+                ):
+                    lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
+                    live.update(panel("songtext", export_status, lrc_status))
+                    live.refresh()
+                    continue
+
                 lrc_status[idx] = "…"
                 live.update(panel("songtext", export_status, lrc_status))
                 live.refresh()
                 try:
-                    fetch_lrc(query, lrc_path, env, track.get("dur_s", 0.0), flac_path)
+                    _found, _info, _extras = fetch_lrc(
+                        query, lrc_path, env, track.get("dur_s", 0.0), flac_path
+                    )
                 except FileNotFoundError:
                     lrc_status[idx] = "✗"
                     for j in range(idx + 1, n):
                         lrc_status[j] = "✗"
                     break
-                lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
+                found = lrc_path.exists()
+                lrc_status[idx] = "✓" if found else "✗"
+                lrc_cache[audio_name] = {
+                    "v": _fetch_songtext_version,
+                    "r": "ok" if found else "nf",
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    **_extras,
+                }
+                _save_cache(track_out_dir, lrc_cache)
                 live.update(panel("songtext", export_status, lrc_status))
                 live.refresh()
 

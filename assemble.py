@@ -17,7 +17,7 @@ from assemble_ui import (
 )
 from cut_ui import fmt_dur, live_input
 
-__version__ = "1.1.0"
+__version__ = "1.1.2"
 
 console = Console()
 
@@ -348,12 +348,55 @@ def measure_channel_peaks(flac_path: Path) -> tuple:
 def normalize(
     in_path: Path, out_path: Path, left_gain: float = 1.0, right_gain: float = 1.0
 ) -> None:
-    """DC-Offset entfernen, optionaler Kanalausgleich, auf -0.1 dBFS normalisieren."""
-    remix = ["remix", f"1v{left_gain:.6f}", f"2v{right_gain:.6f}"]
+    """DC-Offset entfernen, optionaler Kanalausgleich, auf -1.0 dBTP normalisieren (ffmpeg loudnorm, 2 Pässe)."""
+    base_filters = ["highpass=f=5"]
+    if left_gain != 1.0 or right_gain != 1.0:
+        base_filters.append(f"pan=stereo|c0={left_gain:.6f}*c0|c1={right_gain:.6f}*c1")
+
+    # Pass 1: Pegel messen
+    r = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-i",
+            str(in_path),
+            "-af",
+            ",".join(base_filters) + ",loudnorm=I=-23:LRA=11:TP=-1.0:print_format=json",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    j_start = r.stderr.rfind("{")
+    j_end = r.stderr.rfind("}") + 1
+    stats = json.loads(r.stderr[j_start:j_end])
+
+    # Pass 2: Normalisierung anwenden
+    apply_af = ",".join(base_filters) + (
+        f",loudnorm=I=-23:LRA=11:TP=-1.0"
+        f":measured_I={stats['input_i']}"
+        f":measured_LRA={stats['input_lra']}"
+        f":measured_TP={stats['input_tp']}"
+        f":measured_thresh={stats['input_thresh']}"
+        f":offset={stats['target_offset']}"
+        f":linear=true"
+    )
     subprocess.run(
-        ["sox", str(in_path), str(out_path)]
-        + remix
-        + ["highpass", "5", "norm", "-0.1"],
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(in_path),
+            "-af",
+            apply_af,
+            str(out_path),
+        ],
         check=True,
     )
 

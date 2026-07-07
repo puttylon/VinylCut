@@ -5,11 +5,13 @@ import json
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.4.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
+_PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
 _AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
 
 # LRC-Timestamps enden oft vor dem Track-Ende (Instrumental-Outro → kein Text).
@@ -17,35 +19,80 @@ _AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
 _LRC_TOO_SHORT_TOLERANCE = 0.40  # last_ts darf bis zu 40 % kürzer als der Track sein
 _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der Track sein
 
-# Whisper: erst ab Mindest-Overlap gilt eine LRC als verifiziert.
-_WHISPER_MIN_OVERLAP = (
-    0.06  # Schwellwert für Qualitätskontrolle (Falsch-Song-Erkennung)
-)
-_WHISPER_MODEL = "base"
-_WHISPER_CONTEXT_SEC = 60  # Sekunden Audio die transkribiert werden
+# Whisper: zweistufige Verifikation — base zuerst, small nur im Grenzbereich.
+_WHISPER_MIN_OVERLAP = 0.40  # Schwellwert: ab hier wird eine LRC akzeptiert
+_WHISPER_RETRY_MIN = 0.25  # Untergrenze: base-Score ab hier → small-Pass
+_WHISPER_MODEL_FAST = "base"  # erster Pass — immer
+_WHISPER_MODEL_FULL = "small"  # zweiter Pass — nur im Grenzbereich [0.25, 0.40)
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
 
-_MARKER_PREFIX = ".fetch_songtext_v"
-_MARKER_MIN_VERSION = (
-    "1.2.0"  # Marker dieser oder neuerer Version = gültig, kein Neulauf
+_CACHE_FILENAME = ".fetch_songtext.json"
+_CACHE_MIN_VERSION = (
+    "1.4.0"  # Einträge dieser oder neuerer Version = gültig, kein Neulauf
 )
 
-_whisper_model = None  # lazy singleton — einmal laden, für alle Tracks wiederverwenden
-_last_whisper_score: float = 0.0  # letzter Overlap-Score, für Ausgabe in main()
+# Genres die keinen Songtext haben — Substring-Matching (Kleinschreibung)
+_SKIP_GENRE_KEYWORDS = {
+    # Hörbuch / Audiobook
+    "hörbuch",
+    "hoerbuch",
+    "audiobook",
+    "audio book",
+    # Hörspiel / Audio Drama
+    "hörspiel",
+    "hoerspiel",
+    "audio play",
+    "audioplay",
+    "radio play",
+    "radioplay",
+    "radio drama",
+    "radio show",
+    # Instrumental
+    "instrumental",
+    # Gesprochenes Wort
+    "podcast",
+    "speech",
+    "spoken word",
+    "spoken",
+    "interview",
+    "lesung",
+    "vortrag",
+    "reading",
+    # Soundeffekte / Ambient ohne Text
+    "sound effects",
+    "sound effect",
+    "sfx",
+    "noise",
+    "field recording",
+    "nature sounds",
+}
+
+_whisper_models: dict = {}  # name → WhisperModel singleton
 
 
-def _read_audio_tags(audio_path: Path) -> tuple[str, str]:
-    """Liest ARTIST und TITLE via mutagen (FLAC, MP3, OGG, M4A …). Gibt ('', '') bei Fehler."""
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _read_audio_tags(audio_path: Path) -> tuple[str, str, str]:
+    """Liest ARTIST, TITLE und GENRE via mutagen (FLAC, MP3, OGG, M4A …). Gibt ('', '', '') bei Fehler."""
     try:
         from mutagen import File as MutagenFile
+
         tags = MutagenFile(audio_path, easy=True)
         if tags is None:
-            return "", ""
+            return "", "", ""
         artist = str(tags.get("artist", [""])[0])
         title = str(tags.get("title", [""])[0])
-        return artist, title
+        genre = str(tags.get("genre", [""])[0])
+        return artist, title, genre
     except Exception:
-        return "", ""
+        return "", "", ""
+
+
+def _is_skip_genre(genre: str) -> bool:
+    g = genre.lower()
+    return any(kw in g for kw in _SKIP_GENRE_KEYWORDS)
 
 
 def _load_env() -> dict:
@@ -98,26 +145,34 @@ def _score_lrc(path: Path, expected_dur: float = 0.0) -> tuple[int, int, int]:
     return (valid, synced, lines)
 
 
-def _get_whisper_model():
+def _get_whisper_model(name: str):
     """Lädt das Whisper-Modell beim ersten Aufruf, gibt None zurück wenn nicht installiert."""
-    global _whisper_model
-    if _whisper_model is None:
+    if name not in _whisper_models:
         try:
             from faster_whisper import WhisperModel
         except ImportError:
             return None
-        print(f"   Lade Whisper-Modell ({_WHISPER_MODEL})...", end=" ", flush=True)
+        print(f"   Lade Whisper-Modell ({name})...", end=" ", flush=True)
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         # int8: schneller auf CPU, vermeidet float16-Warnung von ctranslate2
-        _whisper_model = WhisperModel(
-            _WHISPER_MODEL, device="auto", compute_type="int8"
-        )
+        _whisper_models[name] = WhisperModel(name, device="auto", compute_type="int8")
         print("bereit.")
-    return _whisper_model
+    return _whisper_models[name]
 
 
-def _extract_lrc_words(content: str, max_lines: int = 15) -> list[str]:
-    """Ersten max_lines Textzeilen einer LRC als Wortliste (Unicode-Buchstaben)."""
+def _whisper_context_sec(dur_s: float) -> float:
+    """Adaptive Transkriptionsdauer: kurze Songs vollständig, lange Songs anteilig."""
+    if dur_s <= 0:
+        return 180.0  # Fallback ohne bekannte Dauer
+    if dur_s <= 180:
+        return dur_s  # ≤ 3 min → 100 %
+    if dur_s <= 360:
+        return dur_s * 0.75  # ≤ 6 min → 75 %
+    return min(dur_s * 0.50, 300)  # > 6 min → 50 %, max 5 min
+
+
+def _extract_lrc_words(content: str) -> list[str]:
+    """Alle Textzeilen einer LRC als Wortliste (Unicode-Buchstaben)."""
     words: list[str] = []
     for line in content.splitlines():
         if re.match(r"\[[a-z]+:", line.lower()):
@@ -125,8 +180,6 @@ def _extract_lrc_words(content: str, max_lines: int = 15) -> list[str]:
         text = re.sub(r"\[\d+:\d+\.\d+\]", "", line).strip()
         if text:
             words.extend(re.findall(r"[^\W\d_]+", text.lower()))
-            if len(words) >= max_lines * 8:
-                break
     return words
 
 
@@ -138,9 +191,11 @@ def _word_overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _transcribe(flac_path: Path, start: float) -> list[str]:
-    """Transkribiert _WHISPER_CONTEXT_SEC Sekunden ab start, gibt Wortliste zurück."""
-    model = _get_whisper_model()
+def _transcribe(
+    flac_path: Path, start: float, context_sec: float, model_name: str
+) -> list[str]:
+    """Transkribiert context_sec Sekunden ab start, gibt Wortliste zurück."""
+    model = _get_whisper_model(model_name)
     if model is None:
         return []
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -155,7 +210,7 @@ def _transcribe(flac_path: Path, start: float) -> list[str]:
                 "-ss",
                 str(start),
                 "-t",
-                str(_WHISPER_CONTEXT_SEC),
+                str(context_sec),
                 "-ar",
                 "16000",
                 "-ac",
@@ -173,16 +228,17 @@ def _transcribe(flac_path: Path, start: float) -> list[str]:
 
 
 def _whisper_best(
-    flac_path: Path, candidates: list[Path]
-) -> tuple[Path | None, float, bool]:
-    """Gibt (bester Kandidat oder None, Overlap, has_vocals) zurück.
+    flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
+) -> tuple[Path | None, float, bool, str, int, str]:
+    """Zweistufige Verifikation: base zuerst, small nur im Grenzbereich.
 
-    has_vocals=True wenn Whisper Sprache erkannt hat — auch bei niedrigem Overlap.
-    Jeder Kandidat wird gegen die Transkription seines eigenen Start-Offsets
-    gescored. Gleiche Offsets (±3 s) teilen sich eine Transkription.
+    Gibt (bester Kandidat, score, has_vocals, info_str, words, model_used) zurück.
+    model_used ist der Name des Modells das die finale Entscheidung getroffen hat.
     """
-    if _get_whisper_model() is None:
-        return (None, 0.0, False)
+    if _get_whisper_model(_WHISPER_MODEL_FAST) is None:
+        return (None, 0.0, False, "", 0, "")
+
+    ctx = _whisper_context_sec(expected_dur)
 
     # Start-Offset pro Kandidat bestimmen
     candidate_starts: list[tuple[Path, float]] = []
@@ -194,44 +250,57 @@ def _whisper_best(
             start = 0.0
         candidate_starts.append((p, start))
 
-    # Transkriptionen cachen: key = start auf 3 s gerundet
-    transcript_cache: dict[int, list[str]] = {}
-    for _, start in candidate_starts:
-        key = round(start / 3)
-        if key not in transcript_cache:
-            transcript_cache[key] = _transcribe(flac_path, start)
+    def _score_from_cache(
+        cache: dict[int, list[str]],
+    ) -> tuple[Path | None, float, int]:
+        best_path: Path | None = None
+        best_score = 0.0
+        for p, start in candidate_starts:
+            words = cache.get(round(start / 3), [])
+            if not words:
+                continue
+            try:
+                score = _word_overlap(
+                    words, _extract_lrc_words(p.read_text(encoding="utf-8"))
+                )
+            except Exception:
+                score = 0.0
+            if score > best_score:
+                best_score = score
+                best_path = p
+        total = sum(len(w) for w in cache.values())
+        return best_path, best_score, total
 
-    has_vocals = any(len(words) > 0 for words in transcript_cache.values())
-    total_words = sum(len(words) for words in transcript_cache.values())
+    def _build_cache(model_name: str) -> dict[int, list[str]]:
+        cache: dict[int, list[str]] = {}
+        for _, start in candidate_starts:
+            key = round(start / 3)
+            if key not in cache:
+                cache[key] = _transcribe(flac_path, start, ctx, model_name)
+        return cache
 
-    best_path: Path | None = None
-    best_score = 0.0
-    for p, start in candidate_starts:
-        words = transcript_cache.get(round(start / 3), [])
-        if not words:
-            continue
-        try:
-            score = _word_overlap(
-                words, _extract_lrc_words(p.read_text(encoding="utf-8"))
-            )
-        except Exception:
-            score = 0.0
-        if score > best_score:
-            best_score = score
-            best_path = p
+    # Pass 1: base
+    fast_cache = _build_cache(_WHISPER_MODEL_FAST)
+    has_vocals = any(len(w) > 0 for w in fast_cache.values())
+    best_path, best_score, total_words = _score_from_cache(fast_cache)
+    model_used = _WHISPER_MODEL_FAST
 
-    global _last_whisper_score
-    _last_whisper_score = best_score
+    # Pass 2: small — nur wenn Vokale erkannt und Score im Grenzbereich
+    if has_vocals and _WHISPER_RETRY_MIN <= best_score < _WHISPER_MIN_OVERLAP:
+        full_cache = _build_cache(_WHISPER_MODEL_FULL)
+        full_path, full_score, full_words = _score_from_cache(full_cache)
+        if full_score > best_score:
+            best_path, best_score, total_words = full_path, full_score, full_words
+            model_used = _WHISPER_MODEL_FULL
 
     if has_vocals:
-        overlap_info = f"{best_score:.0%}"
-        if best_score < _WHISPER_MIN_OVERLAP:
-            overlap_info += f" (unter Schwellwert {_WHISPER_MIN_OVERLAP:.0%})"
-        print(f"   Whisper: ~{total_words} Wörter, Overlap: {overlap_info}")
+        threshold_flag = "!" if best_score < _WHISPER_MIN_OVERLAP else ""
+        model_flag = "+" if model_used == _WHISPER_MODEL_FULL else ""
+        info_str = f"~{total_words}W, {best_score:.0%}{threshold_flag}{model_flag}"
     else:
-        print("   Whisper: keine Sprache erkannt → instrumental")
+        info_str = "instrumental"
 
-    return (best_path, best_score, has_vocals)
+    return (best_path, best_score, has_vocals, info_str, total_words, model_used)
 
 
 def fetch_lrc(
@@ -241,27 +310,28 @@ def fetch_lrc(
     expected_dur: float = 0.0,
     flac_path: Path | None = None,
     existing_lrc: Path | None = None,
-) -> bool:
+) -> tuple[bool, str, dict]:
     """Alle Provider befragen, bestes Ergebnis via Whisper oder Dauer-Scoring wählen.
 
-    Mit flac_path: Whisper bewertet alle Kandidaten inkl. existing_lrc (falls vorhanden).
-    Bei erkannter Sprache: Overlap >= _WHISPER_MIN_OVERLAP verhindert Falsch-Song-Treffer.
-    Bei keiner Sprache: Fallback auf Provider-Anzahl + Lyrics-Zeilen (Vokalsong trotz Whisper-Fehler).
-    Ohne flac_path (oder faster-whisper nicht installiert): Fallback auf Dauer-Scoring.
+    Gibt (gefunden, info_str, extras) zurück.
+    extras enthält score, providers, words (und ggf. fallback=True) für den Cache.
     """
-    global _last_whisper_score
-    _last_whisper_score = 0.0
 
     def _query_provider(provider: str) -> tuple[str, Path | None]:
         with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         tmp_path.unlink()
-        subprocess.run(
-            ["syncedlyrics", query, "-o", str(tmp_path), "-p", provider],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        try:
+            subprocess.run(
+                ["syncedlyrics", query, "-o", str(tmp_path), "-p", provider],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=_PROVIDER_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            tmp_path.unlink(missing_ok=True)
+            return provider, None
         return provider, tmp_path if tmp_path.exists() else None
 
     candidates: list[Path] = []
@@ -290,24 +360,26 @@ def fetch_lrc(
     )
 
     if not all_candidates:
-        print("   Kein Provider-Treffer")
-        return False
+        for p in candidates:
+            p.unlink(missing_ok=True)
+        return False, "0/4", {"score": None, "providers": 0, "words": None}
 
     hit_str = ", ".join(provider_hits) if provider_hits else "—"
-    print(f"   {len(candidates)}/{len(_ALL_PROVIDERS)} Provider: {hit_str}")
+    prov_str = f"{len(candidates)}/{len(_ALL_PROVIDERS)}: {hit_str}"
 
+    fallback_used = False
     if flac_path and flac_path.exists():
-        best_path, best_score, has_vocals = _whisper_best(flac_path, all_candidates)
+        best_path, best_score, has_vocals, whisper_info, whisper_words, model_used = (
+            _whisper_best(flac_path, all_candidates, expected_dur)
+        )
         if has_vocals:
-            # Qualitätskontrolle: Overlap zu niedrig = falscher Song
             best_content = (
                 best_path.read_bytes()
                 if best_path and best_score >= _WHISPER_MIN_OVERLAP
                 else None
             )
         else:
-            # Keine Sprache erkannt: instrumental ODER Whisper hat Vokalstil nicht erkannt.
-            # Fallback: ≥2 Provider + ≥10 Lyrics-Zeilen = sehr wahrscheinlich Vokalsong.
+            # Keine Sprache erkannt: Fallback ≥2 Provider + ≥10 Zeilen.
             best_candidate = max(
                 all_candidates, key=lambda p: _score_lrc(p, expected_dur)
             )
@@ -320,23 +392,38 @@ def fetch_lrc(
                 and not re.match(r"\[[a-z]+:", ln.lower())
             )
             if len(candidates) >= 2 and n_lines >= 10:
-                print(
-                    f"   Hinweis: Whisper erkannte keine Sprache, aber {len(candidates)} Provider, {n_lines} Zeilen → gespeichert"
-                )
+                whisper_info += f", Fallback ({n_lines}Z)"
                 best_content = best_candidate.read_bytes()
+                fallback_used = True
             else:
                 best_content = None
+        info_str = f"{prov_str} │ {whisper_info}" if whisper_info else prov_str
+        extras: dict = {
+            "score": round(best_score, 3),
+            "providers": len(candidates),
+            "words": whisper_words,
+            "model": model_used,
+        }
+        if fallback_used:
+            extras["fallback"] = True
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()
+        info_str = prov_str
+        extras = {
+            "score": None,
+            "providers": len(candidates),
+            "words": None,
+            "model": None,
+        }
 
     for p in candidates:  # nur temp-Dateien löschen, nie existing_lrc
         p.unlink(missing_ok=True)
 
     if best_content is None:
-        return False
+        return False, info_str, extras
     lrc_path.write_bytes(best_content)
-    return True
+    return True, info_str, extras
 
 
 def _load_release(folder: Path) -> tuple[str, dict]:
@@ -358,23 +445,24 @@ def _parse_version(v: str) -> tuple[int, ...]:
         return (0,)
 
 
-def _find_marker_version(folder: Path) -> str | None:
-    for f in folder.glob(f"{_MARKER_PREFIX}*"):
-        return f.name[len(_MARKER_PREFIX) :]
-    return None
+def _load_cache(folder: Path) -> dict:
+    try:
+        return json.loads((folder / _CACHE_FILENAME).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
-def _is_marker_valid(folder: Path) -> bool:
-    ver = _find_marker_version(folder)
-    return ver is not None and _parse_version(ver) >= _parse_version(
-        _MARKER_MIN_VERSION
-    )
+def _save_cache(folder: Path, cache: dict) -> None:
+    try:
+        (folder / _CACHE_FILENAME).write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass  # nicht kritisch — Track wird beim nächsten Lauf erneut geprüft
 
 
-def _update_marker(folder: Path) -> None:
-    for old in folder.glob(f"{_MARKER_PREFIX}*"):
-        old.unlink(missing_ok=True)
-    (folder / f"{_MARKER_PREFIX}{__version__}").touch()
+def _cache_entry_valid(entry: dict) -> bool:
+    return _parse_version(entry.get("v", "0")) >= _parse_version(_CACHE_MIN_VERSION)
 
 
 def main() -> None:
@@ -394,7 +482,7 @@ def main() -> None:
         "--force",
         "-f",
         action="store_true",
-        help="Verarbeitungsmarker ignorieren, alle Ordner neu prüfen",
+        help="Cache ignorieren, alle Tracks neu prüfen",
     )
     parser.add_argument(
         "-V", "--version", action="version", version=f"fetch_songtext {__version__}"
@@ -403,7 +491,8 @@ def main() -> None:
 
     root = Path(args.path).resolve()
     audio_files = sorted(
-        p for p in (root.rglob("*") if args.recursive else root.glob("*"))
+        p
+        for p in (root.rglob("*") if args.recursive else root.glob("*"))
         if p.suffix.lower() in _AUDIO_EXTENSIONS
     )
 
@@ -415,41 +504,40 @@ def main() -> None:
     print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")
 
     env = _load_env()
-    updated = skipped = not_found = errors = 0
+    _get_whisper_model(
+        _WHISPER_MODEL_FAST
+    )  # einmal vorladen — Meldung erscheint vor der Track-Liste
+    updated = skipped = not_found = errors = genre_skipped = 0
 
     current_parent: Path | None = None
-    skip_current_dir = False
-    processed_dirs: set[Path] = set()
-    skipped_dirs = 0
+    dir_cache: dict = {}
     artist = ""
     tracks_by_title: dict = {}
 
     for audio in audio_files:
         lrc_path = audio.with_suffix(".lrc")
 
-        # Albumordner wechselt → release.json neu laden + Marker prüfen
         if audio.parent != current_parent:
             current_parent = audio.parent
             artist, tracks_by_title = _load_release(audio.parent)
-            if not args.force and _is_marker_valid(audio.parent):
-                skip_current_dir = True
-                skipped_dirs += 1
-                marker_ver = _find_marker_version(audio.parent)
-                if args.recursive:
-                    print(f"── {audio.parent.name} (übersprungen, v{marker_ver})")
-                else:
-                    print(
-                        f"Ordner bereits mit v{marker_ver} verarbeitet — nutze --force zum Neuladen."
-                    )
-            else:
-                skip_current_dir = False
-                processed_dirs.add(audio.parent)
+            dir_cache = _load_cache(audio.parent)
 
-        if skip_current_dir:
-            skipped += 1
+        # Cache-Check: Track bereits verarbeitet?
+        if not args.force:
+            entry = dir_cache.get(audio.name)
+            if entry and _cache_entry_valid(entry):
+                if entry.get("r") != "ok" or lrc_path.exists():
+                    skipped += 1
+                    continue
+
+        meta_artist, meta_title, meta_genre = _read_audio_tags(audio)
+
+        # Genre-Check: kein Songtext erwartet → überspringen (kein Cache-Eintrag)
+        if _is_skip_genre(meta_genre):
+            lrc_path.unlink(missing_ok=True)
+            genre_skipped += 1
             continue
 
-        meta_artist, meta_title = _read_audio_tags(audio)
         title = meta_title or (
             audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem
         )
@@ -457,68 +545,74 @@ def main() -> None:
         query = f"{query_artist} {title}".strip()
         expected_dur = tracks_by_title.get(title, 0.0)
 
-        # Immer in Temp-Datei schreiben und danach mit vorhandener LRC vergleichen.
-        # Nur bei neuer Datei ohne bestehende LRC direkt schreiben.
+        rel = str(audio.relative_to(root))
+
         use_compare = args.recursive or lrc_path.exists()
         if use_compare:
-            if args.recursive:
-                print(f"── {audio.parent.name} / {audio.stem}")
-            else:
-                print(f"Suche: {query}")
             with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
                 dest = Path(tmp.name)
             dest.unlink()
         else:
-            print(f"Suche: {query}")
             dest = lrc_path
 
+        cache_result: str | None = None
+
         try:
-            found = fetch_lrc(
+            found, info, extras = fetch_lrc(
                 query, dest, env, expected_dur, flac_path=audio, existing_lrc=lrc_path
             )
         except FileNotFoundError:
-            print("   ✗ syncedlyrics nicht gefunden — Abbruch.")
+            print(f"{_ts()}  {rel}  syncedlyrics nicht gefunden — Abbruch.")
             dest.unlink(missing_ok=True)
             errors += 1
             break
 
         if use_compare:
-            score_str = (
-                f"  ({_last_whisper_score:.0%})" if _last_whisper_score > 0 else ""
-            )
             if not found:
                 dest.unlink(missing_ok=True)
-                if lrc_path.exists():
-                    print(f"   = vorhandene LRC behalten.{score_str}")
-                    skipped += 1
-                else:
-                    print(f"   ✗ Kein Treffer.{score_str}")
-                    not_found += 1
+                lrc_path.unlink(missing_ok=True)
+                print(f"{_ts()}  {rel}  {info}  ✗")
+                not_found += 1
+                cache_result = "nf"
             else:
-                new_content = dest.read_bytes()
-                old_content = lrc_path.read_bytes() if lrc_path.exists() else None
-                dest.unlink(missing_ok=True)
-                if old_content == new_content:
-                    print(f"   = unverändert.{score_str}")
-                    skipped += 1
-                else:
-                    lrc_path.write_bytes(new_content)
-                    print(f"   ✓ gespeichert.{score_str}")
-                    updated += 1
+                try:
+                    new_content = dest.read_bytes()
+                    old_content = lrc_path.read_bytes() if lrc_path.exists() else None
+                    dest.unlink(missing_ok=True)
+                    if old_content == new_content:
+                        print(f"{_ts()}  {rel}  {info}  =")
+                        skipped += 1
+                    else:
+                        lrc_path.write_bytes(new_content)
+                        print(f"{_ts()}  {rel}  {info}  ✓")
+                        updated += 1
+                    cache_result = "ok"
+                except OSError as e:
+                    dest.unlink(missing_ok=True)
+                    print(f"{_ts()}  {rel}  Schreibfehler: {e} — Abbruch.")
+                    errors += 1
+                    break
         else:
             if found:
-                print(f"  ✓ {audio.stem}.lrc")
                 updated += 1
+                cache_result = "ok"
             else:
-                print(f"  ✗ {audio.stem} — kein Treffer")
                 not_found += 1
+                cache_result = "nf"
+            print(f"{_ts()}  {rel}  {info}  {'✓' if found else '✗'}")
 
-    for folder in processed_dirs:
-        _update_marker(folder)
+        if cache_result is not None:
+            dir_cache[audio.name] = {
+                "v": __version__,
+                "r": cache_result,
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                **extras,
+            }
+            _save_cache(audio.parent, dir_cache)
 
     summary = f"Fertig — {updated} geladen, {skipped} übersprungen, {not_found} nicht gefunden"
-    if skipped_dirs:
-        summary += f", {skipped_dirs} Ordner mit Marker übersprungen"
+    if genre_skipped:
+        summary += f", {genre_skipped} Genre übersprungen"
     if errors:
         summary += f", {errors} Fehler"
     print(f"\n{summary}.")

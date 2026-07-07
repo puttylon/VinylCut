@@ -6,3 +6,4 @@ flacs/
 __pycache__/
 .DS_Store
 genius_token
+backup_*/

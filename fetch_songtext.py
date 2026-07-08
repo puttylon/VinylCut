@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.17"
+__version__ = "1.4.18"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -245,6 +245,47 @@ def _extract_lrc_words(content: str) -> list[str]:
     return words
 
 
+def _detect_lrc_language(candidates: list[Path]) -> str | None:
+    """Erkennt Sprache aus LRC-Inhalt via langdetect (ISO 639-1, z.B. 'de').
+
+    Gibt None zurück wenn langdetect nicht installiert ist, zu wenig Text
+    vorhanden ist oder die Konfidenz unter 80 % liegt.
+    """
+    try:
+        from langdetect import DetectorFactory, detect_langs
+
+        DetectorFactory.seed = 0  # deterministisches Ergebnis
+    except ImportError:
+        return None
+
+    texts: list[str] = []
+    for p in candidates:
+        try:
+            content = p.read_text(encoding="utf-8")
+            # Nur Liedtext, keine LRC-Timestamps
+            for line in content.splitlines():
+                text = re.sub(r"\[\d+:\d+\.\d+\]", "", line).strip()
+                if text and not re.match(r"\[[a-z]+:", line.lower()):
+                    texts.append(text)
+        except Exception:
+            pass
+
+    if not texts:
+        return None
+
+    combined = " ".join(texts)
+    if len(combined.split()) < 10:
+        return None
+
+    try:
+        langs = detect_langs(combined)
+        if langs and langs[0].prob >= 0.80:
+            return langs[0].lang
+    except Exception:
+        pass
+    return None
+
+
 def _word_overlap(a: list[str], b: list[str]) -> float:
     """Jaccard-Ähnlichkeit zweier Wortmengen (für Provider-Konsens)."""
     if not a or not b:
@@ -277,7 +318,11 @@ def _is_hallucination(words: list[str]) -> bool:
 
 
 def _transcribe(
-    flac_path: Path, start: float, context_sec: float, model_name: str
+    flac_path: Path,
+    start: float,
+    context_sec: float,
+    model_name: str,
+    language: str | None = None,
 ) -> tuple[list[str], float, float]:
     """Transkribiert context_sec Sekunden ab start, gibt (words, no_speech_prob, avg_logprob) zurück."""
     if _get_whisper_model(model_name) is None:
@@ -304,7 +349,10 @@ def _transcribe(
             capture_output=True,
         )
         model = _whisper_models[model_name]
-        segs = list(model.transcribe(str(tmp_wav), beam_size=1)[0])
+        kwargs: dict = {"beam_size": 1}
+        if language:
+            kwargs["language"] = language
+        segs = list(model.transcribe(str(tmp_wav), **kwargs)[0])
         if not segs:
             return [], 1.0, 0.0
         no_speech = sum(s.no_speech_prob for s in segs) / len(segs)
@@ -406,13 +454,15 @@ def _whisper_best(
         total = sum(len(v[0]) for v in cache.values())
         return best_path, best_score, total
 
+    lrc_lang = _detect_lrc_language(candidates)
+
     def _build_cache(model_name: str) -> dict[int, _CacheVal]:
         cache: dict[int, _CacheVal] = {}
         for _, start in candidate_starts:
             key = round(start / 3)
             if key not in cache:
                 words, no_speech, logprob = _transcribe(
-                    flac_path, start, ctx, model_name
+                    flac_path, start, ctx, model_name, language=lrc_lang
                 )
                 if _is_hallucination(words):
                     words = []

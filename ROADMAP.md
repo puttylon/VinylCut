@@ -16,6 +16,15 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.18 — Spracherkennung aus LRC, language-Hint an Whisper
+
+Whisper transkribiert bei nicht-englischen Songs fälschlich auf Englisch (Grund:
+base-Modell bevorzugt Englisch). Fix: Sprache des LRC-Texts per langdetect erkannt
+(55 Sprachen, Konfidenz ≥ 80 %), als language-Parameter an model.transcribe()
+übergeben. Behebt 0W-Problem für deutsche und andere nicht-englische Tracks
+(getestet: Morgenrot "Strom" 95W→199W de, "Frank liegt krank" 189W Nonsense→248W de).
+Neues Paket: langdetect (requirements.txt).
+
 ## ✓ v1.4.17 — VAD-Peak als Probe-Start (unabhängig von LRC-Timestamps)
 
 VAD-Probe startet jetzt an der lautesten Stelle des Tracks statt am ersten

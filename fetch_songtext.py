@@ -23,7 +23,7 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 _WHISPER_MIN_OVERLAP = 0.40  # Schwellwert: ab hier wird eine LRC akzeptiert
 _WHISPER_RETRY_MIN = 0.20  # Untergrenze: base-Score ab hier → small-Pass
 _WHISPER_MODEL_FAST = "base"  # erster Pass — immer
-_WHISPER_MODEL_FULL = "small"  # zweiter Pass — nur im Grenzbereich [0.25, 0.40)
+_WHISPER_MODEL_FULL = "small"  # zweiter Pass — nur im Grenzbereich [0.20, 0.40)
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
@@ -322,7 +322,7 @@ def fetch_lrc(
     """Alle Provider befragen, bestes Ergebnis via Whisper oder Dauer-Scoring wählen.
 
     Gibt (gefunden, info_str, extras) zurück.
-    extras enthält score, providers, words (und ggf. fallback=True) für den Cache.
+    extras enthält score, providers, words, model (und ggf. fallback=True, consensus=True).
     """
 
     def _query_provider(provider: str) -> tuple[str, Path | None]:

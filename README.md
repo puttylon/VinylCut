@@ -138,39 +138,61 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 ---
 
 ### `fetch_songtext.py`
-Sucht für jede FLAC im Zielordner synchronisierte Songtexte via `syncedlyrics`, verifiziert das Ergebnis mit Whisper und speichert es als `.lrc`-Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
+Sucht für jede Audiodatei synchronisierte Songtexte via `syncedlyrics`, verifiziert das Ergebnis mit Whisper und speichert es als `.lrc`-Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
 
 ```bash
 python3 fetch_songtext.py "Artist - Album/"           # einzelnes Album
-python3 fetch_songtext.py --recursive "/Musik/"       # alle Unterordner neu laden
+python3 fetch_songtext.py --recursive "/Musik/"       # alle Unterordner rekursiv
+python3 fetch_songtext.py --force "Artist - Album/"   # Cache ignorieren, neu prüfen
 ```
+
+**Unterstützte Formate:** FLAC, MP3, OGG, Opus, M4A, AAC, WAV
 
 **Suchverfahren:**
 
-Alle vier Provider werden gleichzeitig befragt: `lrclib`, `musixmatch`, `netease`, `genius`. Danach entscheidet Whisper welcher Kandidat zum Audio passt.
+Alle vier Provider werden gleichzeitig befragt (je max. 20 s Timeout): `lrclib`, `musixmatch`, `netease`, `genius`. Artist und Titel kommen aus den Audio-Tags (mutagen). Tracks ohne Artist- **und** Title-Tag werden übersprungen. Tracks mit Genre-Tags wie `Instrumental`, `Hörbuch`, `Podcast` o.ä. werden ebenfalls übersprungen (keine LRC erwartet).
 
-1. **Whisper-Verifikation** (wenn `faster-whisper` installiert und FLAC verfügbar):
-   - Whisper transkribiert 60 Sekunden ab dem ersten Lyrics-Timestamp (`_WHISPER_PRE_ROLL = 0 s`, direkt beim ersten `[mm:ss.xx]`)
-   - Wort-Overlap (Jaccard) zwischen Transkription und LRC-Anfang bestimmt den Gewinner
-   - Liegt der beste Overlap unter `_WHISPER_MIN_OVERLAP` (6 %) → **keine LRC gespeichert** (falscher Song)
-   - Modell (`_WHISPER_MODEL = "base"`) wird beim ersten Aufruf geladen und für alle Tracks wiederverwendet
-   - Liefert Whisper keine Transkription: Fallback-Prüfung — ≥ 2 Provider **und** ≥ 10 Lyrics-Zeilen → LRC trotzdem gespeichert (Vokalsong, den Whisper nicht erkannt hat, z. B. ungewöhnlicher Vokalstil)
-   - Andernfalls (echtes Instrumental oder zu wenig Provider-Übereinstimmung) → **keine LRC gespeichert**
-   - Ausgabe zeigt immer: Provider-Anzahl, Whisper-Wörterzahl und Overlap
+**Whisper-Verifikation** (wenn `faster-whisper` installiert und FLAC/Audio verfügbar):
 
-2. **Fallback ohne Whisper** (wenn `faster-whisper` nicht installiert):
-   - Scoring nach `(valid, synced, lines)` — lexikographisch, höher = besser
-   - `valid = 0` wenn letzter Timestamp die Trackdauer um mehr als die Toleranzwerte über- oder unterschreitet:
+Whisper transkribiert einen Teil des Tracks ab dem ersten Lyric-Timestamp und vergleicht den Text mit jedem Provider-Kandidaten via Jaccard (Wort-Overlap). Transkriptionsdauer adaptiv:
 
-| Richtung | Konstante | Wert | Begründung |
-|----------|-----------|------|------------|
-| LRC endet zu spät | `_LRC_TOO_LONG_TOLERANCE` | 10 % | Falscher (längerer) Song |
-| LRC endet zu früh | `_LRC_TOO_SHORT_TOLERANCE` | 40 % | Legitim: Instrumental-Outro ohne Text |
+| Songlänge | Anteil |
+|-----------|--------|
+| ≤ 3 min | 100 % |
+| ≤ 6 min | 75 % |
+| > 6 min | 50 %, max. 5 min |
 
-**`--recursive` Modus** (ersetzt `refetch_lyrics.py`): Durchsucht alle Unterordner, lädt LRCs neu. Pro Track:
-- `✓ gespeichert` — neues, verifiziertes Ergebnis
-- `= unverändert` — identischer Inhalt wie vorher
-- `✗ Kein Treffer` — kein Provider hat etwas gefunden, Whisper-Overlap zu niedrig (falscher Song), oder Whisper erkannte keine Sprache ohne ausreichende Provider-Bestätigung
+Zweistufig: zuerst `base` (schnell), dann `small` (genauer) wenn der Score im Grenzbereich 20–40 % liegt.
+
+Akzeptanzregeln:
+
+| Bedingung | Ergebnis |
+|-----------|----------|
+| Bester Whisper-Score ≥ 40 % | LRC gespeichert |
+| Score 20–40 % **und** ≥ 3 Provider mit ≥ 40 % Übereinstimmung untereinander | LRC gespeichert (Provider-Konsens) |
+| Whisper erkennt keine Sprache **und** ≥ 2 Provider **und** ≥ 10 Zeilen | LRC gespeichert (Fallback: ungewöhnlicher Vokalstil, Instrumental-Outro) |
+| Kein Kriterium erfüllt | keine LRC gespeichert |
+
+Beim Provider-Konsens wird der repräsentativste Kandidat gewählt (höchste Durchschnitts-Ähnlichkeit zu den anderen) — Ausreißer-Provider werden automatisch übergangen.
+
+Die Ausgabe zeigt pro Track: Provider-Anzahl, transkribierte Wörter und Whisper-Score. `!` = unter Schwelle, `+` = small-Modell verwendet, `, Konsens` = via Provider-Konsens akzeptiert.
+
+**Fallback ohne Whisper** (wenn `faster-whisper` nicht installiert):
+Scoring nach `(gültig, synchronisiert, Zeilenanzahl)` — LRC mit dem höchsten Score gewinnt. `gültig = 0` wenn der letzte Timestamp die Trackdauer um mehr als die Toleranzwerte über- oder unterschreitet:
+
+| Richtung | Wert | Begründung |
+|----------|------|------------|
+| LRC endet zu spät | 10 % | Falscher (längerer) Song |
+| LRC endet zu früh | 40 % | Legitim: Instrumental-Outro ohne Text |
+
+**Cache** (`.fetch_songtext.json` pro Ordner): Bereits geprüfte Tracks werden übersprungen. Der Cache speichert Ergebnis, Whisper-Score, Modell und Zeitstempel. Mit `--force` wird der Cache ignoriert.
+
+**`lrc_recheck.py`** — findet im Cache gespeicherte „nicht gefunden"-Einträge, die vom Provider-Konsens profitieren könnten (≥ 3 Provider, Score ≥ 20 %), und löscht sie gezielt für einen Neuprüflauf:
+
+```bash
+python3 lrc_recheck.py /Musik/          # Vorschau
+python3 lrc_recheck.py /Musik/ --apply  # Cache-Einträge löschen
+```
 
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 

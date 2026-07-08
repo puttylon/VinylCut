@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.15"
+__version__ = "1.4.16"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -42,7 +42,7 @@ _VOCALS_NO_SPEECH_THOLD = (
 _WHISPER_VAD_PROBE_SEC = 15.0  # Kurzprobe vor vollständigem Pass
 _HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
 _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
-_HALLUCINATION_AVG_LOGPROB = -1.0  # faster_whisper: avg_logprob < dies → Halluzination
+# _HALLUCINATION_AVG_LOGPROB entfernt: sprachbiased (Deutsch < Englisch), _is_hallucination reicht
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
@@ -367,7 +367,7 @@ def _whisper_best(
                 words, no_speech, logprob = _transcribe(
                     flac_path, start, ctx, model_name
                 )
-                if logprob < _HALLUCINATION_AVG_LOGPROB or _is_hallucination(words):
+                if _is_hallucination(words):
                     words = []
                 cache[key] = (words, no_speech, logprob)
         return cache
@@ -380,7 +380,7 @@ def _whisper_best(
             flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST
         )
         if probe_no_speech > _VOCALS_NO_SPEECH_THOLD:
-            return (None, 0.0, False, "instrumental", 0, "")
+            return (None, 0.0, False, "kein Vokal erkannt", 0, "")
 
     # Pass 1: base
     fast_cache = _build_cache(_WHISPER_MODEL_FAST)
@@ -407,7 +407,7 @@ def _whisper_best(
         model_flag = "+" if model_used == _WHISPER_MODEL_FULL else ""
         info_str = f"~{total_words}W, {best_score:.0%}{threshold_flag}{model_flag}"
     else:
-        info_str = "instrumental"
+        info_str = "kein Vokal erkannt"
 
     return (best_path, best_score, has_vocals, info_str, total_words, model_used)
 

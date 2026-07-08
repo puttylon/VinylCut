@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import re
 import os
 import json
@@ -8,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.7"
+__version__ = "1.4.8"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -378,6 +379,21 @@ def fetch_lrc(
         if path:
             candidates.append(path)
             provider_hits.append(provider)
+
+    # Duplikate entfernen: gespiegelte Provider liefern oft identischen Inhalt.
+    # Content-Hash deduplizieren — erster Treffer (Prioritätsreihenfolge) bleibt.
+    seen_hashes: set[bytes] = set()
+    deduped: list[Path] = []
+    deduped_hits: list[str] = []
+    for path, provider in zip(candidates, provider_hits):
+        h = hashlib.md5(path.read_bytes()).digest()
+        if h not in seen_hashes:
+            seen_hashes.add(h)
+            deduped.append(path)
+            deduped_hits.append(provider)
+        else:
+            path.unlink(missing_ok=True)  # Duplikat-Temp-Datei sofort löschen
+    candidates, provider_hits = deduped, deduped_hits
 
     # Vorhandene LRC als Kandidat einbeziehen (wird nicht gelöscht)
     all_candidates = candidates + (

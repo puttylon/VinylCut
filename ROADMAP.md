@@ -1,5 +1,46 @@
 # VinylCut Roadmap
 
+## ○ v1.4.15 — Zeitliches Alignment (DTW)
+Prüft ob Whisper-Wörter in der LRC in zeitlicher Reihenfolge erscheinen
+(monotones Alignment zwischen Whisper- und LRC-Timestamps). Verifiziert die
+Synchronisation, nicht nur den Inhalt — fängt Offset-LRCs und zeitlich
+driftende Versionen (Radio-Edit vs. Album).
+
+## ○ v1.4.14 — VAD-Peak als Fenster-Start
+Whisper-Ausschnitt unabhängig von der LRC wählen (Energie-/VAD-Peak statt
+erstem LRC-Timestamp). Verhindert zirkuläre Verzerrung beim Falsch-Song-Test.
+Braucht VAD-Library oder Energie-Analyse via ffmpeg.
+
+## ○ v1.4.13 — TF-IDF / Seltenwort-Gewichtung
+Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
+viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
+schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
+
+## ○ v1.4.12 — Relative statt absolute Akzeptanzschwelle
+Nicht "bester Score ≥ 40%", sondern "bester schlägt zweitbesten um Marge X".
+Löst das Falsch-Song-Problem (gleicher Titel, anderer Song) sprachunabhängig
+ohne manuelle Kalibrierung der Schwelle.
+
+## ○ v1.4.11 — faster_whisper Eigenmetriken nutzen
+`no_speech_prob` pro Segment (prinzipientreuer Instrumental-Detektor) und
+`avg_logprob` (prinzipientreuer Halluzinations-Indikator) aus faster_whisper
+statt unserer 5-Wörter-/25%-Heuristiken. Sprachdetektions-Wahrscheinlichkeit
+für forced-language in Pass 2 und sprachadaptive Schwellen nutzen.
+
+## ○ v1.4.10 — Konsens zuerst, Whisper zum Tie-Breaking
+Aktuell läuft Whisper immer. Bei hohem inter-Provider-Konsens (≥ 40%) ist
+Whisper überflüssig. Konsens-Check vor Whisper → spart base-Pass auf dem
+Großteil der Bibliothek. Whisper nur wenn Konsens nicht eindeutig.
+
+## ○ v1.4.9 — Ablehnungsgrund im Cache
+Ablehnungsgrund und Provider-Version persistieren. Gezielte Re-Runs möglich
+wenn sich Provider oder Algorithmus verbessern.
+
+## ✓ v1.4.8 — LRC-Deduplizierung vor Konsens-Check
+Identische LRCs von verschiedenen Providern (gespiegelte Datenbanken) per
+Content-Hash deduplizieren. "3 Provider einig" darf nicht bedeuten "eine
+Quelle dreifach gespiegelt".
+
 ## ✓ v1.2.0 — Fortschritt speichern / fortsetzen
 Nach jedem `ok` die bestätigten Startpunkte in `progress.json` schreiben. Bei Absturz oder versehentlichem Beenden kann die Session fortgesetzt werden.
 

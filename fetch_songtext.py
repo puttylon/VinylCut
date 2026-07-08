@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.16"
+__version__ = "1.4.17"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -40,6 +40,7 @@ _VOCALS_NO_SPEECH_THOLD = (
     0.65  # faster_whisper: avg no_speech_prob > dies → instrumental
 )
 _WHISPER_VAD_PROBE_SEC = 15.0  # Kurzprobe vor vollständigem Pass
+_VAD_PEAK_SCAN_SEC = 10.0  # Analysefenster je Position beim Peak-Scan
 _HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
 _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
 # _HALLUCINATION_AVG_LOGPROB entfernt: sprachbiased (Deutsch < Englisch), _is_hallucination reicht
@@ -177,6 +178,52 @@ def _get_whisper_model(name: str):
         _whisper_models[name] = WhisperModel(name, device="auto", compute_type="int8")
         print("bereit.")
     return _whisper_models[name]
+
+
+def _vad_peak_start(flac_path: Path, dur_s: float) -> float:
+    """Findet die lauteste Position via ffmpeg volumedetect an 5 Stellen.
+
+    Scannt je _VAD_PEAK_SCAN_SEC Sekunden an 5 Positionen zwischen 10 % und
+    90 % der Trackdauer und gibt die lauteste zurück. Fallback: 10 % der Dauer.
+    """
+    if dur_s < 60:
+        return 0.0
+    scan_start = dur_s * 0.10
+    scan_end = dur_s * 0.90
+    positions = [scan_start + (scan_end - scan_start) * i / 4 for i in range(5)]
+    best_pos = scan_start
+    best_rms = float("-inf")
+    for pos in positions:
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-ss",
+                    f"{pos:.1f}",
+                    "-t",
+                    f"{_VAD_PEAK_SCAN_SEC:.0f}",
+                    "-i",
+                    str(flac_path),
+                    "-af",
+                    "volumedetect",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            for line in result.stderr.splitlines():
+                if "mean_volume:" in line:
+                    val = float(line.split("mean_volume:")[1].split("dB")[0].strip())
+                    if val > best_rms:
+                        best_rms = val
+                        best_pos = pos
+                    break
+        except Exception:
+            continue
+    return best_pos
 
 
 def _whisper_context_sec(dur_s: float) -> float:
@@ -372,10 +419,10 @@ def _whisper_best(
                 cache[key] = (words, no_speech, logprob)
         return cache
 
-    # VAD-Probe: 15s-Kurzcheck erspart vollständigen Pass bei Instrumental-Tracks.
-    # Nur sinnvoll wenn vollständiger Kontext wesentlich länger als Probe.
+    # VAD-Probe: 15s an der lautesten Stelle des Tracks (unabhängig von LRC-Timestamps).
+    # Verhindert dass der Probe-Start im Intro landet und Vocals verpasst.
     if ctx > _WHISPER_VAD_PROBE_SEC * 2:
-        probe_start = candidate_starts[0][1] if candidate_starts else 0.0
+        probe_start = _vad_peak_start(flac_path, expected_dur)
         _, probe_no_speech, _ = _transcribe(
             flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST
         )

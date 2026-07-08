@@ -16,6 +16,13 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.17 — VAD-Peak als Probe-Start (unabhängig von LRC-Timestamps)
+
+VAD-Probe startet jetzt an der lautesten Stelle des Tracks statt am ersten
+LRC-Timestamp. ffmpeg volumedetect scannt 5 Positionen (10–90 % der Dauer,
+je 10s) und wählt die lauteste. Verhindert dass die Probe im instrumentalen
+Intro landet und Vocals verpasst ("Jajaja"-Problem).
+
 ## ✓ v1.4.16 — logprob-Filter entfernt, Label "kein Vokal erkannt"
 
 avg_logprob-Schwelle entfernt: der Filter war sprachbiased (Deutsch/nicht-Englisch

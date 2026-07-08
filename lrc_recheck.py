@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Findet gecachte 'nf'-Einträge die vom Provider-Konsens-Check profitieren könnten.
+"""Findet gecachte 'nf'-Einträge und löscht sie für einen Neuprüflauf.
 
 Sucht in allen .fetch_songtext.json-Dateien nach Tracks die:
   - als 'nf' (nicht gefunden) gecacht sind
-  - aber ≥ MIN_PROVIDERS Provider-Treffer hatten
-  - und einen Whisper-Score ≥ MIN_SCORE erreichten
+  - mindestens --min-providers Provider-Treffer hatten
+  - und einen Whisper-Score ≥ --min-score erreichten
 
-Diese Tracks wurden unter der alten Logik abgelehnt und sollten mit v1.4.3
-neu verarbeitet werden. Mit --apply werden ihre Cache-Einträge gelöscht,
+Mit --apply werden ihre Cache-Einträge gelöscht,
 sodass ein normaler Lauf (ohne --force) sie erneut prüft.
 
 Verwendung:
-    python3 lrc_recheck.py /Volumes/music/musik/          # Vorschau
-    python3 lrc_recheck.py /Volumes/music/musik/ --apply  # Cache-Einträge löschen
+    python3 lrc_recheck.py /Volumes/music/musik/                    # Vorschau (≥3 Provider)
+    python3 lrc_recheck.py /Volumes/music/musik/ --apply            # Cache-Einträge löschen
+    python3 lrc_recheck.py /Volumes/music/musik/ --min-providers 1  # alle mit ≥1 Provider
 """
 
 import argparse
@@ -20,8 +20,6 @@ import json
 from pathlib import Path
 
 CACHE_FILENAME = ".fetch_songtext.json"
-MIN_PROVIDERS = 3
-MIN_SCORE = 0.20
 
 
 def main() -> None:
@@ -32,7 +30,23 @@ def main() -> None:
         action="store_true",
         help="Cache-Einträge tatsächlich löschen (Standard: nur anzeigen)",
     )
+    parser.add_argument(
+        "--min-providers",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Mindestanzahl Provider-Treffer (Standard: 3)",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.20,
+        metavar="F",
+        help="Mindest-Whisper-Score (Standard: 0.20)",
+    )
     args = parser.parse_args()
+    MIN_PROVIDERS = args.min_providers
+    MIN_SCORE = args.min_score
 
     root = Path(args.path).resolve()
     candidates: list[tuple[Path, str, dict]] = []

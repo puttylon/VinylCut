@@ -16,6 +16,11 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.19 — Einzeldatei-Unterstützung
+
+fetch_songtext.py akzeptiert jetzt auch einzelne Audiodateien als Argument
+(nicht nur Verzeichnisse). Modus-Anzeige: "Datei" statt "Album".
+
 ## ✓ v1.4.18 — Spracherkennung aus LRC, language-Hint an Whisper
 
 Whisper transkribiert bei nicht-englischen Songs fälschlich auf Englisch (Grund:

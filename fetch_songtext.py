@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.18"
+__version__ = "1.4.19"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -731,17 +731,20 @@ def main() -> None:
     args = parser.parse_args()
 
     root = Path(args.path).resolve()
-    audio_files = sorted(
-        p
-        for p in (root.rglob("*") if args.recursive else root.glob("*"))
-        if p.suffix.lower() in _AUDIO_EXTENSIONS
-    )
+    if root.is_file() and root.suffix.lower() in _AUDIO_EXTENSIONS:
+        audio_files = [root]
+    else:
+        audio_files = sorted(
+            p
+            for p in (root.rglob("*") if args.recursive else root.glob("*"))
+            if p.suffix.lower() in _AUDIO_EXTENSIONS
+        )
 
     if not audio_files:
         print("Keine Audiodateien gefunden.")
         return
 
-    mode = "rekursiv" if args.recursive else "Album"
+    mode = "rekursiv" if args.recursive else ("Datei" if root.is_file() else "Album")
     print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")
 
     env = _load_env()

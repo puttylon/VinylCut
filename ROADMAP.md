@@ -135,6 +135,18 @@ LRC darf bis zu 40 % kürzer enden (Instrumental-Outro), höchstens 10 % länger
 Durchsucht alle Unterordner nach FLACs, lädt Songtexte neu. Zeigt Vorschau
 nur wenn sich der Inhalt ändert, speichert still wenn kein Unterschied.
 
+## ✓ v1.4.6 — mlx-whisper rückgebaut, faster_whisper wiederhergestellt
+mlx-whisper (Apple Silicon GPU) erwiesen als unzuverlässig: Spracherkennung
+scheitert bei instrumental-lastigen Passagen ("Shona" statt "English"), Jaccard
+fällt auf 0% → base-Score liegt unter RETRY_MIN → small wird nie aufgerufen →
+korrekte LRCs werden fälschlicherweise abgelehnt. Geschwindigkeitsgewinn (1.6–2.4×)
+rechtfertigt die Instabilität nicht. Rückbau auf faster_whisper (ctranslate2, CPU).
+
+## ✓ v1.4.5 — mlx-whisper Backend (rückgebaut in v1.4.6)
+Apple Silicon GPU/Neural Engine via mlx-whisper. Im Benchmark 1.5–2.3× schneller
+als faster_whisper, aber Qualität instabil — Sprachdetektionsfehler auf schwierigen
+Tracks. Siehe v1.4.6.
+
 ## ✓ v1.4.4 — Konsens-Jaccard-Schwelle auf 40% gesenkt
 Evidenzbasiert nach Analyse von Manu Chao und Marvin Gaye: Ausreißer-Provider
 (z.B. Netease mit anderssprachiger Version) zieht den Paardurchschnitt unter 50%,

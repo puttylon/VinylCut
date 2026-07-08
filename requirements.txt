@@ -1,6 +1,4 @@
 pytest
 rich
 mutagen
-# Whisper: eines der beiden installieren
-# mlx-whisper          # Apple Silicon — GPU/Neural Engine (empfohlen)
-# faster-whisper       # alle anderen Plattformen (CPU)
+# faster-whisper       # optional — verbessert LRC-Treffsicherheit via Whisper

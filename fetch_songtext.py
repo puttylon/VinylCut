@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.5"
+__version__ = "1.4.6"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -76,25 +76,7 @@ _SKIP_GENRE_KEYWORDS = {
 }
 
 
-def _detect_whisper_backend() -> str:
-    """mlx-whisper bevorzugt (Apple Silicon GPU/Neural Engine), sonst faster-whisper."""
-    try:
-        import mlx_whisper  # noqa: F401
-
-        return "mlx"
-    except ImportError:
-        return "faster_whisper"
-
-
-_WHISPER_BACKEND: str = _detect_whisper_backend()
-
-# HuggingFace-Repos für mlx-whisper (Apple Silicon)
-_MLX_REPOS: dict[str, str] = {
-    "base": "mlx-community/whisper-base-mlx",
-    "small": "mlx-community/whisper-small-mlx",
-}
-
-_whisper_models: dict = {}  # name → WhisperModel (nur faster_whisper)
+_whisper_models: dict = {}  # name → WhisperModel
 
 
 def _ts() -> str:
@@ -173,18 +155,7 @@ def _score_lrc(path: Path, expected_dur: float = 0.0) -> tuple[int, int, int]:
 
 
 def _get_whisper_model(name: str):
-    """Gibt ein geladenes Modell zurück (faster_whisper) oder 'mlx' als Sentinel.
-
-    Gibt None zurück wenn kein Whisper-Backend verfügbar ist.
-    """
-    if _WHISPER_BACKEND == "mlx":
-        try:
-            import mlx_whisper  # noqa: F401
-
-            return "mlx"
-        except ImportError:
-            return None
-    # faster_whisper
+    """Lädt ein faster_whisper-Modell (gecacht). Gibt None zurück wenn nicht installiert."""
     if name not in _whisper_models:
         try:
             from faster_whisper import WhisperModel
@@ -256,18 +227,9 @@ def _transcribe(
             ],
             capture_output=True,
         )
-        if _WHISPER_BACKEND == "mlx":
-            import mlx_whisper
-
-            repo = _MLX_REPOS.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
-            result = mlx_whisper.transcribe(
-                str(tmp_wav), path_or_hf_repo=repo, verbose=False
-            )
-            text = result.get("text", "") if isinstance(result, dict) else str(result)
-        else:
-            model = _whisper_models[model_name]
-            segments, _ = model.transcribe(str(tmp_wav), beam_size=1)
-            text = " ".join(s.text for s in segments)
+        model = _whisper_models[model_name]
+        segments, _ = model.transcribe(str(tmp_wav), beam_size=1)
+        text = " ".join(s.text for s in segments)
         return re.findall(r"[^\W\d_]+", text.lower())
     except Exception:
         return []
@@ -600,12 +562,7 @@ def main() -> None:
     print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")
 
     env = _load_env()
-    if _WHISPER_BACKEND == "mlx":
-        print(
-            f"   Whisper-Backend: mlx ({_MLX_REPOS[_WHISPER_MODEL_FAST]} / {_MLX_REPOS[_WHISPER_MODEL_FULL]})"
-        )
-    else:
-        _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste
+    _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste
     updated = skipped = not_found = errors = genre_skipped = no_tags = 0
 
     current_parent: Path | None = None

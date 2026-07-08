@@ -152,7 +152,7 @@ python3 fetch_songtext.py --force "Artist - Album/"   # Cache ignorieren, neu pr
 
 Alle vier Provider werden gleichzeitig befragt (je max. 20 s Timeout): `lrclib`, `musixmatch`, `netease`, `genius`. Artist und Titel kommen aus den Audio-Tags (mutagen). Tracks ohne Artist- **und** Title-Tag werden übersprungen. Tracks mit Genre-Tags wie `Instrumental`, `Hörbuch`, `Podcast` o.ä. werden ebenfalls übersprungen (keine LRC erwartet).
 
-**Whisper-Verifikation** (wenn `faster-whisper` installiert und FLAC/Audio verfügbar):
+**Whisper-Verifikation** (wenn `faster-whisper` installiert):
 
 Whisper transkribiert einen Teil des Tracks ab dem ersten Lyric-Timestamp und vergleicht den Text mit jedem Provider-Kandidaten via Jaccard (Wort-Overlap). Transkriptionsdauer adaptiv:
 
@@ -204,7 +204,7 @@ python3 lrc_recheck.py /Musik/ --apply  # Cache-Einträge löschen
 ```bash
 pip install -r requirements.txt
 pip install syncedlyrics
-pip install faster-whisper   # optional — verbessert LRC-Treffsicherheit via Whisper
+pip install faster-whisper   # optional — Whisper-Verifikation
 ```
 
 `requirements.txt` enthält: `pytest`, `rich`

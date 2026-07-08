@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.1"
+__version__ = "1.4.4"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -21,10 +21,18 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 
 # Whisper: zweistufige Verifikation — base zuerst, small nur im Grenzbereich.
 _WHISPER_MIN_OVERLAP = 0.40  # Schwellwert: ab hier wird eine LRC akzeptiert
-_WHISPER_RETRY_MIN = 0.25  # Untergrenze: base-Score ab hier → small-Pass
+_WHISPER_RETRY_MIN = 0.20  # Untergrenze: base-Score ab hier → small-Pass
 _WHISPER_MODEL_FAST = "base"  # erster Pass — immer
 _WHISPER_MODEL_FULL = "small"  # zweiter Pass — nur im Grenzbereich [0.25, 0.40)
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
+
+# Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
+_CONSENSUS_MIN_PROVIDERS = (
+    3  # mindestens N Provider müssen einen Treffer geliefert haben
+)
+_CONSENSUS_MIN_JACCARD = (
+    0.40  # mindest-Übereinstimmung zwischen den Provider-LRCs untereinander
+)
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
@@ -372,12 +380,56 @@ def fetch_lrc(
         best_path, best_score, has_vocals, whisper_info, whisper_words, model_used = (
             _whisper_best(flac_path, all_candidates, expected_dur)
         )
+        consensus_used = False
         if has_vocals:
             best_content = (
                 best_path.read_bytes()
                 if best_path and best_score >= _WHISPER_MIN_OVERLAP
                 else None
             )
+            # Konsens-Check: Whisper-Score zu niedrig aber Provider einig?
+            if best_content is None and best_score >= _WHISPER_RETRY_MIN:
+                if len(candidates) >= _CONSENSUS_MIN_PROVIDERS:
+                    path_words: list[tuple[Path, set]] = []
+                    for p in candidates:
+                        try:
+                            ws = set(_extract_lrc_words(p.read_text(encoding="utf-8")))
+                            if ws:
+                                path_words.append((p, ws))
+                        except Exception:
+                            pass
+                    if len(path_words) >= _CONSENSUS_MIN_PROVIDERS:
+                        n = len(path_words)
+                        pair_scores = []
+                        for i in range(n):
+                            for j in range(i + 1, n):
+                                a, b = path_words[i][1], path_words[j][1]
+                                u = len(a | b)
+                                pair_scores.append(len(a & b) / u if u else 0.0)
+                        if (
+                            pair_scores
+                            and sum(pair_scores) / len(pair_scores)
+                            >= _CONSENSUS_MIN_JACCARD
+                        ):
+                            # Repräsentativsten Kandidaten wählen:
+                            # höchste Durchschnitts-Ähnlichkeit zu allen anderen.
+                            # Ausreißer haben niedrigen Schnitt und werden so übergangen.
+                            best_rep: Path | None = None
+                            best_avg = -1.0
+                            for i, (p, ws_i) in enumerate(path_words):
+                                others = [path_words[j][1] for j in range(n) if j != i]
+                                avg = sum(
+                                    len(ws_i & o) / len(ws_i | o)
+                                    if len(ws_i | o) > 0
+                                    else 0.0
+                                    for o in others
+                                ) / len(others)
+                                if avg > best_avg:
+                                    best_avg = avg
+                                    best_rep = p
+                            if best_rep:
+                                best_content = best_rep.read_bytes()
+                                consensus_used = True
         else:
             # Keine Sprache erkannt: Fallback ≥2 Provider + ≥10 Zeilen.
             best_candidate = max(
@@ -397,6 +449,8 @@ def fetch_lrc(
                 fallback_used = True
             else:
                 best_content = None
+        if consensus_used:
+            whisper_info = whisper_info.replace("!", "") + ", Konsens"
         info_str = f"{prov_str} │ {whisper_info}" if whisper_info else prov_str
         extras: dict = {
             "score": round(best_score, 3),
@@ -406,6 +460,8 @@ def fetch_lrc(
         }
         if fallback_used:
             extras["fallback"] = True
+        if consensus_used:
+            extras["consensus"] = True
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()
@@ -507,7 +563,7 @@ def main() -> None:
     _get_whisper_model(
         _WHISPER_MODEL_FAST
     )  # einmal vorladen — Meldung erscheint vor der Track-Liste
-    updated = skipped = not_found = errors = genre_skipped = 0
+    updated = skipped = not_found = errors = genre_skipped = no_tags = 0
 
     current_parent: Path | None = None
     dir_cache: dict = {}
@@ -531,6 +587,12 @@ def main() -> None:
                     continue
 
         meta_artist, meta_title, meta_genre = _read_audio_tags(audio)
+
+        # Keine Tags → Suche unzuverlässig, überspringen (kein Cache-Eintrag)
+        if not meta_artist and not meta_title:
+            lrc_path.unlink(missing_ok=True)
+            no_tags += 1
+            continue
 
         # Genre-Check: kein Songtext erwartet → überspringen (kein Cache-Eintrag)
         if _is_skip_genre(meta_genre):
@@ -613,6 +675,8 @@ def main() -> None:
     summary = f"Fertig — {updated} geladen, {skipped} übersprungen, {not_found} nicht gefunden"
     if genre_skipped:
         summary += f", {genre_skipped} Genre übersprungen"
+    if no_tags:
+        summary += f", {no_tags} ohne Tags"
     if errors:
         summary += f", {errors} Fehler"
     print(f"\n{summary}.")

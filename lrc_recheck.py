@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Findet gecachte 'nf'-Einträge die vom Provider-Konsens-Check profitieren könnten.
+
+Sucht in allen .fetch_songtext.json-Dateien nach Tracks die:
+  - als 'nf' (nicht gefunden) gecacht sind
+  - aber ≥ MIN_PROVIDERS Provider-Treffer hatten
+  - und einen Whisper-Score ≥ MIN_SCORE erreichten
+
+Diese Tracks wurden unter der alten Logik abgelehnt und sollten mit v1.4.3
+neu verarbeitet werden. Mit --apply werden ihre Cache-Einträge gelöscht,
+sodass ein normaler Lauf (ohne --force) sie erneut prüft.
+
+Verwendung:
+    python3 lrc_recheck.py /Volumes/music/musik/          # Vorschau
+    python3 lrc_recheck.py /Volumes/music/musik/ --apply  # Cache-Einträge löschen
+"""
+
+import argparse
+import json
+from pathlib import Path
+
+CACHE_FILENAME = ".fetch_songtext.json"
+MIN_PROVIDERS = 3
+MIN_SCORE = 0.20
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", help="Wurzelverzeichnis zum Durchsuchen")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Cache-Einträge tatsächlich löschen (Standard: nur anzeigen)",
+    )
+    args = parser.parse_args()
+
+    root = Path(args.path).resolve()
+    candidates: list[tuple[Path, str, dict]] = []
+
+    for cache_file in sorted(root.rglob(CACHE_FILENAME)):
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for track, entry in data.items():
+            if (
+                entry.get("r") == "nf"
+                and entry.get("providers", 0) >= MIN_PROVIDERS
+                and (entry.get("score") or 0.0) >= MIN_SCORE
+            ):
+                candidates.append((cache_file, track, entry))
+
+    if not candidates:
+        print("Keine Kandidaten gefunden.")
+        return
+
+    print(
+        f"{'VORSCHAU' if not args.apply else 'LÖSCHE'} — {len(candidates)} Kandidaten:\n"
+    )
+    by_file: dict[Path, list[str]] = {}
+    for cache_file, track, entry in candidates:
+        rel = cache_file.parent.relative_to(root)
+        score = entry.get("score")
+        score_str = f"{score:.0%}" if score is not None else "?"
+        print(f"  {rel}/{track}  providers={entry.get('providers')}  score={score_str}")
+        by_file.setdefault(cache_file, []).append(track)
+
+    if not args.apply:
+        print(
+            f"\nMit --apply werden diese {len(candidates)} Einträge aus dem Cache entfernt."
+        )
+        return
+
+    removed = 0
+    for cache_file, tracks in by_file.items():
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            for track in tracks:
+                if track in data:
+                    del data[track]
+                    removed += 1
+            cache_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            print(f"  Fehler bei {cache_file}: {e}")
+
+    print(f"\n{removed} Einträge gelöscht. Nächster Lauf verarbeitet diese Tracks neu.")
+
+
+if __name__ == "__main__":
+    main()

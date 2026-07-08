@@ -135,6 +135,29 @@ LRC darf bis zu 40 % kürzer enden (Instrumental-Outro), höchstens 10 % länger
 Durchsucht alle Unterordner nach FLACs, lädt Songtexte neu. Zeigt Vorschau
 nur wenn sich der Inhalt ändert, speichert still wenn kein Unterschied.
 
+## ✓ v1.4.4 — Konsens-Jaccard-Schwelle auf 40% gesenkt
+Evidenzbasiert nach Analyse von Manu Chao und Marvin Gaye: Ausreißer-Provider
+(z.B. Netease mit anderssprachiger Version) zieht den Paardurchschnitt unter 50%,
+obwohl die drei anderen Provider stark übereinstimmen. Genius liefert mitunter
+Metadaten-Rauschen (Contributors-Texte) das die Ähnlichkeit ebenfalls drückt.
+40% ist das empirisch fundierte Minimum für konsistente Akzeptanz.
+
+## ✓ v1.4.3 — Provider-Konsens überstimmt Whisper-Threshold
+Wenn ≥3 Provider einen Treffer liefern UND deren LRC-Inhalt sich untereinander
+≥40% (Jaccard) ähnelt UND Whisper Vokale hört (score ≥ 20%), wird die LRC
+akzeptiert — auch wenn der Whisper-Score unter 40% bleibt.
+Trifft auf Artists mit unkonventionellem Gesangsstil zu (z.B. Meat Puppets).
+Gewinner = repräsentativster Kandidat (höchste Durchschnitts-Ähnlichkeit zu allen
+anderen) — Ausreißer werden so automatisch übergangen.
+Cache-Eintrag enthält `"consensus": true`. Ausgabe zeigt ", Konsens" statt "!".
+Neues Tool: `lrc_recheck.py` — findet bereits gecachte "nf"-Tracks die vom
+Konsens-Check profitieren würden, löscht ihre Cache-Einträge gezielt (--apply).
+
+## ✓ v1.4.2 — Tracks ohne Artist- und Title-Tags überspringen
+Dateien ohne beide Tags werden nicht mehr gegen Provider gesucht — LRC wird
+gelöscht falls vorhanden. Kein Cache-Eintrag (wie Genre-Skip). Zähler "X ohne Tags"
+in der Zusammenfassung.
+
 ## ✓ v1.4.1 — Timeout für Provider-Abfragen (20 s)
 Hängende Provider blockieren ihren Thread nicht mehr unbegrenzt.
 `_CACHE_MIN_VERSION` bleibt 1.4.0 — kein Neulauf der Bibliothek.

@@ -1,26 +1,25 @@
 # VinylCut Roadmap
 
-## ○ v1.4.16 — Zeitliches Alignment (DTW)
+## ○ v1.4.15 — Zeitliches Alignment (DTW)
 Prüft ob Whisper-Wörter in der LRC in zeitlicher Reihenfolge erscheinen
 (monotones Alignment zwischen Whisper- und LRC-Timestamps). Verifiziert die
 Synchronisation, nicht nur den Inhalt — fängt Offset-LRCs und zeitlich
 driftende Versionen (Radio-Edit vs. Album).
 
-## ○ v1.4.15 — VAD-Peak als Fenster-Start
+## ○ v1.4.14 — VAD-Peak als Fenster-Start
 Whisper-Ausschnitt unabhängig von der LRC wählen (Energie-/VAD-Peak statt
 erstem LRC-Timestamp). Verhindert zirkuläre Verzerrung beim Falsch-Song-Test.
 Braucht VAD-Library oder Energie-Analyse via ffmpeg.
 
-## ○ v1.4.14 — TF-IDF / Seltenwort-Gewichtung
+## ○ v1.4.13-tfidf — TF-IDF / Seltenwort-Gewichtung (zurückgestellt)
 Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
-## ✓ v1.4.13 — Relative statt absolute Akzeptanzschwelle
-Nicht "bester Score ≥ 40%", sondern "bester schlägt zweitbesten um 10 PP".
-Löst das Falsch-Song-Problem (gleicher Titel, anderer Song) sprachunabhängig
-ohne manuelle Kalibrierung der Schwelle. Bei nur einem Kandidaten gilt weiter
-die absolute Schwelle.
+## ✓ v1.4.13 — Akzeptanzlogik vereinfacht (zurück zu absolutem Threshold)
+v1.4.13 führte relative Marge ein, die revertiert wurde: höchster Jaccard-Score
+gewinnt, Akzeptanz bei ≥ 40%. Keine Marge nötig — wer am besten zu Whisper
+passt, ist der richtige Kandidat.
 
 ## ✓ v1.4.12 — VAD-Kurzprobe (15s) vor vollständigem Whisper-Pass
 15 Sekunden ab erstem LRC-Timestamp transkribieren und no_speech_prob prüfen.

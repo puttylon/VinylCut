@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.13"
+__version__ = "1.4.14"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -26,7 +26,6 @@ _WHISPER_RETRY_MIN = 0.20  # Untergrenze: base-Score ab hier → small-Pass
 _WHISPER_MODEL_FAST = "base"  # erster Pass — immer
 _WHISPER_MODEL_FULL = "small"  # zweiter Pass — nur im Grenzbereich [0.20, 0.40)
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
-_WHISPER_RELATIVE_MARGIN = 0.10  # best muss zweitbesten um 10 PP schlagen
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
 _CONSENSUS_MIN_PROVIDERS = (
@@ -307,11 +306,10 @@ def _provider_consensus(candidates: list[Path]) -> tuple[Path | None, float]:
 
 def _whisper_best(
     flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
-) -> tuple[Path | None, float, bool, str, int, str, bool]:
+) -> tuple[Path | None, float, bool, str, int, str]:
     """Zweistufige Verifikation: base zuerst, small nur im Grenzbereich.
 
-    Gibt (bester Kandidat, score, has_vocals, info_str, words, model_used, margin_ok) zurück.
-    margin_ok: best_score schlägt zweitbesten um _WHISPER_RELATIVE_MARGIN, oder nur 1 Kandidat.
+    Gibt (bester Kandidat, score, has_vocals, info_str, words, model_used) zurück.
     """
     if _get_whisper_model(_WHISPER_MODEL_FAST) is None:
         return (None, 0.0, False, "", 0, "")
@@ -333,8 +331,9 @@ def _whisper_best(
 
     def _score_from_cache(
         cache: dict[int, _CacheVal],
-    ) -> tuple[Path | None, float, float, int]:
-        scored: list[tuple[float, Path]] = []
+    ) -> tuple[Path | None, float, int]:
+        best_path: Path | None = None
+        best_score = 0.0
         for p, start in candidate_starts:
             words, _, _ = cache.get(round(start / 3), ([], 1.0, 0.0))
             if not words:
@@ -345,13 +344,11 @@ def _whisper_best(
                 )
             except Exception:
                 score = 0.0
-            scored.append((score, p))
-        scored.sort(reverse=True)
-        best_path = scored[0][1] if scored else None
-        best_score = scored[0][0] if scored else 0.0
-        second_score = scored[1][0] if len(scored) > 1 else 0.0
+            if score > best_score:
+                best_score = score
+                best_path = p
         total = sum(len(v[0]) for v in cache.values())
-        return best_path, best_score, second_score, total
+        return best_path, best_score, total
 
     def _build_cache(model_name: str) -> dict[int, _CacheVal]:
         cache: dict[int, _CacheVal] = {}
@@ -385,43 +382,25 @@ def _whisper_best(
     has_vocals = (
         avg_no_speech < _VOCALS_NO_SPEECH_THOLD or total_words_base >= _VOCALS_MIN_WORDS
     )
-    best_path, best_score, second_score, total_words = _score_from_cache(fast_cache)
+    best_path, best_score, total_words = _score_from_cache(fast_cache)
     model_used = _WHISPER_MODEL_FAST
 
     # Pass 2: small — nur wenn Vokale erkannt und Score im Grenzbereich
     if has_vocals and _WHISPER_RETRY_MIN <= best_score < _WHISPER_MIN_OVERLAP:
         full_cache = _build_cache(_WHISPER_MODEL_FULL)
-        full_path, full_score, full_second, full_words = _score_from_cache(full_cache)
+        full_path, full_score, full_words = _score_from_cache(full_cache)
         if full_score > best_score:
-            best_path, best_score, second_score, total_words = (
-                full_path,
-                full_score,
-                full_second,
-                full_words,
-            )
+            best_path, best_score, total_words = full_path, full_score, full_words
             model_used = _WHISPER_MODEL_FULL
 
-    # Relative Marge: bei mehreren Kandidaten muss best zweitbesten um RELATIVE_MARGIN schlagen.
-    n_cands = len(candidates)
-    margin_ok = n_cands <= 1 or (best_score - second_score) >= _WHISPER_RELATIVE_MARGIN
-
     if has_vocals:
-        accepted = best_score >= _WHISPER_MIN_OVERLAP and margin_ok
-        threshold_flag = "" if accepted else "!"
+        threshold_flag = "!" if best_score < _WHISPER_MIN_OVERLAP else ""
         model_flag = "+" if model_used == _WHISPER_MODEL_FULL else ""
         info_str = f"~{total_words}W, {best_score:.0%}{threshold_flag}{model_flag}"
     else:
         info_str = "instrumental"
 
-    return (
-        best_path,
-        best_score,
-        has_vocals,
-        info_str,
-        total_words,
-        model_used,
-        margin_ok,
-    )
+    return (best_path, best_score, has_vocals, info_str, total_words, model_used)
 
 
 def fetch_lrc(
@@ -526,13 +505,12 @@ def fetch_lrc(
             whisper_info,
             whisper_words,
             model_used,
-            margin_ok,
         ) = _whisper_best(flac_path, all_candidates, expected_dur)
         fallback_used = False
         if has_vocals:
             best_content = (
                 best_path.read_bytes()
-                if best_path and best_score >= _WHISPER_MIN_OVERLAP and margin_ok
+                if best_path and best_score >= _WHISPER_MIN_OVERLAP
                 else None
             )
         else:

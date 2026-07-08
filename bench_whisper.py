@@ -153,7 +153,7 @@ def compare(before_path: Path, after_path: Path) -> None:
     print(f"Vorher:   {before['timestamp']}")
     print(f"Nachher:  {after['timestamp']}\n")
 
-    col = "{:<45}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}"
+    col = "{:<45}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}"
     print(
         col.format(
             "Track",
@@ -163,12 +163,22 @@ def compare(before_path: Path, after_path: Path) -> None:
             "base ΔJ",
             "sml↑t",
             "sml Δt",
+            "sml↑J",
+            "sml ΔJ",
         )
     )
-    print("-" * 105)
+    print("-" * 117)
 
     total_base_before = total_base_after = 0.0
     total_small_before = total_small_after = 0.0
+
+    def fmt_delta_t(b: float, a: float) -> str:
+        d = a - b
+        return f"{'+' if d > 0 else ''}{d:.1f}s"
+
+    def fmt_delta_j(b: float, a: float) -> str:
+        d = (a - b) * 100
+        return f"{'+' if d > 0 else ''}{d:.0f}%"
 
     for name in common:
         b = before_by_name[name]
@@ -180,21 +190,13 @@ def compare(before_path: Path, after_path: Path) -> None:
         bj_a = a["base"]["jaccard"]
         st_b = b["small"]["time_s"]
         st_a = a["small"]["time_s"]
+        sj_b = b["small"]["jaccard"]
+        sj_a = a["small"]["jaccard"]
 
         total_base_before += bt_b
         total_base_after += bt_a
         total_small_before += st_b
         total_small_after += st_a
-
-        def fmt_delta_t(before: float, after: float) -> str:
-            d = after - before
-            sign = "+" if d > 0 else ""
-            return f"{sign}{d:.1f}s"
-
-        def fmt_delta_j(before: float, after: float) -> str:
-            d = (after - before) * 100
-            sign = "+" if d > 0 else ""
-            return f"{sign}{d:.0f}%"
 
         print(
             col.format(
@@ -205,10 +207,12 @@ def compare(before_path: Path, after_path: Path) -> None:
                 fmt_delta_j(bj_b, bj_a),
                 f"{st_a:.1f}s",
                 fmt_delta_t(st_b, st_a),
+                f"{sj_a:.0%}",
+                fmt_delta_j(sj_b, sj_a),
             )
         )
 
-    print("-" * 105)
+    print("-" * 117)
     base_speedup = total_base_before / total_base_after if total_base_after else 0
     small_speedup = total_small_before / total_small_after if total_small_after else 0
     print(

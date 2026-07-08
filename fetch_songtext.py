@@ -222,10 +222,10 @@ def _is_hallucination(words: list[str]) -> bool:
 
 def _transcribe(
     flac_path: Path, start: float, context_sec: float, model_name: str
-) -> list[str]:
-    """Transkribiert context_sec Sekunden ab start, gibt Wortliste zurück."""
+) -> tuple[list[str], float, float]:
+    """Transkribiert context_sec Sekunden ab start, gibt (words, no_speech_prob, avg_logprob) zurück."""
     if _get_whisper_model(model_name) is None:
-        return []
+        return [], 1.0, 0.0
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_wav = Path(tmp.name)
     try:

@@ -135,6 +135,14 @@ LRC darf bis zu 40 % kürzer enden (Instrumental-Outro), höchstens 10 % länger
 Durchsucht alle Unterordner nach FLACs, lädt Songtexte neu. Zeigt Vorschau
 nur wenn sich der Inhalt ändert, speichert still wenn kein Unterschied.
 
+## ✓ v1.4.7 — has_vocals robuster, Halluzinations-Erkennung
+Zwei Schwachstellen im Whisper-Verifikationsschritt behoben:
+1. `has_vocals` erfordert jetzt ≥ 5 Wörter (vorher: ≥ 1) — verhindert dass
+   Sonder-Token wie "(upbeat music)" instrumental-lastige Tracks als vokal markieren.
+2. Halluzinations-Erkennung: Transkriptionen mit ≥ 20 Wörtern aber < 25 %
+   einzigartigen Wörtern werden als Schleife erkannt und verworfen (→ leere Liste),
+   statt mit Jaccard 0 % in den Score einzugehen und den Konsens-Check zu blockieren.
+
 ## ✓ v1.4.6 — mlx-whisper rückgebaut, faster_whisper wiederhergestellt
 mlx-whisper (Apple Silicon GPU) erwiesen als unzuverlässig: Spracherkennung
 scheitert bei instrumental-lastigen Passagen ("Shona" statt "English"), Jaccard

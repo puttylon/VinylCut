@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.6"
+__version__ = "1.4.7"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -33,6 +33,10 @@ _CONSENSUS_MIN_PROVIDERS = (
 _CONSENSUS_MIN_JACCARD = (
     0.40  # mindest-Übereinstimmung zwischen den Provider-LRCs untereinander
 )
+
+_VOCALS_MIN_WORDS = 5  # weniger Wörter → als instrumental behandelt
+_HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
+_HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
@@ -200,6 +204,16 @@ def _word_overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
+def _is_hallucination(words: list[str]) -> bool:
+    """Erkennt Whisper-Halluzinationsschleifen (z.B. 'let's go' ×20).
+
+    Viele Wörter, aber kaum einzigartige → Wiederholungsschleife statt Lyrik.
+    """
+    if len(words) < _HALLUCINATION_MIN_WORDS:
+        return False
+    return len(set(words)) / len(words) < _HALLUCINATION_MAX_UNIQUE_RATIO
+
+
 def _transcribe(
     flac_path: Path, start: float, context_sec: float, model_name: str
 ) -> list[str]:
@@ -286,12 +300,13 @@ def _whisper_best(
         for _, start in candidate_starts:
             key = round(start / 3)
             if key not in cache:
-                cache[key] = _transcribe(flac_path, start, ctx, model_name)
+                words = _transcribe(flac_path, start, ctx, model_name)
+                cache[key] = [] if _is_hallucination(words) else words
         return cache
 
     # Pass 1: base
     fast_cache = _build_cache(_WHISPER_MODEL_FAST)
-    has_vocals = any(len(w) > 0 for w in fast_cache.values())
+    has_vocals = sum(len(w) for w in fast_cache.values()) >= _VOCALS_MIN_WORDS
     best_path, best_score, total_words = _score_from_cache(fast_cache)
     model_used = _WHISPER_MODEL_FAST
 

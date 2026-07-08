@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import atexit
 import sys
 import json
 import os
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -20,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.5"
+__version__ = "1.9.6"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 
@@ -72,42 +74,49 @@ def play_snippet(flac_path: Path, start_time: float, duration: float) -> None:
     )
 
 
+_preview_cache: dict = {"path": None, "key": None}
+
+
+def _cleanup_preview_wav() -> None:
+    p = _preview_cache.get("path")
+    if p and p.exists():
+        p.unlink(missing_ok=True)
+
+
+atexit.register(_cleanup_preview_wav)
+
+
 def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) -> None:
-    filter_complex = (
-        "[0:a]aformat=channel_layouts=stereo[tone];"
-        "[1:a]aformat=channel_layouts=stereo[audio];"
-        "[tone][audio]concat=n=2:v=0:a=1[out]"
-    )
-    cmd = [
-        "ffmpeg",
-        "-v",
-        "quiet",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=220:duration=0.25",
-        "-ss",
-        f"{start_time:.3f}",
-        "-t",
-        str(duration),
-        "-i",
-        str(flac_path),
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[out]",
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
-    ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    cache_key = (str(flac_path), round(start_time, 3), duration)
+    if _preview_cache["key"] != cache_key:
+        _cleanup_preview_wav()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        filter_complex = (
+            "[0:a]aformat=channel_layouts=stereo[tone];"
+            "[1:a]aformat=channel_layouts=stereo[audio];"
+            "[tone][audio]concat=n=2:v=0:a=1[out]"
+        )
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "quiet",
+                "-f", "lavfi", "-i", "sine=frequency=220:duration=0.25",
+                "-ss", f"{start_time:.3f}", "-t", str(duration),
+                "-i", str(flac_path),
+                "-filter_complex", filter_complex,
+                "-map", "[out]",
+                str(tmp_path),
+            ],
+            capture_output=True,
+        )
+        _preview_cache["path"] = tmp_path
+        _preview_cache["key"] = cache_key
+
     subprocess.run(
-        ["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
-        stdin=ffmpeg.stdout,
+        ["ffplay", "-nodisp", "-autoexit", "-v", "quiet", str(_preview_cache["path"])],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    ffmpeg.wait()
 
 
 def cut_and_tag(

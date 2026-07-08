@@ -27,7 +27,7 @@ ohne manuelle Kalibrierung der Schwelle.
 statt unserer 5-Wörter-/25%-Heuristiken. Sprachdetektions-Wahrscheinlichkeit
 für forced-language in Pass 2 und sprachadaptive Schwellen nutzen.
 
-## ○ v1.4.10 — Konsens zuerst, Whisper zum Tie-Breaking
+## ✓ v1.4.10 — Konsens zuerst, Whisper zum Tie-Breaking
 Aktuell läuft Whisper immer. Bei hohem inter-Provider-Konsens (≥ 40%) ist
 Whisper überflüssig. Konsens-Check vor Whisper → spart base-Pass auf dem
 Großteil der Bibliothek. Whisper nur wenn Konsens nicht eindeutig.

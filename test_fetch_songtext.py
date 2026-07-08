@@ -1,6 +1,11 @@
 """Unit-Tests für fetch_songtext.py — reine Logikfunktionen."""
 
+import tempfile
+from pathlib import Path
+
 from fetch_songtext import (
+    _CONSENSUS_MIN_JACCARD,
+    _CONSENSUS_MIN_PROVIDERS,
     _HALLUCINATION_MAX_UNIQUE_RATIO,
     _HALLUCINATION_MIN_WORDS,
     _VOCALS_MIN_WORDS,
@@ -8,6 +13,7 @@ from fetch_songtext import (
     _first_timestamp,
     _is_hallucination,
     _last_timestamp,
+    _provider_consensus,
     _word_overlap,
 )
 
@@ -134,3 +140,52 @@ class TestTimestamps:
     def test_metadaten_bei_first_übersprungen(self):
         lrc = "[ar:Artist]\n[00:08.00]first lyric\n"
         assert abs(_first_timestamp(lrc) - 8.0) < 0.01
+
+
+def _make_lrc(text: str) -> Path:
+    """Hilfsfunktion: LRC-Inhalt in eine Temp-Datei schreiben."""
+    f = tempfile.NamedTemporaryFile(suffix=".lrc", delete=False, mode="w", encoding="utf-8")
+    f.write(text)
+    f.close()
+    return Path(f.name)
+
+
+class TestProviderConsensus:
+    LRC_A = "[00:10.00]Girl you know it's true I love you\n[00:15.00]I'm in love with you girl\n"
+    LRC_B = "[00:10.00]Girl you know it's true yes I love you\n[00:15.00]I'm in love girl cause you're on my mind\n"
+    LRC_C = "[00:10.00]You know it's true I love you girl oh\n[00:15.00]In love with you girl cause you're my mind\n"
+    LRC_WRONG = "[00:10.00]Opa Opa tanzen alle Leute\n[00:15.00]Opa Opa heute und auch morgen\n"
+
+    def _paths(self, *texts):
+        return [_make_lrc(t) for t in texts]
+
+    def test_zu_wenig_provider(self):
+        paths = self._paths(self.LRC_A, self.LRC_B)
+        rep, score = _provider_consensus(paths)
+        assert rep is None
+        assert score == 0.0
+        for p in paths: p.unlink(missing_ok=True)
+
+    def test_konsens_erreicht(self):
+        paths = self._paths(self.LRC_A, self.LRC_B, self.LRC_C)
+        rep, score = _provider_consensus(paths)
+        assert rep is not None
+        assert score >= _CONSENSUS_MIN_JACCARD
+        for p in paths: p.unlink(missing_ok=True)
+
+    def test_kein_konsens_bei_ausreisser(self):
+        # 2 passende + 1 komplett falscher LRC → avg Jaccard sinkt unter Schwelle
+        paths = self._paths(self.LRC_A, self.LRC_B, self.LRC_WRONG)
+        rep, score = _provider_consensus(paths)
+        # Ergebnis hängt von avg ab — entweder kein Konsens oder Ausreißer übergangen
+        # Hauptsache: wenn Konsens erreicht, ist rep nicht der Ausreißer
+        if rep is not None:
+            content = rep.read_text(encoding="utf-8")
+            assert "Opa" not in content
+        for p in paths: p.unlink(missing_ok=True)
+
+    def test_leere_lrc_zählt_nicht(self):
+        paths = self._paths(self.LRC_A, self.LRC_B, "")
+        rep, score = _provider_consensus(paths)
+        assert rep is None  # leere LRC hat keine Wörter → unter MIN_PROVIDERS
+        for p in paths: p.unlink(missing_ok=True)

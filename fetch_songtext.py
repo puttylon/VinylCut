@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.8"
+__version__ = "1.4.9"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -252,6 +252,49 @@ def _transcribe(
         tmp_wav.unlink(missing_ok=True)
 
 
+def _provider_consensus(candidates: list[Path]) -> tuple[Path | None, float]:
+    """Prüft ob ≥ _CONSENSUS_MIN_PROVIDERS Provider inhaltlich übereinstimmen.
+
+    Gibt (repräsentativsten Kandidaten, avg_inter_jaccard) zurück,
+    oder (None, 0.0) wenn kein Konsens erreicht wird.
+    """
+    if len(candidates) < _CONSENSUS_MIN_PROVIDERS:
+        return None, 0.0
+    path_words: list[tuple[Path, set]] = []
+    for p in candidates:
+        try:
+            ws = set(_extract_lrc_words(p.read_text(encoding="utf-8")))
+            if ws:
+                path_words.append((p, ws))
+        except Exception:
+            pass
+    if len(path_words) < _CONSENSUS_MIN_PROVIDERS:
+        return None, 0.0
+    n = len(path_words)
+    pair_scores = [
+        len(path_words[i][1] & path_words[j][1])
+        / len(path_words[i][1] | path_words[j][1])
+        if len(path_words[i][1] | path_words[j][1]) > 0
+        else 0.0
+        for i in range(n)
+        for j in range(i + 1, n)
+    ]
+    avg = sum(pair_scores) / len(pair_scores)
+    if avg < _CONSENSUS_MIN_JACCARD:
+        return None, avg
+    best_rep: Path | None = None
+    best_avg = -1.0
+    for i, (p, ws_i) in enumerate(path_words):
+        others = [path_words[j][1] for j in range(n) if j != i]
+        a = sum(
+            len(ws_i & o) / len(ws_i | o) if len(ws_i | o) > 0 else 0.0 for o in others
+        ) / len(others)
+        if a > best_avg:
+            best_avg = a
+            best_rep = p
+    return best_rep, avg
+
+
 def _whisper_best(
     flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
 ) -> tuple[Path | None, float, bool, str, int, str]:
@@ -408,63 +451,34 @@ def fetch_lrc(
     hit_str = ", ".join(provider_hits) if provider_hits else "—"
     prov_str = f"{len(candidates)}/{len(_ALL_PROVIDERS)}: {hit_str}"
 
-    fallback_used = False
-    if flac_path and flac_path.exists():
+    # Konsens-Check zuerst: stimmen ≥ 3 deduplizierte Provider überein?
+    # Wenn ja → Whisper wird gespart, direkter Treffer.
+    consensus_rep, consensus_jaccard = _provider_consensus(candidates)
+
+    if consensus_rep is not None:
+        best_content = consensus_rep.read_bytes()
+        info_str = f"{prov_str} │ Konsens ({consensus_jaccard:.0%})"
+        extras: dict = {
+            "score": round(consensus_jaccard, 3),
+            "providers": len(candidates),
+            "words": None,
+            "model": None,
+            "consensus": True,
+        }
+    elif flac_path and flac_path.exists():
+        # Kein Konsens → Whisper als primärer Entscheider.
         best_path, best_score, has_vocals, whisper_info, whisper_words, model_used = (
             _whisper_best(flac_path, all_candidates, expected_dur)
         )
-        consensus_used = False
+        fallback_used = False
         if has_vocals:
             best_content = (
                 best_path.read_bytes()
                 if best_path and best_score >= _WHISPER_MIN_OVERLAP
                 else None
             )
-            # Konsens-Check: Whisper-Score zu niedrig aber Provider einig?
-            if best_content is None and best_score >= _WHISPER_RETRY_MIN:
-                if len(candidates) >= _CONSENSUS_MIN_PROVIDERS:
-                    path_words: list[tuple[Path, set]] = []
-                    for p in candidates:
-                        try:
-                            ws = set(_extract_lrc_words(p.read_text(encoding="utf-8")))
-                            if ws:
-                                path_words.append((p, ws))
-                        except Exception:
-                            pass
-                    if len(path_words) >= _CONSENSUS_MIN_PROVIDERS:
-                        n = len(path_words)
-                        pair_scores = []
-                        for i in range(n):
-                            for j in range(i + 1, n):
-                                a, b = path_words[i][1], path_words[j][1]
-                                u = len(a | b)
-                                pair_scores.append(len(a & b) / u if u else 0.0)
-                        if (
-                            pair_scores
-                            and sum(pair_scores) / len(pair_scores)
-                            >= _CONSENSUS_MIN_JACCARD
-                        ):
-                            # Repräsentativsten Kandidaten wählen:
-                            # höchste Durchschnitts-Ähnlichkeit zu allen anderen.
-                            # Ausreißer haben niedrigen Schnitt und werden so übergangen.
-                            best_rep: Path | None = None
-                            best_avg = -1.0
-                            for i, (p, ws_i) in enumerate(path_words):
-                                others = [path_words[j][1] for j in range(n) if j != i]
-                                avg = sum(
-                                    len(ws_i & o) / len(ws_i | o)
-                                    if len(ws_i | o) > 0
-                                    else 0.0
-                                    for o in others
-                                ) / len(others)
-                                if avg > best_avg:
-                                    best_avg = avg
-                                    best_rep = p
-                            if best_rep:
-                                best_content = best_rep.read_bytes()
-                                consensus_used = True
         else:
-            # Keine Sprache erkannt: Fallback ≥2 Provider + ≥10 Zeilen.
+            # Keine Sprache erkannt: Fallback ≥ 2 Provider + ≥ 10 Zeilen.
             best_candidate = max(
                 all_candidates, key=lambda p: _score_lrc(p, expected_dur)
             )
@@ -482,10 +496,8 @@ def fetch_lrc(
                 fallback_used = True
             else:
                 best_content = None
-        if consensus_used:
-            whisper_info = whisper_info.replace("!", "") + ", Konsens"
         info_str = f"{prov_str} │ {whisper_info}" if whisper_info else prov_str
-        extras: dict = {
+        extras = {
             "score": round(best_score, 3),
             "providers": len(candidates),
             "words": whisper_words,
@@ -493,8 +505,6 @@ def fetch_lrc(
         }
         if fallback_used:
             extras["fallback"] = True
-        if consensus_used:
-            extras["consensus"] = True
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()

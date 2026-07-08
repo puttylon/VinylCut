@@ -21,7 +21,7 @@ Nicht "bester Score ≥ 40%", sondern "bester schlägt zweitbesten um Marge X".
 Löst das Falsch-Song-Problem (gleicher Titel, anderer Song) sprachunabhängig
 ohne manuelle Kalibrierung der Schwelle.
 
-## ○ v1.4.11 — faster_whisper Eigenmetriken nutzen
+## ✓ v1.4.11 — faster_whisper Eigenmetriken nutzen
 `no_speech_prob` pro Segment (prinzipientreuer Instrumental-Detektor) und
 `avg_logprob` (prinzipientreuer Halluzinations-Indikator) aus faster_whisper
 statt unserer 5-Wörter-/25%-Heuristiken. Sprachdetektions-Wahrscheinlichkeit

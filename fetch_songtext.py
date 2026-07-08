@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.9"
+__version__ = "1.4.11"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -35,9 +35,13 @@ _CONSENSUS_MIN_JACCARD = (
     0.40  # mindest-Übereinstimmung zwischen den Provider-LRCs untereinander
 )
 
-_VOCALS_MIN_WORDS = 5  # weniger Wörter → als instrumental behandelt
+_VOCALS_MIN_WORDS = 5  # Fallback: weniger Wörter → als instrumental behandelt
+_VOCALS_NO_SPEECH_THOLD = (
+    0.65  # faster_whisper: avg no_speech_prob > dies → instrumental
+)
 _HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
 _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
+_HALLUCINATION_AVG_LOGPROB = -1.0  # faster_whisper: avg_logprob < dies → Halluzination
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
@@ -243,11 +247,15 @@ def _transcribe(
             capture_output=True,
         )
         model = _whisper_models[model_name]
-        segments, _ = model.transcribe(str(tmp_wav), beam_size=1)
-        text = " ".join(s.text for s in segments)
-        return re.findall(r"[^\W\d_]+", text.lower())
+        segs = list(model.transcribe(str(tmp_wav), beam_size=1)[0])
+        if not segs:
+            return [], 1.0, 0.0
+        no_speech = sum(s.no_speech_prob for s in segs) / len(segs)
+        avg_logprob = sum(s.avg_logprob for s in segs) / len(segs)
+        text = " ".join(s.text for s in segs)
+        return re.findall(r"[^\W\d_]+", text.lower()), no_speech, avg_logprob
     except Exception:
-        return []
+        return [], 1.0, 0.0
     finally:
         tmp_wav.unlink(missing_ok=True)
 
@@ -318,13 +326,16 @@ def _whisper_best(
             start = 0.0
         candidate_starts.append((p, start))
 
+    # cache: start_key → (words, no_speech_prob, avg_logprob)
+    _CacheVal = tuple[list[str], float, float]
+
     def _score_from_cache(
-        cache: dict[int, list[str]],
+        cache: dict[int, _CacheVal],
     ) -> tuple[Path | None, float, int]:
         best_path: Path | None = None
         best_score = 0.0
         for p, start in candidate_starts:
-            words = cache.get(round(start / 3), [])
+            words, _, _ = cache.get(round(start / 3), ([], 1.0, 0.0))
             if not words:
                 continue
             try:
@@ -336,21 +347,31 @@ def _whisper_best(
             if score > best_score:
                 best_score = score
                 best_path = p
-        total = sum(len(w) for w in cache.values())
+        total = sum(len(v[0]) for v in cache.values())
         return best_path, best_score, total
 
-    def _build_cache(model_name: str) -> dict[int, list[str]]:
-        cache: dict[int, list[str]] = {}
+    def _build_cache(model_name: str) -> dict[int, _CacheVal]:
+        cache: dict[int, _CacheVal] = {}
         for _, start in candidate_starts:
             key = round(start / 3)
             if key not in cache:
-                words = _transcribe(flac_path, start, ctx, model_name)
-                cache[key] = [] if _is_hallucination(words) else words
+                words, no_speech, logprob = _transcribe(
+                    flac_path, start, ctx, model_name
+                )
+                if logprob < _HALLUCINATION_AVG_LOGPROB or _is_hallucination(words):
+                    words = []
+                cache[key] = (words, no_speech, logprob)
         return cache
 
     # Pass 1: base
     fast_cache = _build_cache(_WHISPER_MODEL_FAST)
-    has_vocals = sum(len(w) for w in fast_cache.values()) >= _VOCALS_MIN_WORDS
+    # has_vocals: primär no_speech_prob, sekundär Wortzahl
+    vals = list(fast_cache.values())
+    avg_no_speech = sum(v[1] for v in vals) / len(vals) if vals else 1.0
+    total_words_base = sum(len(v[0]) for v in vals)
+    has_vocals = (
+        avg_no_speech < _VOCALS_NO_SPEECH_THOLD or total_words_base >= _VOCALS_MIN_WORDS
+    )
     best_path, best_score, total_words = _score_from_cache(fast_cache)
     model_used = _WHISPER_MODEL_FAST
 

@@ -16,7 +16,13 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
-## ○ v1.4.12 — Relative statt absolute Akzeptanzschwelle
+## ✓ v1.4.12 — VAD-Kurzprobe (15s) vor vollständigem Whisper-Pass
+15 Sekunden ab erstem LRC-Timestamp transkribieren und no_speech_prob prüfen.
+Bei instrumentalen Tracks (no_speech_prob > 0.65) wird der vollständige Pass
+übersprungen — statt mehrerer Minuten nur ~2 Sekunden. Probe nur wenn
+vollständiger Kontext > 30s (2× Probe-Länge), sonst direkt voller Pass.
+
+## ○ v1.4.13 — Relative statt absolute Akzeptanzschwelle
 Nicht "bester Score ≥ 40%", sondern "bester schlägt zweitbesten um Marge X".
 Löst das Falsch-Song-Problem (gleicher Titel, anderer Song) sprachunabhängig
 ohne manuelle Kalibrierung der Schwelle.

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.11"
+__version__ = "1.4.12"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -39,6 +39,7 @@ _VOCALS_MIN_WORDS = 5  # Fallback: weniger Wörter → als instrumental behandel
 _VOCALS_NO_SPEECH_THOLD = (
     0.65  # faster_whisper: avg no_speech_prob > dies → instrumental
 )
+_WHISPER_VAD_PROBE_SEC = 15.0  # Kurzprobe vor vollständigem Pass
 _HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
 _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
 _HALLUCINATION_AVG_LOGPROB = -1.0  # faster_whisper: avg_logprob < dies → Halluzination
@@ -362,6 +363,16 @@ def _whisper_best(
                     words = []
                 cache[key] = (words, no_speech, logprob)
         return cache
+
+    # VAD-Probe: 15s-Kurzcheck erspart vollständigen Pass bei Instrumental-Tracks.
+    # Nur sinnvoll wenn vollständiger Kontext wesentlich länger als Probe.
+    if ctx > _WHISPER_VAD_PROBE_SEC * 2:
+        probe_start = candidate_starts[0][1] if candidate_starts else 0.0
+        _, probe_no_speech, _ = _transcribe(
+            flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST
+        )
+        if probe_no_speech > _VOCALS_NO_SPEECH_THOLD:
+            return (None, 0.0, False, "instrumental", 0, "")
 
     # Pass 1: base
     fast_cache = _build_cache(_WHISPER_MODEL_FAST)

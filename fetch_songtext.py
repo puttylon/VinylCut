@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.14"
+__version__ = "1.4.15"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -180,14 +180,10 @@ def _get_whisper_model(name: str):
 
 
 def _whisper_context_sec(dur_s: float) -> float:
-    """Adaptive Transkriptionsdauer: kurze Songs vollständig, lange Songs anteilig."""
+    """Transkriptionsdauer: vollständig, max 8 Minuten."""
     if dur_s <= 0:
-        return 180.0  # Fallback ohne bekannte Dauer
-    if dur_s <= 180:
-        return dur_s  # ≤ 3 min → 100 %
-    if dur_s <= 360:
-        return dur_s * 0.75  # ≤ 6 min → 75 %
-    return min(dur_s * 0.50, 300)  # > 6 min → 50 %, max 5 min
+        return 480.0  # Fallback ohne bekannte Dauer
+    return min(dur_s, 480.0)  # immer 100 %, max 8 min
 
 
 def _extract_lrc_words(content: str) -> list[str]:
@@ -203,11 +199,24 @@ def _extract_lrc_words(content: str) -> list[str]:
 
 
 def _word_overlap(a: list[str], b: list[str]) -> float:
-    """Jaccard-Ähnlichkeit zweier Wortmengen."""
+    """Jaccard-Ähnlichkeit zweier Wortmengen (für Provider-Konsens)."""
     if not a or not b:
         return 0.0
     sa, sb = set(a), set(b)
     return len(sa & sb) / len(sa | sb)
+
+
+def _containment(transcript: list[str], lrc: list[str]) -> float:
+    """Anteil der Whisper-Wörter die in der LRC vorkommen (Containment).
+
+    Asymmetrisch: Nenner ist nur das Transkript, nicht die Vereinigung.
+    Dadurch spielt die LRC-Länge keine Rolle — nur ob das Gehörte passt.
+    """
+    if not transcript or not lrc:
+        return 0.0
+    st = set(transcript)
+    sl = set(lrc)
+    return len(st & sl) / len(st)
 
 
 def _is_hallucination(words: list[str]) -> bool:
@@ -339,7 +348,7 @@ def _whisper_best(
             if not words:
                 continue
             try:
-                score = _word_overlap(
+                score = _containment(
                     words, _extract_lrc_words(p.read_text(encoding="utf-8"))
                 )
             except Exception:

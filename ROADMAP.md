@@ -16,6 +16,19 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.15 — Containment + vollständiges Transkriptionsfenster
+
+Zwei Änderungen gemeinsam:
+1. Whisper transkribiert jetzt immer den gesamten Track (max 8 Minuten statt
+   adaptiv 50-100%). Verhindert dass charakteristische Textpassagen am Ende
+   des Songs nie gehört werden.
+2. Vergleichsmetrik von Jaccard auf Containment umgestellt:
+   `|transcript ∩ LRC| / |transcript|` statt `|A∩B| / |A∪B|`.
+   Jaccard-Problem: LRC enthält vollständigen Text, Transkript nur einen Teil
+   → Nenner aufgebläht → Score systematisch gedrückt. Containment ist
+   asymmetrisch und misst nur "wie viel des Gehörten passt zur LRC".
+   Provider-Konsens-Check verwendet weiterhin Jaccard (dort symmetrisch korrekt).
+
 ## ✓ v1.4.13 — Akzeptanzlogik vereinfacht (zurück zu absolutem Threshold)
 v1.4.13 führte relative Marge ein, die revertiert wurde: höchster Jaccard-Score
 gewinnt, Akzeptanz bei ≥ 40%. Keine Marge nötig — wer am besten zu Whisper

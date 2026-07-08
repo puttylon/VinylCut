@@ -221,37 +221,24 @@ def compare(before_path: Path, after_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="cmd")
-
-    run_p = sub.add_parser(
-        "run", help="Benchmark ausführen (Standard wenn Audiodateien angegeben)"
-    )
-    run_p.add_argument("files", nargs="+", help="Audiodateien mit vorhandener .lrc")
-    run_p.add_argument("-o", "--out", default="bench_results.json", help="Ausgabe-JSON")
-
-    cmp_p = sub.add_parser("compare", help="Zwei Ergebnis-JSONs vergleichen")
-    cmp_p.add_argument("before", help="JSON vor dem Umbau")
-    cmp_p.add_argument("after", help="JSON nach dem Umbau")
-
-    # Shortcut: direkt Dateien ohne Subkommando
-    parser.add_argument("files", nargs="*", help=argparse.SUPPRESS)
+    parser.add_argument("files", nargs="*", help="Audiodateien mit vorhandener .lrc")
     parser.add_argument(
         "-o", "--out", default="bench_results.json", help="Ausgabe-JSON"
     )
-    parser.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"))
-
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BEFORE", "AFTER"),
+        help="Zwei Ergebnis-JSONs vergleichen",
+    )
     args = parser.parse_args()
 
     if args.compare:
         compare(Path(args.compare[0]), Path(args.compare[1]))
-    elif args.cmd == "compare":
-        compare(Path(args.before), Path(args.after))
+    elif args.files:
+        run_benchmark([Path(f) for f in args.files], Path(args.out))
     else:
-        files = getattr(args, "files", []) or []
-        if not files:
-            parser.print_help()
-            return
-        run_benchmark([Path(f) for f in files], Path(args.out))
+        parser.print_help()
 
 
 if __name__ == "__main__":

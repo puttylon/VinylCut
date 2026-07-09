@@ -16,6 +16,14 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.5.0 — Neues Terminal-Format, vollständiger JSON-Cache
+
+Terminale Ausgabe neu strukturiert: Datei-Ergebnis (✓ = –) strikt getrennt von
+Methoden-Info. Info-Spalte zeigt Modell, Sprache, Methode, Wörter, Ergebnis.
+JSON-Cache erweitert: method, no_vocal, outcome, provider_names, language,
+reason — ersetzt verstreute consensus/fallback/model-Felder. _CACHE_MIN_VERSION
+auf 1.5.0 erhöht → alle alten Einträge werden neu verarbeitet.
+
 ## ✓ v1.4.22 — Provider-Übernahme durch Jaccard-Konsens ersetzt
 
 Wenn die VAD-Probe keinen Gesang erkennt, wurde bisher bei ≥2 Providern + ≥10

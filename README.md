@@ -204,13 +204,35 @@ Liegt auch der `small`-Score unter 40 %, wird keine LRC gespeichert.
 
 #### Ausgabe-Zeichen
 
+Jede Zeile endet mit einem Datei-Ergebnis-Symbol (was mit der `.lrc`-Datei passiert ist):
+
 | Symbol | Bedeutung |
 |--------|-----------|
-| `✓` | LRC gespeichert (neu oder ersetzt) |
-| `=` | LRC bereits vorhanden und korrekt — unverändert behalten |
-| `✗` | Kein Ergebnis — keine LRC gespeichert |
-| `!` | Score unter 40 %-Schwelle |
-| `+` | `small`-Modell hat den Ausschlag gegeben |
+| `✓` | LRC geschrieben (neu oder ersetzt) |
+| `=` | Nichts geschrieben — war bereits identisch oder kein Treffer |
+| `–` | Vorhandene LRC gelöscht — neuer Lauf fand kein brauchbares Ergebnis |
+
+Davor steht die Methoden-Info mit sechs Teilen:
+
+```
+[Zeit]  [Pfad]  [Anzahl/Total: Provider] │ [Modell] [Sprache] [Methode] [Wörter] [Ergebnis]
+```
+
+Beispiele:
+```
+09:28:20  Artist/Album/01 Song.flac  2/4: lrclib, genius │ [base] de Whisper 265W 62%  ✓
+09:28:20  Artist/Album/02 Song.flac  3/4: lrclib, netease, genius │ Konsens 92%  ✓
+09:28:20  Artist/Album/03 Song.flac  2/4: netease, genius │ Konsens 87% (kein Vokal)  ✓
+09:28:20  Artist/Album/04 Song.flac  2/4: lrclib, genius │ [base] de Whisper 48W unter Schwelle 12%  =
+09:28:20  Artist/Album/05 Song.flac  0/4: — │ kein Provider  =
+09:28:20  Artist/Album/06 Song.flac  0/4: — │ [base] de Whisper 0W kein Vokal  =
+09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [base] de Whisper 12W unter Schwelle 8%  –
+```
+
+- **Modell**: `[base]` oder `[small]` — welches Whisper-Modell verwendet wurde
+- **Sprache**: z.B. `de`, `en` — von `langdetect` erkannt, als Hint an Whisper übergeben
+- **Wörter**: von Whisper transkribierte Wörter (Qualitätsindikator: 5W 62% ist unsicherer als 280W 62%)
+- **Konsens**: kein Whisper nötig, Provider einig — bei `(kein Vokal)` hat die VAD ausgelöst
 
 ---
 

@@ -8,24 +8,34 @@ from pathlib import Path
 
 def _method(entry: dict) -> str:
     """Bestimmt die Methode die zu diesem Ergebnis geführt hat."""
+    method = entry.get("method")
+    if method:
+        if method == "konsens" and entry.get("no_vocal"):
+            return "konsens-kein-vokal"
+        return method
+    # Legacy: Cache-Einträge vor v1.5.0
     if entry.get("consensus") and entry.get("no_vocal"):
         return "konsens-kein-vokal"
     if entry.get("consensus"):
         return "konsens"
     if entry.get("fallback"):
-        return "fallback"  # alte Cache-Einträge vor v1.4.22
+        return "konsens-kein-vokal"
     model = entry.get("model")
     if model == "small":
         return "whisper-small"
     if model == "base":
         return "whisper-base"
     if entry.get("score") is not None:
-        return "whisper-base"  # ältere Cache-Einträge ohne explizites model-Feld
-    return "heuristik"  # kein Whisper (kein FLAC oder nicht installiert)
+        return "whisper-base"
+    return "heuristik"
 
 
 def _reject_reason(entry: dict) -> str:
     """Bestimmt den Ablehnungsgrund für nf-Einträge."""
+    reason = entry.get("reason")
+    if reason:
+        return reason
+    # Legacy: Cache-Einträge vor v1.5.0
     if entry.get("providers", 0) == 0:
         return "kein-provider"
     words = entry.get("words") or 0
@@ -33,7 +43,7 @@ def _reject_reason(entry: dict) -> str:
     if score is None:
         return "kein-whisper"
     if words == 0 and score == 0.0:
-        return "instrumental"
+        return "kein-vokal"
     return "unter-schwelle"
 
 
@@ -100,10 +110,10 @@ def analyse(root: Path) -> None:
     for e in nf_entries:
         r = _reject_reason(e)
         reject_counts[r] = reject_counts.get(r, 0) + 1
-    reject_order = ["kein-provider", "instrumental", "unter-schwelle", "kein-whisper"]
+    reject_order = ["kein-provider", "kein-vokal", "unter-schwelle", "kein-whisper"]
     reject_labels = {
         "kein-provider":  "Kein Provider gefunden",
-        "instrumental":   "Instrumental/kein Vokal",
+        "kein-vokal":     "Kein Vokal erkannt    ",
         "unter-schwelle": "Whisper unter Schwelle",
         "kein-whisper":   "Kein Whisper/Score    ",
     }
@@ -155,12 +165,9 @@ def analyse(root: Path) -> None:
         print("\nKeine Risiko-Tracks gefunden (ok, Score 40–50%, 1 Provider).")
 
     # ── Konsens (kein Vokal): Provider einig, Whisper hat nichts gehört ─────
-    novocal_ok = [e for e in ok_entries if e.get("no_vocal")]
-    # alte Cache-Einträge (vor v1.4.22) verwenden noch fallback=True
-    novocal_ok_legacy = [e for e in ok_entries if e.get("fallback") and not e.get("no_vocal")]
-    all_novocal = novocal_ok + novocal_ok_legacy
-    if all_novocal:
-        print(f"\nKONSENS KEIN VOKAL (Provider einig, kein Whisper-Vergleich) — {len(all_novocal)} Stück")
+    novocal_ok = [e for e in ok_entries if _method(e) == "konsens-kein-vokal"]
+    if novocal_ok:
+        print(f"\nKONSENS KEIN VOKAL (Provider einig, kein Whisper-Vergleich) — {len(novocal_ok)} Stück")
         for cf in cache_files:
             try:
                 data = json.loads(cf.read_text(encoding="utf-8"))
@@ -169,10 +176,11 @@ def analyse(root: Path) -> None:
             for fname, entry in data.items():
                 if not isinstance(entry, dict):
                     continue
-                if entry.get("r") == "ok" and (entry.get("no_vocal") or entry.get("fallback")):
+                if entry.get("r") == "ok" and _method(entry) == "konsens-kein-vokal":
                     prov = entry.get("providers", "?")
                     score = entry.get("score", 0.0) or 0.0
-                    print(f"  {prov}P  {score:.0%}  {cf.parent.name} / {fname}")
+                    names = ", ".join(entry.get("provider_names") or [])
+                    print(f"  {prov}P {score:.0%}  {names}  {cf.parent.name} / {fname}")
     else:
         print("\nKeine Konsens-kein-Vokal-Tracks (alle ok-Tracks Whisper-verifiziert).")
 

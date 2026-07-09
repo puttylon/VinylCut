@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.22"
+__version__ = "1.5.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -47,7 +47,7 @@ _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluz
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
-    "1.4.0"  # Einträge dieser oder neuerer Version = gültig, kein Neulauf
+    "1.5.0"  # Einträge dieser oder neuerer Version = gültig, kein Neulauf
 )
 
 # Genres die keinen Songtext haben — Substring-Matching (Kleinschreibung)
@@ -417,13 +417,13 @@ def _provider_consensus(
 
 def _whisper_best(
     flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
-) -> tuple[Path | None, float, bool, str, int, str]:
+) -> tuple[Path | None, float, bool, int, str, str | None]:
     """Zweistufige Verifikation: base zuerst, small nur im Grenzbereich.
 
-    Gibt (bester Kandidat, score, has_vocals, info_str, words, model_used) zurück.
+    Gibt (bester Kandidat, score, has_vocals, words, model_used, language) zurück.
     """
     if _get_whisper_model(_WHISPER_MODEL_FAST) is None:
-        return (None, 0.0, False, "", 0, "")
+        return (None, 0.0, False, 0, "", None)
 
     ctx = _whisper_context_sec(expected_dur)
 
@@ -495,7 +495,7 @@ def _whisper_best(
                     probe_no_speech = ns
                     break
         if probe_no_speech > _VOCALS_NO_SPEECH_THOLD:
-            return (None, 0.0, False, "kein Vokal erkannt", 0, "")
+            return (None, 0.0, False, 0, _WHISPER_MODEL_FAST, lrc_lang)
 
     # Pass 1: base
     fast_cache = _build_cache(_WHISPER_MODEL_FAST)
@@ -517,14 +517,7 @@ def _whisper_best(
             best_path, best_score, total_words = full_path, full_score, full_words
             model_used = _WHISPER_MODEL_FULL
 
-    if has_vocals:
-        threshold_flag = "!" if best_score < _WHISPER_MIN_OVERLAP else ""
-        model_flag = "+" if model_used == _WHISPER_MODEL_FULL else ""
-        info_str = f"~{total_words}W, {best_score:.0%}{threshold_flag}{model_flag}"
-    else:
-        info_str = "kein Vokal erkannt"
-
-    return (best_path, best_score, has_vocals, info_str, total_words, model_used)
+    return (best_path, best_score, has_vocals, total_words, model_used, lrc_lang)
 
 
 def fetch_lrc(
@@ -601,7 +594,17 @@ def fetch_lrc(
     if not all_candidates:
         for p in candidates:
             p.unlink(missing_ok=True)
-        return False, "0/4", {"score": None, "providers": 0, "words": None}
+        info_str = f"0/{len(_ALL_PROVIDERS)}: — │ kein Provider"
+        return False, info_str, {
+            "providers": 0,
+            "provider_names": [],
+            "method": None,
+            "no_vocal": False,
+            "score": None,
+            "reason": "kein-provider",
+            "words": None,
+            "language": None,
+        }
 
     hit_str = ", ".join(provider_hits) if provider_hits else "—"
     prov_str = f"{len(candidates)}/{len(_ALL_PROVIDERS)}: {hit_str}"
@@ -612,13 +615,15 @@ def fetch_lrc(
 
     if consensus_rep is not None:
         best_content = consensus_rep.read_bytes()
-        info_str = f"{prov_str} │ Konsens ({consensus_jaccard:.0%})"
+        info_str = f"{prov_str} │ Konsens {consensus_jaccard:.0%}"
         extras: dict = {
-            "score": round(consensus_jaccard, 3),
             "providers": len(candidates),
+            "provider_names": provider_hits,
+            "method": "konsens",
+            "no_vocal": False,
+            "score": round(consensus_jaccard, 3),
             "words": None,
-            "model": None,
-            "consensus": True,
+            "language": None,
         }
     elif flac_path and flac_path.exists():
         # Kein Konsens → Whisper als primärer Entscheider.
@@ -626,46 +631,82 @@ def fetch_lrc(
             best_path,
             best_score,
             has_vocals,
-            whisper_info,
             whisper_words,
             model_used,
+            lrc_lang,
         ) = _whisper_best(flac_path, all_candidates, expected_dur)
-        fallback_used = False
-        if has_vocals:
-            best_content = (
-                best_path.read_bytes()
-                if best_path and best_score >= _WHISPER_MIN_OVERLAP
-                else None
-            )
-        else:
-            # kein Vokal erkannt: Prüfe ob ≥ 2 Provider inhaltlich übereinstimmen.
-            # Wenn ja → schwächerer Konsens, Provider-Übereinstimmung schlägt VAD.
+
+        method = f"whisper-{model_used}" if model_used else "heuristik"
+        model_str = f"[{model_used}]" if model_used else ""
+        lang_str = lrc_lang or ""
+        words_str = f"{whisper_words}W"
+        whisper_head = " ".join(p for p in [model_str, lang_str, "Whisper", words_str] if p)
+
+        if not has_vocals:
+            # kein Vokal: Prüfe ob ≥ 2 Provider inhaltlich übereinstimmen.
             novocal_rep, novocal_jaccard = _provider_consensus(candidates, min_providers=2)
             if novocal_rep is not None:
-                whisper_info = f"Konsens (kein Vokal) {novocal_jaccard:.0%}"
                 best_content = novocal_rep.read_bytes()
-                fallback_used = True
+                info_str = f"{prov_str} │ Konsens {novocal_jaccard:.0%} (kein Vokal)"
+                extras = {
+                    "providers": len(candidates),
+                    "provider_names": provider_hits,
+                    "method": "konsens",
+                    "no_vocal": True,
+                    "score": round(novocal_jaccard, 3),
+                    "words": whisper_words,
+                    "language": lrc_lang,
+                }
             else:
                 best_content = None
-        info_str = f"{prov_str} │ {whisper_info}" if whisper_info else prov_str
-        extras = {
-            "score": round(best_score, 3),
-            "providers": len(candidates),
-            "words": whisper_words,
-            "model": model_used,
-        }
-        if fallback_used:
-            extras["consensus"] = True
-            extras["no_vocal"] = True
+                info_str = f"{prov_str} │ {whisper_head} kein Vokal"
+                extras = {
+                    "providers": len(candidates),
+                    "provider_names": provider_hits,
+                    "method": method,
+                    "no_vocal": True,
+                    "score": 0.0,
+                    "reason": "kein-vokal",
+                    "words": 0,
+                    "language": lrc_lang,
+                }
+        elif best_score >= _WHISPER_MIN_OVERLAP:
+            best_content = best_path.read_bytes() if best_path else None
+            info_str = f"{prov_str} │ {whisper_head} {best_score:.0%}"
+            extras = {
+                "providers": len(candidates),
+                "provider_names": provider_hits,
+                "method": method,
+                "no_vocal": False,
+                "score": round(best_score, 3),
+                "words": whisper_words,
+                "language": lrc_lang,
+            }
+        else:
+            best_content = None
+            info_str = f"{prov_str} │ {whisper_head} unter Schwelle {best_score:.0%}"
+            extras = {
+                "providers": len(candidates),
+                "provider_names": provider_hits,
+                "method": method,
+                "no_vocal": False,
+                "score": round(best_score, 3),
+                "reason": "unter-schwelle",
+                "words": whisper_words,
+                "language": lrc_lang,
+            }
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()
-        info_str = prov_str
+        info_str = f"{prov_str} │ —"
         extras = {
-            "score": None,
             "providers": len(candidates),
+            "provider_names": provider_hits,
+            "method": "heuristik",
+            "no_vocal": False,
+            "score": None,
             "words": None,
-            "model": None,
+            "language": None,
         }
 
     for p in candidates:  # nur temp-Dateien löschen, nie existing_lrc
@@ -828,8 +869,10 @@ def main() -> None:
         if use_compare:
             if not found:
                 dest.unlink(missing_ok=True)
+                had_lrc = lrc_path.exists()
                 lrc_path.unlink(missing_ok=True)
-                print(f"{_ts()}  {rel}  {info}  ✗")
+                extras["outcome"] = "delete" if had_lrc else "none"
+                print(f"{_ts()}  {rel}  {info}  {'–' if had_lrc else '='}")
                 not_found += 1
                 cache_result = "nf"
             else:
@@ -838,10 +881,12 @@ def main() -> None:
                     old_content = lrc_path.read_bytes() if lrc_path.exists() else None
                     dest.unlink(missing_ok=True)
                     if old_content == new_content:
+                        extras["outcome"] = "none"
                         print(f"{_ts()}  {rel}  {info}  =")
                         skipped += 1
                     else:
                         lrc_path.write_bytes(new_content)
+                        extras["outcome"] = "write"
                         print(f"{_ts()}  {rel}  {info}  ✓")
                         updated += 1
                     cache_result = "ok"
@@ -852,12 +897,14 @@ def main() -> None:
                     break
         else:
             if found:
+                extras["outcome"] = "write"
                 updated += 1
                 cache_result = "ok"
             else:
+                extras["outcome"] = "none"
                 not_found += 1
                 cache_result = "nf"
-            print(f"{_ts()}  {rel}  {info}  {'✓' if found else '✗'}")
+            print(f"{_ts()}  {rel}  {info}  {'✓' if found else '='}")
 
         if cache_result is not None:
             dir_cache[audio.name] = {

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -831,10 +831,30 @@ def main() -> None:
             no_tags += 1
             continue
 
-        # Genre-Check: kein Songtext erwartet → überspringen (kein Cache-Eintrag)
+        # Genre-Check: kein Songtext erwartet → überspringen
         if _is_skip_genre(meta_genre):
+            had_lrc = lrc_path.exists()
             lrc_path.unlink(missing_ok=True)
+            outcome = "delete" if had_lrc else "none"
+            symbol = "–" if had_lrc else "="
+            genre_label = meta_genre.strip() if meta_genre else "Instrumental"
+            print(f"{_ts()}  {rel}  0/0: │ Genre={genre_label}  {symbol}")
             genre_skipped += 1
+            dir_cache[audio.name] = {
+                "v": __version__,
+                "r": "skip",
+                "outcome": outcome,
+                "providers": 0,
+                "provider_names": [],
+                "method": None,
+                "no_vocal": False,
+                "score": None,
+                "reason": "genre",
+                "words": None,
+                "language": None,
+                "ts": datetime.now().isoformat(timespec="seconds"),
+            }
+            _save_cache(audio.parent, dir_cache)
             continue
 
         title = meta_title or (

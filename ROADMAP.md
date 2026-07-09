@@ -16,6 +16,12 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.5.1 — Genre-Skip: Terminal-Ausgabe, Cache-Eintrag, lrc_analyse
+
+Genre-übersprungene Tracks erscheinen jetzt im Terminal (0/0: │ Genre=…  –/=),
+werden gecacht (r=skip, reason=genre) und in lrc_analyse.py als eigene Zeile
+gezählt. JSON-Cache-Struktur im README dokumentiert.
+
 ## ✓ v1.5.0 — Neues Terminal-Format, vollständiger JSON-Cache
 
 Terminale Ausgabe neu strukturiert: Datei-Ergebnis (✓ = –) strikt getrennt von

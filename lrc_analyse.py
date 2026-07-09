@@ -55,6 +55,7 @@ def analyse(root: Path) -> None:
 
     ok_entries: list[dict] = []
     nf_entries: list[dict] = []
+    skip_entries: list[dict] = []
     albums = set()
 
     for cf in cache_files:
@@ -70,8 +71,10 @@ def analyse(root: Path) -> None:
                 ok_entries.append(entry)
             elif entry.get("r") == "nf":
                 nf_entries.append(entry)
+            elif entry.get("r") == "skip":
+                skip_entries.append(entry)
 
-    total = len(ok_entries) + len(nf_entries)
+    total = len(ok_entries) + len(nf_entries) + len(skip_entries)
     if total == 0:
         print("Keine Einträge gefunden.")
         return
@@ -83,6 +86,8 @@ def analyse(root: Path) -> None:
     print("ERGEBNIS")
     print(f"  LRC gefunden    (ok):  {len(ok_entries):4d}  ({len(ok_entries)/total:.1%})")
     print(f"  Nicht gefunden  (nf):  {len(nf_entries):4d}  ({len(nf_entries)/total:.1%})")
+    if skip_entries:
+        print(f"  Übersprungen  (skip): {len(skip_entries):4d}  ({len(skip_entries)/total:.1%})")
 
     # ── Methode (ok) ─────────────────────────────────────────────────────────
     print("\nMETHODE (ok-Tracks)")

@@ -227,6 +227,8 @@ Beispiele:
 09:28:20  Artist/Album/05 Song.flac  0/4: — │ kein Provider  =
 09:28:20  Artist/Album/06 Song.flac  2/4: netease, genius │ [base] de Whisper 0W kein Vokal  =
 09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [base] de Whisper 12W unter Schwelle 8%  –
+09:28:20  Artist/Album/08 Song.flac  0/0: │ Genre=Instrumental  –
+09:28:20  Artist/Album/09 Song.flac  0/0: │ Genre=Instrumental  =
 ```
 
 - **Modell**: `[base]` oder `[small]` — welches Whisper-Modell verwendet wurde
@@ -238,7 +240,41 @@ Beispiele:
 
 #### Cache und Hilfs-Skripte
 
-**Cache** (`.fetch_songtext.json` pro Ordner): Ergebnis, Whisper-Score, verwendetes Modell und Zeitstempel werden pro Track gespeichert. Beim nächsten Lauf wird der Track übersprungen. `--force` ignoriert den Cache komplett.
+**Cache** (`.fetch_songtext.json` pro Ordner): Ein Eintrag pro Track — beim nächsten Lauf wird der Track übersprungen. `--force` ignoriert den Cache komplett.
+
+**Felder je Eintrag:**
+
+| Feld | Werte | Bedeutung |
+|------|-------|-----------|
+| `v` | `"1.5.0"` | Version des schreibenden Skripts |
+| `r` | `"ok"` / `"nf"` / `"skip"` | Ergebnis: LRC vorhanden / nicht gefunden / übersprungen |
+| `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
+| `providers` | `0`–`4` | Anzahl Provider mit Treffer |
+| `provider_names` | `["lrclib", "genius"]` | Namen der liefernden Provider |
+| `method` | `"whisper-base"` / `"whisper-small"` / `"konsens"` / `"heuristik"` / `null` | Entscheidungsweg |
+| `no_vocal` | `true` / `false` | VAD hat keinen Gesang erkannt (bei `method=konsens`: Konsens trotzdem möglich) |
+| `score` | `0.0`–`1.0` / `null` | Whisper-Containment oder Jaccard-Konsens |
+| `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"genre"` | Grund bei `r=nf` oder `r=skip` |
+| `words` | `0`–`n` / `null` | Von Whisper transkribierte Wörter |
+| `language` | `"de"` / `"en"` / … / `null` | Erkannte Sprache (Hint an Whisper) |
+| `ts` | ISO-8601 | Zeitstempel des Laufs |
+
+Beispiel-Einträge:
+
+```json
+"01 Song.flac": {
+  "v": "1.5.0", "r": "ok", "outcome": "write",
+  "providers": 2, "provider_names": ["lrclib", "genius"],
+  "method": "whisper-base", "no_vocal": false,
+  "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
+},
+"02 Instrumental.flac": {
+  "v": "1.5.0", "r": "skip", "outcome": "delete",
+  "providers": 0, "provider_names": [],
+  "method": null, "no_vocal": false,
+  "score": null, "reason": "genre", "words": null, "language": null, "ts": "2026-07-09T09:28:25"
+}
+```
 
 **`lrc_recheck.py`** — sucht gecachte „nicht gefunden"-Einträge und löscht sie gezielt, damit sie beim nächsten Lauf neu geprüft werden:
 

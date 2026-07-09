@@ -824,6 +824,7 @@ def main() -> None:
                     continue
 
         meta_artist, meta_title, meta_genre = _read_audio_tags(audio)
+        rel = str(audio.relative_to(root))
 
         # Keine Tags → Suche unzuverlässig, überspringen (kein Cache-Eintrag)
         if not meta_artist and not meta_title:
@@ -863,8 +864,6 @@ def main() -> None:
         query_artist = meta_artist or artist
         query = f"{query_artist} {title}".strip()
         expected_dur = tracks_by_title.get(title, 0.0)
-
-        rel = str(audio.relative_to(root))
 
         use_compare = args.recursive or lrc_path.exists()
         if use_compare:

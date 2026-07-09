@@ -16,6 +16,15 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.21 — VAD-Probe: Fallback-Positionen bei 30% und 50%
+
+Energie-Peak ≠ Vokal-Peak: bei leisen Songs (R.E.M. "Drive") oder Songs mit
+instrumentalem Outro als lautester Stelle ("Everybody Hurts" — Peak bei 4:48,
+no_speech=1.00!) feuerte die erste Probe fälschlich. Fix: wenn erste Probe
+anschlägt, werden 30% und 50% der Trackdauer als Fallback getestet. Erster
+Treffer (no_speech ≤ 0.65) beendet die Suche. Nur wenn alle drei Positionen
+> 0.65 → echt instrumental.
+
 ## ✓ v1.4.20 — Halluzinationsfilter: doppelte Bedingung
 
 _is_hallucination() feuerte fälschlich auf repetitiven Popsongs (z.B. Wolfgang

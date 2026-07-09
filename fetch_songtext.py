@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.20"
+__version__ = "1.4.21"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -474,13 +474,24 @@ def _whisper_best(
                 cache[key] = (words, no_speech, logprob)
         return cache
 
-    # VAD-Probe: 15s an der lautesten Stelle des Tracks (unabhängig von LRC-Timestamps).
-    # Verhindert dass der Probe-Start im Intro landet und Vocals verpasst.
+    # VAD-Probe: 15s an der lautesten Stelle. Schlägt sie an, zwei Fallback-
+    # Positionen testen (30%/50% der Dauer) — Energie-Peak ≠ Vokal-Peak.
     if ctx > _WHISPER_VAD_PROBE_SEC * 2:
         probe_start = _vad_peak_start(flac_path, expected_dur)
         _, probe_no_speech, _ = _transcribe(
             flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST
         )
+        if probe_no_speech > _VOCALS_NO_SPEECH_THOLD and expected_dur > 60:
+            for frac in (0.30, 0.50):
+                _, ns, _ = _transcribe(
+                    flac_path,
+                    expected_dur * frac,
+                    _WHISPER_VAD_PROBE_SEC,
+                    _WHISPER_MODEL_FAST,
+                )
+                if ns <= _VOCALS_NO_SPEECH_THOLD:
+                    probe_no_speech = ns
+                    break
         if probe_no_speech > _VOCALS_NO_SPEECH_THOLD:
             return (None, 0.0, False, "kein Vokal erkannt", 0, "")
 

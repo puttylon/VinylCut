@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -786,6 +786,31 @@ def _cache_entry_valid(entry: dict) -> bool:
     return _parse_version(entry.get("v", "0")) >= _parse_version(_CACHE_MIN_VERSION)
 
 
+def _iter_audio_bfs(root: Path) -> "Iterator[Path]":
+    """Liefert Audiodateien breadth-first, innerhalb jeder Ebene alphabetisch.
+
+    Startet sofort ohne alle Dateien vorab zu sammeln — bei 20000+ Dateien
+    beginnt die Verarbeitung nach Sekunden statt Minuten.
+    """
+    from collections import deque
+    from typing import Iterator
+
+    queue: deque[Path] = deque([root])
+    while queue:
+        current = queue.popleft()
+        subdirs: list[Path] = []
+        try:
+            entries = sorted(current.iterdir())
+        except PermissionError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                subdirs.append(entry)
+            elif entry.suffix.lower() in _AUDIO_EXTENSIONS:
+                yield entry
+        queue.extend(subdirs)
+
+
 def main() -> None:
     import argparse
 
@@ -812,20 +837,25 @@ def main() -> None:
 
     root = Path(args.path).resolve()
     if root.is_file() and root.suffix.lower() in _AUDIO_EXTENSIONS:
-        audio_files = [root]
+        audio_files: "Iterable[Path]" = [root]
+        mode = "Datei"
+    elif args.recursive:
+        audio_files = _iter_audio_bfs(root)  # Generator: startet sofort
+        mode = "rekursiv"
     else:
         audio_files = sorted(
-            p
-            for p in (root.rglob("*") if args.recursive else root.glob("*"))
-            if p.suffix.lower() in _AUDIO_EXTENSIONS
+            p for p in root.glob("*") if p.suffix.lower() in _AUDIO_EXTENSIONS
         )
+        mode = "Album"
 
-    if not audio_files:
+    if mode != "rekursiv" and not audio_files:  # type: ignore[truthy-iterable]
         print("Keine Audiodateien gefunden.")
         return
 
-    mode = "rekursiv" if args.recursive else ("Datei" if root.is_file() else "Album")
-    print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")
+    if mode == "rekursiv":
+        print(f"\n=== SONGTEXTE ({mode}) ===\n")
+    else:
+        print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")  # type: ignore[arg-type]
 
     env = _load_env()
     _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste

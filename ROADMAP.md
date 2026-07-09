@@ -1,5 +1,13 @@
 # VinylCut Roadmap
 
+## ✓ v1.5.3 — BFS-Traversal für --recursive
+
+Bei 20000+ Dateien in hunderten Ordnern wartete das Skript auf den vollständigen
+`rglob`-Scan bevor die erste Datei verarbeitet wurde. Neuer `_iter_audio_bfs`-Generator:
+Breadth-first mit `iterdir()`, innerhalb jeder Ebene alphabetisch sortiert. Startet
+sofort mit Level 0 statt alles vorab zu sammeln. Im Header wird die Gesamtzahl bei
+`--recursive` weggelassen (unbekannt bis zum Ende).
+
 ## ✓ v1.5.2 — Robustere Konsens- und VAD-Logik
 
 **C1** `_extract_lrc_words` entfernt jetzt alle `[...]`-Tokens ohne Doppelpunkt (Sektion-Labels

@@ -172,11 +172,11 @@ def _get_whisper_model(name: str):
             from faster_whisper import WhisperModel
         except ImportError:
             return None
-        print(f"   Lade Whisper-Modell ({name})...", end=" ", flush=True)
+        print(f"   {_ts()}  Lade Whisper-Modell ({name})...", end=" ", flush=True)
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         # int8: schneller auf CPU, vermeidet float16-Warnung von ctranslate2
         _whisper_models[name] = WhisperModel(name, device="auto", compute_type="int8")
-        print("bereit.")
+        print(f"bereit.  {_ts()}")
     return _whisper_models[name]
 
 
@@ -786,11 +786,28 @@ def _cache_entry_valid(entry: dict) -> bool:
     return _parse_version(entry.get("v", "0")) >= _parse_version(_CACHE_MIN_VERSION)
 
 
+def _clear_status() -> None:
+    """Löscht eine per _print_status() geschriebene Statuszeile."""
+    print(f"\r{' ' * 100}\r", end="", flush=True)
+
+
+def _tprint(msg: str) -> None:
+    """Löscht Statuszeile und gibt eine Track-Zeile aus."""
+    _clear_status()
+    print(msg)
+
+
+def _print_status(msg: str) -> None:
+    """Überschreibbare Statuszeile (kein Zeilenumbruch, max. 100 Zeichen)."""
+    print(f"\r{msg[:98]:<98}", end="", flush=True)
+
+
 def _iter_audio_bfs(root: Path) -> "Iterator[Path]":
     """Liefert Audiodateien breadth-first, innerhalb jeder Ebene alphabetisch.
 
     Startet sofort ohne alle Dateien vorab zu sammeln — bei 20000+ Dateien
     beginnt die Verarbeitung nach Sekunden statt Minuten.
+    Zeigt per _print_status() welches Verzeichnis gerade gescannt wird.
     """
     from collections import deque
     from typing import Iterator
@@ -800,9 +817,13 @@ def _iter_audio_bfs(root: Path) -> "Iterator[Path]":
         current = queue.popleft()
         subdirs: list[Path] = []
         try:
+            rel = current.relative_to(root)
+            _print_status(f"  Scanne: {rel}")
             entries = sorted(current.iterdir())
         except PermissionError:
             continue
+        except ValueError:
+            entries = sorted(current.iterdir())
         for entry in entries:
             if entry.is_dir():
                 subdirs.append(entry)
@@ -853,9 +874,9 @@ def main() -> None:
         return
 
     if mode == "rekursiv":
-        print(f"\n=== SONGTEXTE ({mode}) ===\n")
+        print(f"\n=== SONGTEXTE ({mode}) — {_ts()} ===\n")
     else:
-        print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) ===\n")  # type: ignore[arg-type]
+        print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
 
     env = _load_env()
     _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste
@@ -873,6 +894,13 @@ def main() -> None:
             current_parent = audio.parent
             artist, tracks_by_title = _load_release(audio.parent)
             dir_cache = _load_cache(audio.parent)
+            if args.recursive:
+                try:
+                    rel_dir = audio.parent.relative_to(root)
+                except ValueError:
+                    rel_dir = audio.parent
+                _clear_status()
+                print(f"{_ts()}  ── {rel_dir}")
 
         # Cache-Check: Track bereits verarbeitet?
         if not args.force:
@@ -898,7 +926,7 @@ def main() -> None:
             outcome = "delete" if had_lrc else "none"
             symbol = "–" if had_lrc else "="
             genre_label = meta_genre.strip() if meta_genre else "Instrumental"
-            print(f"{_ts()}  {rel}  0/0: │ Genre={genre_label}  {symbol}")
+            _tprint(f"{_ts()}  {rel}  0/0: │ Genre={genre_label}  {symbol}")
             genre_skipped += 1
             dir_cache[audio.name] = {
                 "v": __version__,
@@ -939,7 +967,7 @@ def main() -> None:
                 query, dest, env, expected_dur, flac_path=audio, existing_lrc=lrc_path
             )
         except FileNotFoundError:
-            print(f"{_ts()}  {rel}  syncedlyrics nicht gefunden — Abbruch.")
+            _tprint(f"{_ts()}  {rel}  syncedlyrics nicht gefunden — Abbruch.")
             dest.unlink(missing_ok=True)
             errors += 1
             break
@@ -950,7 +978,7 @@ def main() -> None:
                 had_lrc = lrc_path.exists()
                 lrc_path.unlink(missing_ok=True)
                 extras["outcome"] = "delete" if had_lrc else "none"
-                print(f"{_ts()}  {rel}  {info}  {'–' if had_lrc else '='}")
+                _tprint(f"{_ts()}  {rel}  {info}  {'–' if had_lrc else '='}")
                 not_found += 1
                 cache_result = "nf"
             else:
@@ -960,17 +988,17 @@ def main() -> None:
                     dest.unlink(missing_ok=True)
                     if old_content == new_content:
                         extras["outcome"] = "none"
-                        print(f"{_ts()}  {rel}  {info}  =")
+                        _tprint(f"{_ts()}  {rel}  {info}  =")
                         skipped += 1
                     else:
                         lrc_path.write_bytes(new_content)
                         extras["outcome"] = "write"
-                        print(f"{_ts()}  {rel}  {info}  ✓")
+                        _tprint(f"{_ts()}  {rel}  {info}  ✓")
                         updated += 1
                     cache_result = "ok"
                 except OSError as e:
                     dest.unlink(missing_ok=True)
-                    print(f"{_ts()}  {rel}  Schreibfehler: {e} — Abbruch.")
+                    _tprint(f"{_ts()}  {rel}  Schreibfehler: {e} — Abbruch.")
                     errors += 1
                     break
         else:
@@ -982,7 +1010,7 @@ def main() -> None:
                 extras["outcome"] = "none"
                 not_found += 1
                 cache_result = "nf"
-            print(f"{_ts()}  {rel}  {info}  {'✓' if found else '='}")
+            _tprint(f"{_ts()}  {rel}  {info}  {'✓' if found else '='}")
 
         if cache_result is not None:
             dir_cache[audio.name] = {

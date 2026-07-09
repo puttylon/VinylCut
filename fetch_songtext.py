@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.19"
+__version__ = "1.4.20"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -314,7 +314,12 @@ def _is_hallucination(words: list[str]) -> bool:
     """
     if len(words) < _HALLUCINATION_MIN_WORDS:
         return False
-    return len(set(words)) / len(words) < _HALLUCINATION_MAX_UNIQUE_RATIO
+    if len(set(words)) / len(words) >= _HALLUCINATION_MAX_UNIQUE_RATIO:
+        return False
+    # Niedrige Wortvielfalt allein reicht nicht — repetitive Songs haben das auch.
+    # Zusätzlich muss ein einzelnes Wort ≥ MAX_UNIQUE_RATIO aller Wörter ausmachen.
+    most_common = max(words.count(w) for w in set(words))
+    return most_common / len(words) >= _HALLUCINATION_MAX_UNIQUE_RATIO
 
 
 def _transcribe(

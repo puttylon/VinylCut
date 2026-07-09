@@ -16,6 +16,15 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.20 — Halluzinationsfilter: doppelte Bedingung
+
+_is_hallucination() feuerte fälschlich auf repetitiven Popsongs (z.B. Wolfgang
+Petry "Du bist ein Wunder": unique-Ratio 24.4% < 25% → als Halluzination
+klassifiziert obwohl Whisper korrekt transkribierte). Fix: zusätzlich muss ein
+einzelnes Wort ≥ 25% aller Wörter ausmachen. Repetitive Songs: "ein" = 9% → kein
+Alarm. Echte Halluzination "lets go" × 20: "lets" = 50% → Alarm. Alle 118 Tests
+bestehen weiterhin.
+
 ## ✓ v1.4.19 — Einzeldatei-Unterstützung
 
 fetch_songtext.py akzeptiert jetzt auch einzelne Audiodateien als Argument

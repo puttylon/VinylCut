@@ -225,7 +225,7 @@ Beispiele:
 09:28:20  Artist/Album/03 Song.flac  2/4: netease, genius │ Konsens 87% (kein Vokal)  ✓
 09:28:20  Artist/Album/04 Song.flac  2/4: lrclib, genius │ [base] de Whisper 48W unter Schwelle 12%  =
 09:28:20  Artist/Album/05 Song.flac  0/4: — │ kein Provider  =
-09:28:20  Artist/Album/06 Song.flac  0/4: — │ [base] de Whisper 0W kein Vokal  =
+09:28:20  Artist/Album/06 Song.flac  2/4: netease, genius │ [base] de Whisper 0W kein Vokal  =
 09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [base] de Whisper 12W unter Schwelle 8%  –
 ```
 

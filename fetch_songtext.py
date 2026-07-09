@@ -802,34 +802,31 @@ def _print_status(msg: str) -> None:
     print(f"\r{msg[:98]:<98}", end="", flush=True)
 
 
-def _iter_audio_bfs(root: Path) -> "Iterator[Path]":
-    """Liefert Audiodateien breadth-first, innerhalb jeder Ebene alphabetisch.
+def _iter_audio_dfs(root: Path) -> "Iterator[Path]":
+    """Liefert Audiodateien depth-first, innerhalb jeder Ebene alphabetisch.
 
-    Startet sofort ohne alle Dateien vorab zu sammeln — bei 20000+ Dateien
-    beginnt die Verarbeitung nach Sekunden statt Minuten.
-    Zeigt per _print_status() welches Verzeichnis gerade gescannt wird.
+    Geht sofort in die Tiefe: A/ → A/ABBA/ → A/ABBA/Gold/ → erste Files.
+    Zeigt per _print_status() welches Verzeichnis gerade betreten wird.
     """
-    from collections import deque
     from typing import Iterator
 
-    queue: deque[Path] = deque([root])
-    while queue:
-        current = queue.popleft()
-        subdirs: list[Path] = []
+    def _recurse(current: Path) -> "Iterator[Path]":
         try:
-            rel = current.relative_to(root)
-            _print_status(f"  Scanne: {rel}")
             entries = sorted(current.iterdir())
         except PermissionError:
-            continue
+            return
+        try:
+            _print_status(f"  Scanne: {current.relative_to(root)}")
         except ValueError:
-            entries = sorted(current.iterdir())
+            pass
+        for entry in entries:
+            if not entry.is_dir() and entry.suffix.lower() in _AUDIO_EXTENSIONS:
+                yield entry
         for entry in entries:
             if entry.is_dir():
-                subdirs.append(entry)
-            elif entry.suffix.lower() in _AUDIO_EXTENSIONS:
-                yield entry
-        queue.extend(subdirs)
+                yield from _recurse(entry)
+
+    yield from _recurse(root)
 
 
 def main() -> None:
@@ -861,7 +858,7 @@ def main() -> None:
         audio_files: "Iterable[Path]" = [root]
         mode = "Datei"
     elif args.recursive:
-        audio_files = _iter_audio_bfs(root)  # Generator: startet sofort
+        audio_files = _iter_audio_dfs(root)  # Generator: geht sofort in die Tiefe
         mode = "rekursiv"
     else:
         audio_files = sorted(

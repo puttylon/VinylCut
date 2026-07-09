@@ -180,7 +180,7 @@ Um lange Transkriptionen für rein instrumentale Tracks zu vermeiden, wird zuers
 3. Liegt `no_speech_prob` über 0,65: Probe feuert → noch zwei Fallback-Positionen (30 % und 50 % der Trackdauer) werden geprüft.
 4. Sind alle drei Proben über dem Schwellwert: kein Vokal erkannt → Whisper-Vollpass wird übersprungen.
 
-→ Bei „kein Vokal erkannt" wird trotzdem die beste verfügbare Provider-LRC gespeichert (sofern vorhanden), aber *ohne Whisper-Verifikation* — da Whisper kein gesprochenes Wort gehört hat, kann es den Inhalt nicht bestätigen.
+→ Bei „kein Vokal erkannt" werden die Provider-LRCs untereinander verglichen (Jaccard). Stimmen mindestens 2 Provider zu ≥ 40 % überein, wird die repräsentativste LRC gespeichert — als „Konsens (kein Vokal)". Sind die Provider sich uneinig, wird nichts gespeichert.
 
 **Schritt 5 — Sprache erkennen**
 

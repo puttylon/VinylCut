@@ -47,7 +47,7 @@ _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluz
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
-    "1.5.0"  # Einträge dieser oder neuerer Version = gültig, kein Neulauf
+    "1.4.0"  # Einträge dieser oder neuerer Version = gültig, kein Neulauf
 )
 
 # Genres die keinen Songtext haben — Substring-Matching (Kleinschreibung)

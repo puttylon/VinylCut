@@ -16,6 +16,14 @@ Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
 viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
 schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
 
+## ✓ v1.4.22 — Provider-Übernahme durch Jaccard-Konsens ersetzt
+
+Wenn die VAD-Probe keinen Gesang erkennt, wurde bisher bei ≥2 Providern + ≥10
+Zeilen blind gespeichert. Jetzt wird stattdessen derselbe Jaccard-Check wie beim
+normalen Konsens durchgeführt (min_providers=2 statt 3). Nur wenn die Provider
+inhaltlich übereinstimmen (≥40% Jaccard), wird gespeichert — als "Konsens (kein
+Vokal) XX%". lrc_analyse.py zeigt diese Tracks als eigene Methode.
+
 ## ✓ v1.4.21 — VAD-Probe: Fallback-Positionen bei 30% und 50%
 
 Energie-Peak ≠ Vokal-Peak: bei leisen Songs (R.E.M. "Drive") oder Songs mit

@@ -138,61 +138,101 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 ---
 
 ### `fetch_songtext.py`
-Sucht für jede Audiodatei synchronisierte Songtexte via `syncedlyrics`, verifiziert das Ergebnis mit Whisper und speichert es als `.lrc`-Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
+Sucht für jede Audiodatei synchronisierte Songtexte (`.lrc`) bei vier Anbietern, prüft das Ergebnis mit Whisper und speichert die beste passende Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
 
 ```bash
-python3 fetch_songtext.py "Artist - Album/"           # einzelnes Album
-python3 fetch_songtext.py --recursive "/Musik/"       # alle Unterordner rekursiv
-python3 fetch_songtext.py --force "Artist - Album/"   # Cache ignorieren, neu prüfen
+python3 fetch_songtext.py "Artist - Album/"                    # einzelnes Album
+python3 fetch_songtext.py "/Pfad/zur/Datei.flac"              # einzelne Datei
+python3 fetch_songtext.py --recursive "/Musik/"                # alle Unterordner
+python3 fetch_songtext.py --force "Artist - Album/"            # Cache ignorieren
 ```
 
 **Unterstützte Formate:** FLAC, MP3, OGG, Opus, M4A, AAC, WAV
 
-**Suchverfahren:**
+---
 
-Alle vier Provider werden gleichzeitig befragt (je max. 20 s Timeout): `lrclib`, `musixmatch`, `netease`, `genius`. Artist und Titel kommen aus den Audio-Tags (mutagen). Tracks ohne Artist- **und** Title-Tag werden übersprungen. Tracks mit Genre-Tags wie `Instrumental`, `Hörbuch`, `Podcast` o.ä. werden ebenfalls übersprungen (keine LRC erwartet).
+#### Wie der Algorithmus funktioniert
 
-**Whisper-Verifikation** (wenn `faster-whisper` installiert):
+Für jeden Track läuft folgendes Verfahren — in dieser Reihenfolge:
 
-Whisper transkribiert einen Teil des Tracks ab dem ersten Lyric-Timestamp und vergleicht den Text mit jedem Provider-Kandidaten via Jaccard (Wort-Overlap). Transkriptionsdauer adaptiv:
+**Schritt 1 — Vorab-Filter**
 
-| Songlänge | Anteil |
-|-----------|--------|
-| ≤ 3 min | 100 % |
-| ≤ 6 min | 75 % |
-| > 6 min | 50 %, max. 5 min |
+- Tracks ohne Artist- *und* Title-Tag werden übersprungen (kein sinnvoller Suchbegriff).
+- Tracks mit Genre-Tags wie `Instrumental`, `Hörbuch`, `Podcast` o.ä. werden übersprungen.
+- Bereits im Cache gespeicherte Ergebnisse werden nicht erneut verarbeitet (außer mit `--force`).
 
-Zweistufig: zuerst `base` (schnell), dann `small` (genauer) wenn der Score im Grenzbereich 20–40 % liegt.
+**Schritt 2 — Provider-Abfragen**
 
-Akzeptanzregeln:
+Die vier Anbieter `lrclib`, `musixmatch`, `netease` und `genius` werden gleichzeitig befragt (je max. 20 s Timeout). Artist und Titel kommen aus den Audio-Tags. Identische LRCs von verschiedenen Anbietern (gespiegelte Datenbanken) werden per Inhalt-Hash dedupliziert.
 
-| Bedingung | Ergebnis |
-|-----------|----------|
-| Bester Whisper-Score ≥ 40 % | LRC gespeichert |
-| Score 20–40 % **und** ≥ 3 Provider mit ≥ 40 % Übereinstimmung untereinander | LRC gespeichert (Provider-Konsens) |
-| Whisper erkennt keine Sprache **und** ≥ 2 Provider **und** ≥ 10 Zeilen | LRC gespeichert (Fallback: ungewöhnlicher Vokalstil, Instrumental-Outro) |
-| Kein Kriterium erfüllt | keine LRC gespeichert |
+**Schritt 3 — Provider-Konsens (Schnellweg)**
 
-Beim Provider-Konsens wird der repräsentativste Kandidat gewählt (höchste Durchschnitts-Ähnlichkeit zu den anderen) — Ausreißer-Provider werden automatisch übergangen.
+Wenn mindestens 3 Anbieter eine LRC geliefert haben und deren Texte untereinander zu mindestens 40 % übereinstimmen (Jaccard-Ähnlichkeit), gilt das als Konsens. Der repräsentativste Kandidat — also der mit der höchsten Durchschnitts-Ähnlichkeit zu allen anderen — wird ohne Whisper-Prüfung gespeichert. Ausreißer-Anbieter (falscher Song, andere Sprache) werden dadurch automatisch übergangen.
 
-Die Ausgabe zeigt pro Track: Provider-Anzahl, transkribierte Wörter und Whisper-Score. `!` = unter Schwelle, `+` = small-Modell verwendet, `, Konsens` = via Provider-Konsens akzeptiert.
+→ Ergebnis: LRC gespeichert, kein Whisper nötig.
 
-**Fallback ohne Whisper** (wenn `faster-whisper` nicht installiert):
-Scoring nach `(gültig, synchronisiert, Zeilenanzahl)` — LRC mit dem höchsten Score gewinnt. `gültig = 0` wenn der letzte Timestamp die Trackdauer um mehr als die Toleranzwerte über- oder unterschreitet:
+**Schritt 4 — Vokal-Prüfung (VAD-Probe)**
 
-| Richtung | Wert | Begründung |
-|----------|------|------------|
-| LRC endet zu spät | 10 % | Falscher (längerer) Song |
-| LRC endet zu früh | 40 % | Legitim: Instrumental-Outro ohne Text |
+Um lange Transkriptionen für rein instrumentale Tracks zu vermeiden, wird zuerst eine kurze Probe von 15 Sekunden analysiert:
 
-**Cache** (`.fetch_songtext.json` pro Ordner): Bereits geprüfte Tracks werden übersprungen. Der Cache speichert Ergebnis, Whisper-Score, Modell und Zeitstempel. Mit `--force` wird der Cache ignoriert.
+1. ffmpeg misst die Lautstärke an fünf Stellen des Tracks (10 %, 30 %, 50 %, 70 %, 90 %). Die lauteste Stelle wird als Startpunkt gewählt.
+2. Whisper transkribiert dort 15 Sekunden und liefert eine `no_speech_prob` (Wahrscheinlichkeit, dass kein Gesang vorhanden ist).
+3. Liegt `no_speech_prob` über 0,65: Probe feuert → noch zwei Fallback-Positionen (30 % und 50 % der Trackdauer) werden geprüft.
+4. Sind alle drei Proben über dem Schwellwert: kein Vokal erkannt → Whisper-Vollpass wird übersprungen.
 
-**`lrc_recheck.py`** — findet im Cache gespeicherte „nicht gefunden"-Einträge, die vom Provider-Konsens profitieren könnten (≥ 3 Provider, Score ≥ 20 %), und löscht sie gezielt für einen Neuprüflauf:
+→ Bei „kein Vokal erkannt" wird trotzdem die beste verfügbare Provider-LRC gespeichert (sofern vorhanden), aber *ohne Whisper-Verifikation* — da Whisper kein gesprochenes Wort gehört hat, kann es den Inhalt nicht bestätigen.
+
+**Schritt 5 — Sprache erkennen**
+
+Aus dem Text der Provider-LRCs wird die Sprache erkannt (z. B. `de`, `en`, `fr`) und als Hinweis an Whisper übergeben. Das verhindert, dass Whisper deutsche oder fremdsprachige Tracks auf Englisch transkribiert und dadurch kein Wort mit der LRC übereinstimmt.
+
+**Schritt 6 — Whisper-Vollpass**
+
+Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `base`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **Containment**: Anteil der Whisper-Wörter, die in der LRC vorkommen (`|Whisper ∩ LRC| ÷ |Whisper|`). Diese Metrik ist asymmetrisch — sie bestraft nicht, wenn die LRC mehr Text enthält als Whisper gehört hat (z. B. Verse, die außerhalb des Fensters liegen).
+
+Vor dem Vergleich: Wiederholungsschleifen (Whisper-Halluzinationen wie „lets go lets go lets go") werden erkannt und verworfen — die Einzigartigkeit der Wörter muss hoch genug sein *und* kein einzelnes Wort darf dominieren.
+
+| Ergebnis des base-Passes | Weiteres Vorgehen |
+|--------------------------|-------------------|
+| Bester Score ≥ 40 % | LRC gespeichert |
+| Score 20–40 % | Zweiter Pass mit `small`-Modell (genauer, langsamer) |
+| Score < 20 % | Kein zweiter Pass — kein Treffer |
+
+Liegt auch der `small`-Score unter 40 %, wird keine LRC gespeichert.
+
+---
+
+#### Ausgabe-Zeichen
+
+| Symbol | Bedeutung |
+|--------|-----------|
+| `✓` | LRC gespeichert (neu oder ersetzt) |
+| `=` | LRC bereits vorhanden und korrekt — unverändert behalten |
+| `✗` | Kein Ergebnis — keine LRC gespeichert |
+| `!` | Score unter 40 %-Schwelle |
+| `+` | `small`-Modell hat den Ausschlag gegeben |
+
+---
+
+#### Cache und Hilfs-Skripte
+
+**Cache** (`.fetch_songtext.json` pro Ordner): Ergebnis, Whisper-Score, verwendetes Modell und Zeitstempel werden pro Track gespeichert. Beim nächsten Lauf wird der Track übersprungen. `--force` ignoriert den Cache komplett.
+
+**`lrc_recheck.py`** — sucht gecachte „nicht gefunden"-Einträge und löscht sie gezielt, damit sie beim nächsten Lauf neu geprüft werden:
 
 ```bash
-python3 lrc_recheck.py /Musik/          # Vorschau
-python3 lrc_recheck.py /Musik/ --apply  # Cache-Einträge löschen
+python3 lrc_recheck.py /Musik/                            # Vorschau (≥ 3 Provider)
+python3 lrc_recheck.py /Musik/ --apply                    # Cache-Einträge löschen
+python3 lrc_recheck.py /Musik/ --min-providers 1 --min-score 0.0 --apply   # alle neu prüfen
 ```
+
+**`lrc_analyse.py`** — zeigt Statistiken über eine gesamte Musikbibliothek:
+
+```bash
+python3 lrc_analyse.py /Musik/
+```
+
+Ausgabe: Trefferquote, verwendete Methoden, Ablehnungsgründe, Score-Verteilung, Risiko-Tracks (niedriger Score oder nur ein Anbieter) und Tracks, die ohne Whisper-Verifikation gespeichert wurden.
 
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 

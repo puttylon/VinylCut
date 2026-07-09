@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.21"
+__version__ = "1.4.22"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -370,13 +370,15 @@ def _transcribe(
         tmp_wav.unlink(missing_ok=True)
 
 
-def _provider_consensus(candidates: list[Path]) -> tuple[Path | None, float]:
-    """Prüft ob ≥ _CONSENSUS_MIN_PROVIDERS Provider inhaltlich übereinstimmen.
+def _provider_consensus(
+    candidates: list[Path], min_providers: int = _CONSENSUS_MIN_PROVIDERS
+) -> tuple[Path | None, float]:
+    """Prüft ob ≥ min_providers Provider inhaltlich übereinstimmen.
 
     Gibt (repräsentativsten Kandidaten, avg_inter_jaccard) zurück,
     oder (None, 0.0) wenn kein Konsens erreicht wird.
     """
-    if len(candidates) < _CONSENSUS_MIN_PROVIDERS:
+    if len(candidates) < min_providers:
         return None, 0.0
     path_words: list[tuple[Path, set]] = []
     for p in candidates:
@@ -386,7 +388,7 @@ def _provider_consensus(candidates: list[Path]) -> tuple[Path | None, float]:
                 path_words.append((p, ws))
         except Exception:
             pass
-    if len(path_words) < _CONSENSUS_MIN_PROVIDERS:
+    if len(path_words) < min_providers:
         return None, 0.0
     n = len(path_words)
     pair_scores = [
@@ -636,21 +638,12 @@ def fetch_lrc(
                 else None
             )
         else:
-            # Keine Sprache erkannt: Fallback ≥ 2 Provider + ≥ 10 Zeilen.
-            best_candidate = max(
-                all_candidates, key=lambda p: _score_lrc(p, expected_dur)
-            )
-            n_lines = sum(
-                1
-                for ln in best_candidate.read_text(
-                    encoding="utf-8", errors="ignore"
-                ).splitlines()
-                if re.sub(r"\[\d+:\d+\.\d+\]", "", ln).strip()
-                and not re.match(r"\[[a-z]+:", ln.lower())
-            )
-            if len(candidates) >= 2 and n_lines >= 10:
-                whisper_info += f", Fallback ({n_lines}Z)"
-                best_content = best_candidate.read_bytes()
+            # kein Vokal erkannt: Prüfe ob ≥ 2 Provider inhaltlich übereinstimmen.
+            # Wenn ja → schwächerer Konsens, Provider-Übereinstimmung schlägt VAD.
+            novocal_rep, novocal_jaccard = _provider_consensus(candidates, min_providers=2)
+            if novocal_rep is not None:
+                whisper_info = f"Konsens (kein Vokal) {novocal_jaccard:.0%}"
+                best_content = novocal_rep.read_bytes()
                 fallback_used = True
             else:
                 best_content = None
@@ -662,7 +655,8 @@ def fetch_lrc(
             "model": model_used,
         }
         if fallback_used:
-            extras["fallback"] = True
+            extras["consensus"] = True
+            extras["no_vocal"] = True
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()

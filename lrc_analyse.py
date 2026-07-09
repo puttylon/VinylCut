@@ -8,10 +8,12 @@ from pathlib import Path
 
 def _method(entry: dict) -> str:
     """Bestimmt die Methode die zu diesem Ergebnis geführt hat."""
+    if entry.get("consensus") and entry.get("no_vocal"):
+        return "konsens-kein-vokal"
     if entry.get("consensus"):
         return "konsens"
     if entry.get("fallback"):
-        return "fallback"
+        return "fallback"  # alte Cache-Einträge vor v1.4.22
     model = entry.get("model")
     if model == "small":
         return "whisper-small"
@@ -78,13 +80,14 @@ def analyse(root: Path) -> None:
     for e in ok_entries:
         m = _method(e)
         method_counts[m] = method_counts.get(m, 0) + 1
-    order = ["konsens", "whisper-base", "whisper-small", "fallback", "heuristik"]
+    order = ["konsens", "konsens-kein-vokal", "whisper-base", "whisper-small", "fallback", "heuristik"]
     labels = {
-        "konsens":       "Provider-Konsens      ",
-        "whisper-base":  "Whisper base ≥40%     ",
-        "whisper-small": "Whisper small ≥40%    ",
-        "fallback":      "Fallback (kein Vokal) ",
-        "heuristik":     "Heuristik (kein Whipr)",
+        "konsens":            "Provider-Konsens         ",
+        "konsens-kein-vokal": "Konsens (kein Vokal)     ",
+        "whisper-base":       "Whisper base ≥40%        ",
+        "whisper-small":      "Whisper small ≥40%       ",
+        "fallback":           "Fallback alt (kein Vokal)",
+        "heuristik":          "Heuristik (kein Whisper) ",
     }
     for key in order:
         n = method_counts.get(key, 0)
@@ -151,10 +154,13 @@ def analyse(root: Path) -> None:
     else:
         print("\nKeine Risiko-Tracks gefunden (ok, Score 40–50%, 1 Provider).")
 
-    # ── Fallback-ok: Whisper nie ausgeführt, nur Provider-LRC ────────────────
-    fallback_ok = [e for e in ok_entries if e.get("fallback")]
-    if fallback_ok:
-        print(f"\nFALLBACK-OK (kein Whisper-Vergleich, nur Provider) — {len(fallback_ok)} Stück")
+    # ── Konsens (kein Vokal): Provider einig, Whisper hat nichts gehört ─────
+    novocal_ok = [e for e in ok_entries if e.get("no_vocal")]
+    # alte Cache-Einträge (vor v1.4.22) verwenden noch fallback=True
+    novocal_ok_legacy = [e for e in ok_entries if e.get("fallback") and not e.get("no_vocal")]
+    all_novocal = novocal_ok + novocal_ok_legacy
+    if all_novocal:
+        print(f"\nKONSENS KEIN VOKAL (Provider einig, kein Whisper-Vergleich) — {len(all_novocal)} Stück")
         for cf in cache_files:
             try:
                 data = json.loads(cf.read_text(encoding="utf-8"))
@@ -163,11 +169,12 @@ def analyse(root: Path) -> None:
             for fname, entry in data.items():
                 if not isinstance(entry, dict):
                     continue
-                if entry.get("r") == "ok" and entry.get("fallback"):
+                if entry.get("r") == "ok" and (entry.get("no_vocal") or entry.get("fallback")):
                     prov = entry.get("providers", "?")
-                    print(f"  {prov}P  {cf.parent.name} / {fname}")
+                    score = entry.get("score", 0.0) or 0.0
+                    print(f"  {prov}P  {score:.0%}  {cf.parent.name} / {fname}")
     else:
-        print("\nKeine Fallback-ok-Tracks (alle ok-Tracks Whisper-verifiziert).")
+        print("\nKeine Konsens-kein-Vokal-Tracks (alle ok-Tracks Whisper-verifiziert).")
 
     # ── nf-Tracks unter Schwelle mit mehreren Providern ──────────────────────
     near_miss = [

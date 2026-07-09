@@ -1,20 +1,25 @@
 # VinylCut Roadmap
 
-## ○ v1.4.15 — Zeitliches Alignment (DTW)
-Prüft ob Whisper-Wörter in der LRC in zeitlicher Reihenfolge erscheinen
-(monotones Alignment zwischen Whisper- und LRC-Timestamps). Verifiziert die
-Synchronisation, nicht nur den Inhalt — fängt Offset-LRCs und zeitlich
-driftende Versionen (Radio-Edit vs. Album).
+## ✓ v1.5.2 — Robustere Konsens- und VAD-Logik
 
-## ○ v1.4.14 — VAD-Peak als Fenster-Start
-Whisper-Ausschnitt unabhängig von der LRC wählen (Energie-/VAD-Peak statt
-erstem LRC-Timestamp). Verhindert zirkuläre Verzerrung beim Falsch-Song-Test.
-Braucht VAD-Library oder Energie-Analyse via ffmpeg.
+**C1** `_extract_lrc_words` entfernt jetzt alle `[...]`-Tokens ohne Doppelpunkt (Sektion-Labels
+wie `[Chorus]`, `[Verse 1]`, `[Guitar Solo]` von Genius). Verhindert strukturelle Ausreißer
+durch annotierte LRCs.
 
-## ○ v1.4.13-tfidf — TF-IDF / Seltenwort-Gewichtung (zurückgestellt)
-Jaccard gewichtet alle Wörter gleich (Füllwörter wie "the", "and" zählen so
-viel wie seltene Phrasen). TF-IDF oder reiner Seltenwort-Overlap trennt Songs
-schärfer — ein ungewöhnlicher Reim ist beweiskräftiger als zehn Füllwörter.
+**C3** `_provider_consensus` wirft bei initialem Scheitern den stärksten Ausreißer heraus
+(niedrigste Durchschnitts-Ähnlichkeit zu anderen) und wiederholt den Check auf den
+verbleibenden Kandidaten. Für n=3 äquivalent zu Best-Pair, für n=4 strenger.
+
+**V1** VAD-Gate konsistent mit `has_vocals`: kein early-skip wenn die Probe bereits ≥5 Wörter
+liefert, auch wenn `no_speech_prob` hoch ist. Schließt die Lücke zwischen Gate-Bedingung
+und der Logik die das Gate kurzschließt.
+
+**V2** VAD-Probe übergibt jetzt `language=lrc_lang` an Whisper (war vorher vergessen).
+Reduziert falsch-hohe `no_speech_prob` durch Sprach-Fehldetection auf kurzem Fenster.
+
+**V3** Kein early return nach VAD-Probe — Base-Pass läuft immer. VAD-Ergebnis (`likely_no_vocals`)
+gatet nur noch den teuren Small-Pass. Echte Instrumentals zahlen einen Base-Pass extra;
+fälschlich abgewürgte Vokalsongs (wie "Fortune Faded") werden gerettet.
 
 ## ✓ v1.5.1 — Genre-Skip: Terminal-Ausgabe, Cache-Eintrag, lrc_analyse
 
@@ -120,10 +125,6 @@ Aktuell läuft Whisper immer. Bei hohem inter-Provider-Konsens (≥ 40%) ist
 Whisper überflüssig. Konsens-Check vor Whisper → spart base-Pass auf dem
 Großteil der Bibliothek. Whisper nur wenn Konsens nicht eindeutig.
 
-## ○ v1.4.9 — Ablehnungsgrund im Cache
-Ablehnungsgrund und Provider-Version persistieren. Gezielte Re-Runs möglich
-wenn sich Provider oder Algorithmus verbessern.
-
 ## ✓ v1.4.8 — LRC-Deduplizierung vor Konsens-Check
 Identische LRCs von verschiedenen Providern (gespiegelte Datenbanken) per
 Content-Hash deduplizieren. "3 Provider einig" darf nicht bedeuten "eine
@@ -183,9 +184,6 @@ Läuft vollautomatisch mit pytest, kein Terminal nötig.
 pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 
 ---
-
-## Zurückgestellt
-- **Android/Termux-Port** — auf unbestimmte Zeit verschoben.
 
 ---
 

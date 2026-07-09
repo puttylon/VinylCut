@@ -246,7 +246,7 @@ Beispiele:
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | `"1.5.0"` | Version des schreibenden Skripts |
+| `v` | `"1.5.2"` | Version des schreibenden Skripts |
 | `r` | `"ok"` / `"nf"` / `"skip"` | Ergebnis: LRC vorhanden / nicht gefunden / übersprungen |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
@@ -263,13 +263,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.5.0", "r": "ok", "outcome": "write",
+  "v": "1.5.2", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
   "method": "whisper-base", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.5.0", "r": "skip", "outcome": "delete",
+  "v": "1.5.2", "r": "skip", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "genre", "words": null, "language": null, "ts": "2026-07-09T09:28:25"

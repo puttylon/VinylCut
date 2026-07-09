@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -239,7 +239,8 @@ def _extract_lrc_words(content: str) -> list[str]:
     for line in content.splitlines():
         if re.match(r"\[[a-z]+:", line.lower()):
             continue  # Metadaten-Tags überspringen
-        text = re.sub(r"\[\d+:\d+\.\d+\]", "", line).strip()
+        text = re.sub(r"\[\d+:\d+\.\d+\]", "", line)  # LRC-Timestamps entfernen
+        text = re.sub(r"\[[^\]]*\]", "", text).strip()  # C1: Sektion-Labels wie [Chorus], [Verse 1]
         if text:
             words.extend(re.findall(r"[^\W\d_]+", text.lower()))
     return words
@@ -377,6 +378,8 @@ def _provider_consensus(
 
     Gibt (repräsentativsten Kandidaten, avg_inter_jaccard) zurück,
     oder (None, 0.0) wenn kein Konsens erreicht wird.
+    C3: Bei initialem Scheitern wird der stärkste Ausreißer herausgeworfen
+    und der Check auf den verbleibenden Kandidaten wiederholt.
     """
     if len(candidates) < min_providers:
         return None, 0.0
@@ -390,29 +393,51 @@ def _provider_consensus(
             pass
     if len(path_words) < min_providers:
         return None, 0.0
-    n = len(path_words)
-    pair_scores = [
-        len(path_words[i][1] & path_words[j][1])
-        / len(path_words[i][1] | path_words[j][1])
-        if len(path_words[i][1] | path_words[j][1]) > 0
-        else 0.0
-        for i in range(n)
-        for j in range(i + 1, n)
-    ]
-    avg = sum(pair_scores) / len(pair_scores)
-    if avg < _CONSENSUS_MIN_JACCARD:
-        return None, avg
-    best_rep: Path | None = None
-    best_avg = -1.0
-    for i, (p, ws_i) in enumerate(path_words):
-        others = [path_words[j][1] for j in range(n) if j != i]
-        a = sum(
-            len(ws_i & o) / len(ws_i | o) if len(ws_i | o) > 0 else 0.0 for o in others
-        ) / len(others)
-        if a > best_avg:
-            best_avg = a
-            best_rep = p
-    return best_rep, avg
+
+    def _eval(pw: list[tuple[Path, set]]) -> tuple[Path | None, float]:
+        n = len(pw)
+        pair_scores = [
+            len(pw[i][1] & pw[j][1]) / len(pw[i][1] | pw[j][1])
+            if pw[i][1] | pw[j][1] else 0.0
+            for i in range(n) for j in range(i + 1, n)
+        ]
+        avg = sum(pair_scores) / len(pair_scores)
+        if avg < _CONSENSUS_MIN_JACCARD:
+            return None, avg
+        best_rep: Path | None = None
+        best_avg = -1.0
+        for i, (p, ws_i) in enumerate(pw):
+            others = [pw[j][1] for j in range(n) if j != i]
+            a = sum(
+                len(ws_i & o) / len(ws_i | o) if ws_i | o else 0.0 for o in others
+            ) / len(others)
+            if a > best_avg:
+                best_avg = a
+                best_rep = p
+        return best_rep, avg
+
+    rep, avg = _eval(path_words)
+    if rep is not None:
+        return rep, avg
+
+    # C3: Ausreißer herauswerfen und erneut prüfen (braucht ≥ 3 Kandidaten)
+    if len(path_words) >= 3:
+        n = len(path_words)
+        avg_to_others = [
+            sum(
+                len(path_words[i][1] & path_words[j][1]) / len(path_words[i][1] | path_words[j][1])
+                if path_words[i][1] | path_words[j][1] else 0.0
+                for j in range(n) if j != i
+            ) / (n - 1)
+            for i in range(n)
+        ]
+        worst = avg_to_others.index(min(avg_to_others))
+        filtered = [pw for k, pw in enumerate(path_words) if k != worst]
+        rep2, avg2 = _eval(filtered)
+        if rep2 is not None:
+            return rep2, avg2
+
+    return None, avg
 
 
 def _whisper_best(
@@ -478,26 +503,30 @@ def _whisper_best(
 
     # VAD-Probe: 15s an der lautesten Stelle. Schlägt sie an, zwei Fallback-
     # Positionen testen (30%/50% der Dauer) — Energie-Peak ≠ Vokal-Peak.
+    # V3: kein early return — Base-Pass läuft immer. VAD-Ergebnis gatet nur small.
+    likely_no_vocals = False
     if ctx > _WHISPER_VAD_PROBE_SEC * 2:
         probe_start = _vad_peak_start(flac_path, expected_dur)
-        _, probe_no_speech, _ = _transcribe(
-            flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST
+        probe_words, probe_no_speech, _ = _transcribe(  # V2: language übergeben
+            flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST, language=lrc_lang
         )
-        if probe_no_speech > _VOCALS_NO_SPEECH_THOLD and expected_dur > 60:
+        # V1: Gate konsistent mit has_vocals — kein Alarm wenn Probe schon Wörter liefert
+        if probe_no_speech > _VOCALS_NO_SPEECH_THOLD and len(probe_words) < _VOCALS_MIN_WORDS and expected_dur > 60:
             for frac in (0.30, 0.50):
-                _, ns, _ = _transcribe(
+                fb_words, ns, _ = _transcribe(
                     flac_path,
                     expected_dur * frac,
                     _WHISPER_VAD_PROBE_SEC,
                     _WHISPER_MODEL_FAST,
+                    language=lrc_lang,  # V2
                 )
-                if ns <= _VOCALS_NO_SPEECH_THOLD:
+                if ns <= _VOCALS_NO_SPEECH_THOLD or len(fb_words) >= _VOCALS_MIN_WORDS:  # V1
                     probe_no_speech = ns
+                    probe_words = fb_words
                     break
-        if probe_no_speech > _VOCALS_NO_SPEECH_THOLD:
-            return (None, 0.0, False, 0, _WHISPER_MODEL_FAST, lrc_lang)
+        likely_no_vocals = probe_no_speech > _VOCALS_NO_SPEECH_THOLD and len(probe_words) < _VOCALS_MIN_WORDS
 
-    # Pass 1: base
+    # Pass 1: base (läuft immer — V3)
     fast_cache = _build_cache(_WHISPER_MODEL_FAST)
     # has_vocals: primär no_speech_prob, sekundär Wortzahl
     vals = list(fast_cache.values())
@@ -509,8 +538,8 @@ def _whisper_best(
     best_path, best_score, total_words = _score_from_cache(fast_cache)
     model_used = _WHISPER_MODEL_FAST
 
-    # Pass 2: small — nur wenn Vokale erkannt und Score im Grenzbereich
-    if has_vocals and _WHISPER_RETRY_MIN <= best_score < _WHISPER_MIN_OVERLAP:
+    # Pass 2: small — nur wenn Vokale erkannt, Score im Grenzbereich und VAD nicht klar instrumental
+    if has_vocals and _WHISPER_RETRY_MIN <= best_score < _WHISPER_MIN_OVERLAP and not likely_no_vocals:
         full_cache = _build_cache(_WHISPER_MODEL_FULL)
         full_path, full_score, full_words = _score_from_cache(full_cache)
         if full_score > best_score:

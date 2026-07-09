@@ -123,6 +123,23 @@ class TestExtractLrcWords:
         assert "10" not in words
         assert "of" in words
 
+    def test_sektion_labels_entfernt(self):
+        # C1: Genius-Sektion-Labels dürfen nicht als Wörter landen
+        lrc = (
+            "[Chorus]\n"
+            "[00:10.00]Girl you know it's true\n"
+            "[Verse 1]\n"
+            "[00:15.00]I love you\n"
+            "[Guitar Solo]\n"
+        )
+        words = _extract_lrc_words(lrc)
+        assert "chorus" not in words
+        assert "verse" not in words
+        assert "guitar" not in words
+        assert "solo" not in words
+        assert "girl" in words
+        assert "love" in words
+
 
 class TestTimestamps:
     LRC = "[00:05.00]intro\n[01:30.50]verse\n[03:20.00]outro\n"
@@ -173,15 +190,15 @@ class TestProviderConsensus:
         assert score >= _CONSENSUS_MIN_JACCARD
         for p in paths: p.unlink(missing_ok=True)
 
-    def test_kein_konsens_bei_ausreisser(self):
-        # 2 passende + 1 komplett falscher LRC → avg Jaccard sinkt unter Schwelle
+    def test_ausreisser_c3_gerettet(self):
+        # C3: 2 ähnliche + 1 komplett falscher LRC → avg unter Schwelle,
+        # aber C3 wirft den Ausreißer heraus und findet Konsens unter den 2 guten.
         paths = self._paths(self.LRC_A, self.LRC_B, self.LRC_WRONG)
         rep, score = _provider_consensus(paths)
-        # Ergebnis hängt von avg ab — entweder kein Konsens oder Ausreißer übergangen
-        # Hauptsache: wenn Konsens erreicht, ist rep nicht der Ausreißer
-        if rep is not None:
-            content = rep.read_text(encoding="utf-8")
-            assert "Opa" not in content
+        assert rep is not None, "C3 sollte Konsens aus LRC_A+LRC_B retten"
+        assert score >= _CONSENSUS_MIN_JACCARD
+        content = rep.read_text(encoding="utf-8")
+        assert "Opa" not in content
         for p in paths: p.unlink(missing_ok=True)
 
     def test_leere_lrc_zählt_nicht(self):

@@ -22,6 +22,8 @@ Verwendung:
 
 import argparse
 import json
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -55,10 +57,31 @@ def _reject_reason(entry: dict) -> str:
     return "unter-schwelle"
 
 
+def _find_cache_files(root: Path) -> list[Path]:
+    """Findet alle Cache-Dateien via `find` (subprocess) statt Path.rglob().
+
+    Über SMB-Freigaben ist `find` (ein readdir-Aufruf pro Verzeichnis) deutlich
+    schneller als Path.rglob() (ein stat-Aufruf pro Eintrag zusätzlich) — bei
+    einer Bibliothek mit hunderten Alben macht das den Unterschied zwischen
+    Sekunden und mehreren Minuten.
+    """
+    try:
+        result = subprocess.run(
+            ["find", str(root), "-name", CACHE_FILENAME],
+            capture_output=True,
+            text=True,
+            timeout=600,  # Netzwerk-Freigaben (SMB) können mehrere Minuten brauchen
+        )
+        return sorted(Path(p) for p in result.stdout.splitlines() if p)
+    except Exception as e:
+        print(f"`find` fehlgeschlagen ({e}) — Fallback auf Path.rglob() (kann sehr lange dauern).")
+        return sorted(root.rglob(CACHE_FILENAME))
+
+
 def _find_candidates(root: Path, min_providers: int) -> list[tuple[Path, str, dict]]:
     """Cache nach kein-vokal-Ablehnungen mit genug Provider-Treffern durchsuchen."""
     candidates: list[tuple[Path, str, dict]] = []
-    for cache_file in sorted(root.rglob(CACHE_FILENAME)):
+    for cache_file in _find_cache_files(root):
         try:
             data = json.loads(cache_file.read_text(encoding="utf-8"))
         except Exception:
@@ -133,8 +156,15 @@ def main() -> None:
         metavar="N",
         help="Mindest-Provider für den erneuten Jaccard-Konsens-Check (Standard: 2)",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help="Nur die ersten N Kandidaten verarbeiten (zum Testen an einer kleinen Teilmenge)",
+    )
     args = parser.parse_args()
 
+    sys.stdout.reconfigure(line_buffering=True)  # Fortschritt sofort sichtbar, auch bei Umleitung
     root = Path(args.path).expanduser().resolve()
     env = _load_env()
 
@@ -142,6 +172,8 @@ def main() -> None:
     if not candidates:
         print("Keine kein-vokal-Kandidaten im Cache gefunden.")
         return
+    if args.limit:
+        candidates = candidates[: args.limit]
 
     print(f"{_ts()}  {len(candidates)} Kandidaten im Cache — frage Provider erneut ab...\n")
 

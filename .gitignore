@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 genius_token
 backup_*/
+whisper_stichprobe.json

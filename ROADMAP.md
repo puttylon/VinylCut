@@ -245,11 +245,13 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 ## Ideen (nicht geplant)
 
 ### Whisper-Modell-Stichprobe — erledigt, siehe v1.7.0
-Umgesetzt: `whisper_sample.py` (Cache nach `kein-vokal`-Ablehnungen mit
-Provider-Konsens-Bestätigung durchsuchen) und `whisper_model_test.py`
+Umgesetzt (temporär): `whisper_sample.py` (Cache nach `kein-vokal`-Ablehnungen
+mit Provider-Konsens-Bestätigung durchsuchen) und `whisper_model_test.py`
 (mehrere Modelle gegen eine Kandidatenliste testen, resumable). Ergebnis:
-`base`→`small`-Wechsel in v1.7.0. Skripte bleiben nützlich falls später
-`medium`/`large-v3` erneut gegen `small` getestet werden soll.
+`base`→`small`-Wechsel in v1.7.0. Beide Einweg-Skripte nach Abschluss der
+Untersuchung wieder entfernt — basierten auf dem alten (base-Ära) Cache-Stand,
+der durch den v1.7.0-Neu-Scan ohnehin ersetzt wird. Bei Bedarf (z.B. späterer
+Test von `medium`/`large-v3`) müssten sie neu gebaut werden.
 
 ### Whisper-Verifikation
 Die ersten ~30 Sekunden eines Tracks via `faster-whisper` transkribieren und

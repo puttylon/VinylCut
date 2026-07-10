@@ -171,22 +171,39 @@ def analyse(root: Path) -> None:
         print("\nKeine Risiko-Tracks gefunden (ok, Score 40–50%, 1 Provider).")
 
     # ── Konsens (kein Vokal): Provider einig, Whisper hat nichts gehört ─────
-    novocal_ok = [e for e in ok_entries if _method(e) == "konsens-kein-vokal"]
-    if novocal_ok:
-        print(f"\nKONSENS KEIN VOKAL (Provider einig, kein Whisper-Vergleich) — {len(novocal_ok)} Stück")
-        for cf in cache_files:
-            try:
-                data = json.loads(cf.read_text(encoding="utf-8"))
-            except Exception:
+    # 2 Provider ist die schwächstmögliche Stufe (Minimum für diesen Fallback) —
+    # separat ausweisen, damit die riskantesten Fälle zuerst auffallen.
+    novocal_entries: list[tuple] = []
+    for cf in cache_files:
+        try:
+            data = json.loads(cf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for fname, entry in data.items():
+            if not isinstance(entry, dict):
                 continue
-            for fname, entry in data.items():
-                if not isinstance(entry, dict):
-                    continue
-                if entry.get("r") == "ok" and _method(entry) == "konsens-kein-vokal":
-                    prov = entry.get("providers", "?")
-                    score = entry.get("score", 0.0) or 0.0
-                    names = ", ".join(entry.get("provider_names") or [])
-                    print(f"  {prov}P {score:.0%}  {names}  {cf.parent.name} / {fname}")
+            if entry.get("r") == "ok" and _method(entry) == "konsens-kein-vokal":
+                novocal_entries.append((cf, fname, entry))
+
+    if novocal_entries:
+        novocal_entries.sort(key=lambda t: t[2].get("providers", 0))
+        print(f"\nKONSENS KEIN VOKAL (Provider einig, Whisper hat nichts gehört) — {len(novocal_entries)} Stück")
+
+        def _print_novocal(rows: list[tuple]) -> None:
+            for cf, fname, entry in rows:
+                prov = entry.get("providers", "?")
+                score = entry.get("score", 0.0) or 0.0
+                names = ", ".join(entry.get("provider_names") or [])
+                print(f"    {prov}P {score:.0%}  {names}  {cf.parent.name} / {fname}")
+
+        risky = [t for t in novocal_entries if t[2].get("providers", 0) <= 2]
+        solid = [t for t in novocal_entries if t[2].get("providers", 0) > 2]
+        if risky:
+            print(f"  ⚠ 2 Provider — schwächste Stufe, Review empfohlen ({len(risky)}):")
+            _print_novocal(risky)
+        if solid:
+            print(f"  ≥3 Provider — solider ({len(solid)}):")
+            _print_novocal(solid)
     else:
         print("\nKeine Konsens-kein-Vokal-Tracks (alle ok-Tracks Whisper-verifiziert).")
 

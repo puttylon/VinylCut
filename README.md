@@ -182,45 +182,31 @@ Wenn mindestens 3 Anbieter eine LRC geliefert haben und deren Texte untereinande
 
 → Ergebnis: LRC gespeichert, kein Whisper nötig.
 
-**Schritt 4 — Vokal-Prüfung (VAD-Probe)**
-
-Um lange Transkriptionen für rein instrumentale Tracks zu vermeiden, wird zuerst eine kurze Probe von 15 Sekunden analysiert:
-
-1. ffmpeg misst die Lautstärke an fünf Stellen des Tracks (10 %, 30 %, 50 %, 70 %, 90 %). Die lauteste Stelle wird als Startpunkt gewählt.
-2. Whisper transkribiert dort 15 Sekunden und liefert eine `no_speech_prob` (Wahrscheinlichkeit, dass kein Gesang vorhanden ist).
-3. Liegt `no_speech_prob` über 0,65: Probe feuert → noch zwei Fallback-Positionen (30 % und 50 % der Trackdauer) werden geprüft.
-4. Sind alle drei Proben über dem Schwellwert: kein Vokal erkannt → Whisper-Vollpass wird übersprungen.
-
-→ Bei „kein Vokal erkannt" werden die Provider-LRCs untereinander verglichen (Jaccard). Stimmen mindestens 2 Provider zu ≥ 40 % überein, wird die repräsentativste LRC gespeichert — als „Konsens (kein Vokal)". Sind die Provider sich uneinig, wird nichts gespeichert.
-
-**Schritt 5 — Sprache erkennen**
+**Schritt 4 — Sprache erkennen**
 
 Aus dem Text der Provider-LRCs wird die Sprache erkannt (z. B. `de`, `en`, `fr`) und als Hinweis an Whisper übergeben. Das verhindert, dass Whisper deutsche oder fremdsprachige Tracks auf Englisch transkribiert und dadurch kein Wort mit der LRC übereinstimmt.
 
-**Schritt 6 — Whisper-Vollpass**
+**Schritt 5 — Whisper-Verifikation (small)**
 
-Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `base`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **Containment**: Anteil der Whisper-Wörter, die in der LRC vorkommen (`|Whisper ∩ LRC| ÷ |Whisper|`). Diese Metrik ist asymmetrisch — sie bestraft nicht, wenn die LRC mehr Text enthält als Whisper gehört hat (z. B. Verse, die außerhalb des Fensters liegen).
+Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `small`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **Containment**: Anteil der Whisper-Wörter, die in der LRC vorkommen (`|Whisper ∩ LRC| ÷ |Whisper|`). Diese Metrik ist asymmetrisch — sie bestraft nicht, wenn die LRC mehr Text enthält als Whisper gehört hat (z. B. Verse, die außerhalb des Fensters liegen).
 
 Vor dem Vergleich: Wiederholungsschleifen (Whisper-Halluzinationen wie „lets go lets go lets go") werden erkannt und verworfen — die Einzigartigkeit der Wörter muss hoch genug sein *und* kein einzelnes Wort darf dominieren.
 
-| Ergebnis des base-Passes | Weiteres Vorgehen |
-|--------------------------|-------------------|
-| Bester Score ≥ 40 % | LRC gespeichert |
-| Score 20–40 % | Zweiter Pass mit `small`-Modell (genauer, langsamer) |
-| Score < 20 % | Kein zweiter Pass — kein Treffer |
+Score ≥ 40 % → LRC gespeichert. Darunter → kein Treffer. Kein zweiter Pass, kein Vorab-Check mehr (`base` und die VAD-Probe wurden in v1.7.0 entfernt — `base` transkribierte nicht-englische Songs unzuverlässig und lieferte falsch-negative „kein Vokal"-Ergebnisse; die VAD-Probe diente nur dazu, einen inzwischen ebenfalls entfernten zweiten Pass zu gaten).
 
-Liegt auch der `small`-Score unter 40 %, wird keine LRC gespeichert.
+`has_vocals` (steuert den „kein Vokal erkannt"-Zweig unten) kommt jetzt direkt aus diesem einen `small`-Durchlauf (`no_speech_prob` und Wortanzahl) — ohne separate Probe.
 
-**Mit `--no-whisper`:** Schritte 4–6 entfallen komplett. Statt Schritt 4 wird
+→ Bei „kein Vokal erkannt" werden die Provider-LRCs untereinander verglichen (Jaccard). Stimmen mindestens 2 Provider zu ≥ 40 % überein, wird die repräsentativste LRC gespeichert — als „Konsens (kein Vokal)". Sind die Provider sich uneinig, wird nichts gespeichert.
+
+**Mit `--no-whisper`:** Schritte 4–5 entfallen komplett. Statt Whisper wird
 immer ein 2-Provider-Konsens versucht (gleicher Jaccard-Schwellwert wie
 Schritt 3, aber schon ab 2 statt 3 übereinstimmenden Anbietern). Schlägt auch
 das fehl, entscheidet eine reine Dauer-Heuristik: der Kandidat mit dem besten
 `_score_lrc`-Wert wird genommen — außer seine Dauer weicht zu stark vom Track
 ab (siehe Toleranzen oben), dann wird nichts gespeichert
-(`reason: "dauer-abweichung"`). Sinnvoll wenn Whisper (`base`) auf der
-vorliegenden Sprache systematisch versagt (z.B. viele „0W kein Vokal" bei
-französischen/nicht-englischen Alben) — kostet aber die inhaltliche
-Verifikation gegen falsch zugeordnete Songtexte.
+(`reason: "dauer-abweichung"`). Nützlich um Whisper ganz zu überspringen
+(z. B. für einen schnellen Durchlauf ohne Modell-Ladezeit) — kostet die
+inhaltliche Verifikation gegen falsch zugeordnete Songtexte.
 
 ---
 
@@ -242,13 +228,13 @@ Davor steht die Methoden-Info mit sechs Teilen:
 
 Beispiele:
 ```
-09:28:20  Artist/Album/01 Song.flac  2/4: lrclib, genius │ [base] de Whisper 265W 62%  ✓
+09:28:20  Artist/Album/01 Song.flac  2/4: lrclib, genius │ [small] de Whisper 265W 62%  ✓
 09:28:20  Artist/Album/02 Song.flac  3/4: lrclib, netease, genius │ Konsens 92%  ✓
 09:28:20  Artist/Album/03 Song.flac  2/4: netease, genius │ Konsens 87% (kein Vokal)  ✓
-09:28:20  Artist/Album/04 Song.flac  2/4: lrclib, genius │ [base] de Whisper 48W unter Schwelle 12%  =
+09:28:20  Artist/Album/04 Song.flac  2/4: lrclib, genius │ [small] de Whisper 48W unter Schwelle 12%  =
 09:28:20  Artist/Album/05 Song.flac  0/4: — │ kein Provider  =
-09:28:20  Artist/Album/06 Song.flac  2/4: netease, genius │ [base] de Whisper 0W kein Vokal  =
-09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [base] de Whisper 12W unter Schwelle 8%  –
+09:28:20  Artist/Album/06 Song.flac  2/4: netease, genius │ [small] de Whisper 0W kein Vokal  =
+09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [small] de Whisper 12W unter Schwelle 8%  –
 09:28:20  Artist/Album/08 Song.flac  0/0: │ Genre=Instrumental  –
 09:28:20  Artist/Album/09 Song.flac  0/0: │ Genre=Instrumental  =
 ```
@@ -260,10 +246,10 @@ Mit `--no-whisper`:
 09:28:20  Artist/Album/03 Song.flac  2/4: lrclib, genius │ Heuristik Dauer-Abweichung  =
 ```
 
-- **Modell**: `[base]` oder `[small]` — welches Whisper-Modell verwendet wurde
+- **Modell**: `[small]` — einziges Whisper-Modell (seit v1.7.0, `base` entfernt)
 - **Sprache**: z.B. `de`, `en` — von `langdetect` erkannt, als Hint an Whisper übergeben
 - **Wörter**: von Whisper transkribierte Wörter (Qualitätsindikator: 5W 62% ist unsicherer als 280W 62%)
-- **Konsens**: kein Whisper nötig, Provider einig — bei `(kein Vokal)` hat die VAD ausgelöst, bei `(2P)` lief mit `--no-whisper` der abgesenkte 2-Provider-Konsens
+- **Konsens**: kein Whisper nötig, Provider einig — bei `(kein Vokal)` hat `has_vocals` (aus dem Whisper-Pass) ausgelöst, bei `(2P)` lief mit `--no-whisper` der abgesenkte 2-Provider-Konsens
 
 ---
 
@@ -275,13 +261,13 @@ Mit `--no-whisper`:
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | `"1.5.2"` | Version des schreibenden Skripts |
+| `v` | `"1.7.0"` | Version des schreibenden Skripts |
 | `r` | `"ok"` / `"nf"` / `"skip"` | Ergebnis: LRC vorhanden / nicht gefunden / übersprungen |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
 | `provider_names` | `["lrclib", "genius"]` | Namen der liefernden Provider |
-| `method` | `"whisper-base"` / `"whisper-small"` / `"konsens"` / `"heuristik"` / `null` | Entscheidungsweg |
-| `no_vocal` | `true` / `false` | VAD hat keinen Gesang erkannt (bei `method=konsens`: Konsens trotzdem möglich) |
+| `method` | `"whisper-small"` / `"konsens"` / `"heuristik"` / `null` | Entscheidungsweg (`"whisper-base"` gab es bis v1.6.x, seit v1.7.0 nur noch `"whisper-small"`) |
+| `no_vocal` | `true` / `false` | Whisper-Pass hat keinen Gesang erkannt (bei `method=konsens`: Konsens trotzdem möglich) |
 | `score` | `0.0`–`1.0` / `null` | Whisper-Containment oder Jaccard-Konsens |
 | `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"dauer-abweichung"` / `"genre"` | Grund bei `r=nf` oder `r=skip` (`dauer-abweichung` nur bei `--no-whisper`) |
 | `words` | `0`–`n` / `null` | Von Whisper transkribierte Wörter |
@@ -292,13 +278,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.5.2", "r": "ok", "outcome": "write",
+  "v": "1.7.0", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
-  "method": "whisper-base", "no_vocal": false,
+  "method": "whisper-small", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.5.2", "r": "skip", "outcome": "delete",
+  "v": "1.7.0", "r": "skip", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "genre", "words": null, "language": null, "ts": "2026-07-09T09:28:25"

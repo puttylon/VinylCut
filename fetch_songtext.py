@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -20,11 +20,10 @@ _AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
 _LRC_TOO_SHORT_TOLERANCE = 0.40  # last_ts darf bis zu 40 % kürzer als der Track sein
 _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der Track sein
 
-# Whisper: zweistufige Verifikation — base zuerst, small nur im Grenzbereich.
+# Whisper: einstufige Verifikation mit small. base wurde entfernt (v1.7.0) —
+# unzuverlässig bei nicht-englischen Songs (falsch-negative "kein Vokal").
 _WHISPER_MIN_OVERLAP = 0.40  # Schwellwert: ab hier wird eine LRC akzeptiert
-_WHISPER_RETRY_MIN = 0.20  # Untergrenze: base-Score ab hier → small-Pass
-_WHISPER_MODEL_FAST = "base"  # erster Pass — immer
-_WHISPER_MODEL_FULL = "small"  # zweiter Pass — nur im Grenzbereich [0.20, 0.40)
+_WHISPER_MODEL = "small"
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
@@ -39,15 +38,13 @@ _VOCALS_MIN_WORDS = 5  # Fallback: weniger Wörter → als instrumental behandel
 _VOCALS_NO_SPEECH_THOLD = (
     0.65  # faster_whisper: avg no_speech_prob > dies → instrumental
 )
-_WHISPER_VAD_PROBE_SEC = 15.0  # Kurzprobe vor vollständigem Pass
-_VAD_PEAK_SCAN_SEC = 10.0  # Analysefenster je Position beim Peak-Scan
 _HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
 _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
 # _HALLUCINATION_AVG_LOGPROB entfernt: sprachbiased (Deutsch < Englisch), _is_hallucination reicht
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
-    "1.4.0"  # Einträge dieser oder neuerer Version = gültig, kein Neulauf
+    "1.7.0"  # v1.7.0: base+VAD-Probe entfernt — alle älteren Einträge neu prüfen
 )
 
 # Genres die keinen Songtext haben — Substring-Matching (Kleinschreibung)
@@ -234,52 +231,6 @@ def _get_whisper_model(name: str):
         _whisper_models[name] = WhisperModel(name, device="auto", compute_type="int8")
         print(f"bereit.  {_ts()}")
     return _whisper_models[name]
-
-
-def _vad_peak_start(flac_path: Path, dur_s: float) -> float:
-    """Findet die lauteste Position via ffmpeg volumedetect an 5 Stellen.
-
-    Scannt je _VAD_PEAK_SCAN_SEC Sekunden an 5 Positionen zwischen 10 % und
-    90 % der Trackdauer und gibt die lauteste zurück. Fallback: 10 % der Dauer.
-    """
-    if dur_s < 60:
-        return 0.0
-    scan_start = dur_s * 0.10
-    scan_end = dur_s * 0.90
-    positions = [scan_start + (scan_end - scan_start) * i / 4 for i in range(5)]
-    best_pos = scan_start
-    best_rms = float("-inf")
-    for pos in positions:
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-ss",
-                    f"{pos:.1f}",
-                    "-t",
-                    f"{_VAD_PEAK_SCAN_SEC:.0f}",
-                    "-i",
-                    str(flac_path),
-                    "-af",
-                    "volumedetect",
-                    "-f",
-                    "null",
-                    "-",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            for line in result.stderr.splitlines():
-                if "mean_volume:" in line:
-                    val = float(line.split("mean_volume:")[1].split("dB")[0].strip())
-                    if val > best_rms:
-                        best_rms = val
-                        best_pos = pos
-                    break
-        except Exception:
-            continue
-    return best_pos
 
 
 def _whisper_context_sec(dur_s: float) -> float:
@@ -499,11 +450,11 @@ def _provider_consensus(
 def _whisper_best(
     flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
 ) -> tuple[Path | None, float, bool, int, str, str | None]:
-    """Zweistufige Verifikation: base zuerst, small nur im Grenzbereich.
+    """Verifikation via small: bester Kandidat nach Containment-Score.
 
     Gibt (bester Kandidat, score, has_vocals, words, model_used, language) zurück.
     """
-    if _get_whisper_model(_WHISPER_MODEL_FAST) is None:
+    if _get_whisper_model(_WHISPER_MODEL) is None:
         return (None, 0.0, False, 0, "", None)
 
     ctx = _whisper_context_sec(expected_dur)
@@ -521,88 +472,44 @@ def _whisper_best(
     # cache: start_key → (words, no_speech_prob, avg_logprob)
     _CacheVal = tuple[list[str], float, float]
 
-    def _score_from_cache(
-        cache: dict[int, _CacheVal],
-    ) -> tuple[Path | None, float, int]:
-        best_path: Path | None = None
-        best_score = 0.0
-        for p, start in candidate_starts:
-            words, _, _ = cache.get(round(start / 3), ([], 1.0, 0.0))
-            if not words:
-                continue
-            try:
-                score = _containment(
-                    words, _extract_lrc_words(p.read_text(encoding="utf-8"))
-                )
-            except Exception:
-                score = 0.0
-            if score > best_score:
-                best_score = score
-                best_path = p
-        total = sum(len(v[0]) for v in cache.values())
-        return best_path, best_score, total
-
     lrc_lang = _detect_lrc_language(candidates)
 
-    def _build_cache(model_name: str) -> dict[int, _CacheVal]:
-        cache: dict[int, _CacheVal] = {}
-        for _, start in candidate_starts:
-            key = round(start / 3)
-            if key not in cache:
-                words, no_speech, logprob = _transcribe(
-                    flac_path, start, ctx, model_name, language=lrc_lang
-                )
-                if _is_hallucination(words):
-                    words = []
-                cache[key] = (words, no_speech, logprob)
-        return cache
+    cache: dict[int, _CacheVal] = {}
+    for _, start in candidate_starts:
+        key = round(start / 3)
+        if key not in cache:
+            words, no_speech, logprob = _transcribe(
+                flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
+            )
+            if _is_hallucination(words):
+                words = []
+            cache[key] = (words, no_speech, logprob)
 
-    # VAD-Probe: 15s an der lautesten Stelle. Schlägt sie an, zwei Fallback-
-    # Positionen testen (30%/50% der Dauer) — Energie-Peak ≠ Vokal-Peak.
-    # V3: kein early return — Base-Pass läuft immer. VAD-Ergebnis gatet nur small.
-    likely_no_vocals = False
-    if ctx > _WHISPER_VAD_PROBE_SEC * 2:
-        probe_start = _vad_peak_start(flac_path, expected_dur)
-        probe_words, probe_no_speech, _ = _transcribe(  # V2: language übergeben
-            flac_path, probe_start, _WHISPER_VAD_PROBE_SEC, _WHISPER_MODEL_FAST, language=lrc_lang
-        )
-        # V1: Gate konsistent mit has_vocals — kein Alarm wenn Probe schon Wörter liefert
-        if probe_no_speech > _VOCALS_NO_SPEECH_THOLD and len(probe_words) < _VOCALS_MIN_WORDS and expected_dur > 60:
-            for frac in (0.30, 0.50):
-                fb_words, ns, _ = _transcribe(
-                    flac_path,
-                    expected_dur * frac,
-                    _WHISPER_VAD_PROBE_SEC,
-                    _WHISPER_MODEL_FAST,
-                    language=lrc_lang,  # V2
-                )
-                if ns <= _VOCALS_NO_SPEECH_THOLD or len(fb_words) >= _VOCALS_MIN_WORDS:  # V1
-                    probe_no_speech = ns
-                    probe_words = fb_words
-                    break
-        likely_no_vocals = probe_no_speech > _VOCALS_NO_SPEECH_THOLD and len(probe_words) < _VOCALS_MIN_WORDS
-
-    # Pass 1: base (läuft immer — V3)
-    fast_cache = _build_cache(_WHISPER_MODEL_FAST)
     # has_vocals: primär no_speech_prob, sekundär Wortzahl
-    vals = list(fast_cache.values())
+    vals = list(cache.values())
     avg_no_speech = sum(v[1] for v in vals) / len(vals) if vals else 1.0
-    total_words_base = sum(len(v[0]) for v in vals)
+    total_words = sum(len(v[0]) for v in vals)
     has_vocals = (
-        avg_no_speech < _VOCALS_NO_SPEECH_THOLD or total_words_base >= _VOCALS_MIN_WORDS
+        avg_no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
     )
-    best_path, best_score, total_words = _score_from_cache(fast_cache)
-    model_used = _WHISPER_MODEL_FAST
 
-    # Pass 2: small — nur wenn Vokale erkannt, Score im Grenzbereich und VAD nicht klar instrumental
-    if has_vocals and _WHISPER_RETRY_MIN <= best_score < _WHISPER_MIN_OVERLAP and not likely_no_vocals:
-        full_cache = _build_cache(_WHISPER_MODEL_FULL)
-        full_path, full_score, full_words = _score_from_cache(full_cache)
-        if full_score > best_score:
-            best_path, best_score, total_words = full_path, full_score, full_words
-            model_used = _WHISPER_MODEL_FULL
+    best_path: Path | None = None
+    best_score = 0.0
+    for p, start in candidate_starts:
+        words, _, _ = cache.get(round(start / 3), ([], 1.0, 0.0))
+        if not words:
+            continue
+        try:
+            score = _containment(
+                words, _extract_lrc_words(p.read_text(encoding="utf-8"))
+            )
+        except Exception:
+            score = 0.0
+        if score > best_score:
+            best_score = score
+            best_path = p
 
-    return (best_path, best_score, has_vocals, total_words, model_used, lrc_lang)
+    return (best_path, best_score, has_vocals, total_words, _WHISPER_MODEL, lrc_lang)
 
 
 def fetch_lrc(
@@ -957,7 +864,7 @@ def main() -> None:
 
     env = _load_env()
     if not args.no_whisper:
-        _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste
+        _get_whisper_model(_WHISPER_MODEL)  # vorladen — Meldung vor Track-Liste
     updated = skipped = not_found = errors = genre_skipped = no_tags = 0
 
     current_parent: Path | None = None

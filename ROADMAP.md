@@ -1,5 +1,30 @@
 # VinylCut Roadmap
 
+## ✓ v1.7.0 — `base` und VAD-Probe entfernt, nur noch `small`
+
+Untersuchung (Stichprobe via `whisper_sample.py`/`whisper_model_test.py`, siehe
+„Ideen" unten) ergab: `base` scheitert bei nicht-englischen Songs mit schlechter
+Provider-Abdeckung (bestätigter Fall: Rheingold „Dreiklangsdimensionen" —
+`base` 19%, `small` 53%, `medium` 61%). Bei bekannten/gut produzierten Songs
+(Piaf, Zaz, Bocelli, Dalida) scheiterte `base` dagegen nicht — die Evidenz ist
+dünn (1 von 9 getesteten Tracks), aber der Fehlerfall ist teuer genug
+(fälschlich verworfene LRCs) und billig genug zu beheben (mehr Rechenzeit im
+Hintergrund), dass sich der Wechsel lohnt.
+
+- `_WHISPER_MODEL_FAST`/`_WHISPER_MODEL_FULL`-Unterscheidung entfernt — nur
+  noch ein Modell (`_WHISPER_MODEL = "small"`), überall wo Whisper läuft.
+- Zweistufige Verifikation (`base` immer, `small` nur im Grenzbereich 20–40%)
+  entfällt — ein einziger Pass, ein einziges Modell.
+- VAD-Probe (`_vad_peak_start`, 15s-Kurzcheck vor dem Vollpass) komplett
+  entfernt. Sie gatete ausschließlich den jetzt ebenfalls entfernten zweiten
+  Pass — `has_vocals` kam schon vorher aus dem vollen Durchlauf, nicht aus der
+  Probe (v1.5.2 „V3"-Fix stellte sicher, dass der Vollpass immer lief). Kein
+  Funktionsverlust, nur Zeitersparnis.
+- Performance ist kein Gegenargument: `small` ist laut ROADMAP v1.3.11 ~3×
+  langsamer als `base`, das wird bewusst in Kauf genommen.
+- `_CACHE_MIN_VERSION` auf `1.7.0` (= `__version__`) angehoben → alle
+  bestehenden Cache-Einträge ungültig, komplette Bibliothek wird neu geprüft.
+
 ## ✓ v1.6.0 — `--no-whisper` Flag
 
 Whisper (`base`) transkribiert nicht-englische Songs unzuverlässig — viele
@@ -219,13 +244,12 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 
 ## Ideen (nicht geplant)
 
-### Whisper-Modell-Stichprobe (Schritt 2 nach --no-whisper)
-Tracks sammeln, bei denen Whisper eindeutig versagt hat: `method=whisper-*`,
-`words=0`/`reason=kein-vokal`, aber ≥2 Provider liefern inhaltlich ähnliche
-LRCs (Jaccard-Indiz für tatsächlich vorhandenen Gesang). Diese Stichprobe
-dient als Testset um alternative Modelle (z.B. `medium`, `large-v3`,
-sprachspezifische Modelle) gegen `base` zu vergleichen, bevor Whisper wieder
-aktiviert wird.
+### Whisper-Modell-Stichprobe — erledigt, siehe v1.7.0
+Umgesetzt: `whisper_sample.py` (Cache nach `kein-vokal`-Ablehnungen mit
+Provider-Konsens-Bestätigung durchsuchen) und `whisper_model_test.py`
+(mehrere Modelle gegen eine Kandidatenliste testen, resumable). Ergebnis:
+`base`→`small`-Wechsel in v1.7.0. Skripte bleiben nützlich falls später
+`medium`/`large-v3` erneut gegen `small` getestet werden soll.
 
 ### Whisper-Verifikation
 Die ersten ~30 Sekunden eines Tracks via `faster-whisper` transkribieren und

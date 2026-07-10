@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+import fetch_songtext
 from fetch_songtext import (
     _CONSENSUS_MIN_JACCARD,
     _CONSENSUS_MIN_PROVIDERS,
@@ -11,10 +12,12 @@ from fetch_songtext import (
     _VOCALS_MIN_WORDS,
     _extract_lrc_words,
     _first_timestamp,
+    _heuristic_best,
     _is_hallucination,
     _last_timestamp,
     _provider_consensus,
     _word_overlap,
+    fetch_lrc,
 )
 
 
@@ -206,3 +209,110 @@ class TestProviderConsensus:
         rep, score = _provider_consensus(paths)
         assert rep is None  # leere LRC hat keine Wörter → unter MIN_PROVIDERS
         for p in paths: p.unlink(missing_ok=True)
+
+    def test_min_providers_2_reicht_fuer_no_whisper_fallback(self):
+        # --no-whisper: 2 übereinstimmende Provider reichen (min_providers=2)
+        paths = self._paths(self.LRC_A, self.LRC_B)
+        rep, score = _provider_consensus(paths, min_providers=2)
+        assert rep is not None
+        assert score >= _CONSENSUS_MIN_JACCARD
+        for p in paths: p.unlink(missing_ok=True)
+
+    def test_min_providers_2_bei_uneinigkeit_kein_konsens(self):
+        paths = self._paths(self.LRC_A, self.LRC_WRONG)
+        rep, score = _provider_consensus(paths, min_providers=2)
+        assert rep is None
+        for p in paths: p.unlink(missing_ok=True)
+
+
+class TestHeuristicBest:
+    LRC = "[00:10.00]Zeile eins\n[00:20.00]Zeile zwei\n[00:190.00]Letzte Zeile\n"
+
+    def test_dauer_passt_liefert_inhalt(self):
+        path = _make_lrc(self.LRC)
+        content, score = _heuristic_best([path], expected_dur=200.0)
+        assert content is not None
+        assert score[0] == 1  # valid
+        path.unlink(missing_ok=True)
+
+    def test_dauer_weicht_zu_stark_ab_kein_inhalt(self):
+        # last_ts=190s, expected_dur=50s → weit über _LRC_TOO_LONG_TOLERANCE
+        path = _make_lrc(self.LRC)
+        content, score = _heuristic_best([path], expected_dur=50.0)
+        assert content is None
+        assert score[0] == 0  # invalid
+        path.unlink(missing_ok=True)
+
+    def test_wählt_besten_von_mehreren_kandidaten(self):
+        good = _make_lrc(self.LRC)  # passt zu expected_dur
+        bad = _make_lrc("[00:10.00]Kurz\n")  # kürzer, weniger Zeilen — schlechterer Score
+        content, score = _heuristic_best([bad, good], expected_dur=200.0)
+        assert content == good.read_bytes()
+        good.unlink(missing_ok=True)
+        bad.unlink(missing_ok=True)
+
+
+def _fake_query_provider(contents: dict[str, str]):
+    """Ersetzt fetch_songtext._query_provider — liefert LRC-Inhalte ohne Netzwerk."""
+
+    def _fake(query: str, provider: str, env: dict) -> tuple[str, Path | None]:
+        if provider not in contents:
+            return provider, None
+        return provider, _make_lrc(contents[provider])
+
+    return _fake
+
+
+class TestFetchLrcNoWhisper:
+    """Integrationstests für den elif no_whisper-Zweig in fetch_lrc() selbst —
+    nicht nur seine Einzelbausteine (_provider_consensus, _heuristic_best)."""
+
+    LRC_A = TestProviderConsensus.LRC_A
+    LRC_B = TestProviderConsensus.LRC_B
+    DAUER_LRC = TestHeuristicBest.LRC  # last_ts = 190s
+
+    def test_2p_konsens_wird_geschrieben(self, tmp_path, monkeypatch):
+        # Nur 2 Provider treffen, aber inhaltlich einig → 2P-Konsens-Fallback
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.LRC_A, "genius": self.LRC_B}),
+        )
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc("query", lrc_path, env={}, no_whisper=True)
+        assert found is True
+        assert extras["method"] == "konsens"
+        assert extras.get("reason") is None
+        assert "(2P)" in info
+        assert lrc_path.exists()
+
+    def test_heuristik_akzeptiert_bei_passender_dauer(self, tmp_path, monkeypatch):
+        # Nur 1 Provider → kein Konsens möglich (weder 3P noch 2P) → Heuristik
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.DAUER_LRC}),
+        )
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc(
+            "query", lrc_path, env={}, expected_dur=200.0, no_whisper=True
+        )
+        assert found is True
+        assert extras["method"] == "heuristik"
+        assert extras.get("reason") is None
+        assert lrc_path.exists()
+
+    def test_heuristik_lehnt_bei_dauer_abweichung_ab(self, tmp_path, monkeypatch):
+        # Gleicher einzelner Kandidat, aber Dauer passt nicht (190s LRC vs. 50s Track)
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.DAUER_LRC}),
+        )
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc(
+            "query", lrc_path, env={}, expected_dur=50.0, no_whisper=True
+        )
+        assert found is False
+        assert extras["reason"] == "dauer-abweichung"
+        assert not lrc_path.exists()

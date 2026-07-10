@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.5.3"
+__version__ = "1.6.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -163,6 +163,62 @@ def _score_lrc(path: Path, expected_dur: float = 0.0) -> tuple[int, int, int]:
             if ratio > _LRC_TOO_LONG_TOLERANCE or ratio < -_LRC_TOO_SHORT_TOLERANCE:
                 valid = 0
     return (valid, synced, lines)
+
+
+def _heuristic_best(
+    candidates: list[Path], expected_dur: float = 0.0
+) -> tuple[bytes | None, tuple[int, int, int]]:
+    """Wählt per Dauer-Heuristik den besten Kandidaten (ohne Whisper).
+
+    Gibt (Inhalt, score) zurück. Inhalt ist None wenn der beste Kandidat die
+    Dauer-Toleranz überschreitet (valid=0) — kein blindes Schreiben eines
+    offensichtlich falschen Songs.
+    """
+    best = max(candidates, key=lambda p: _score_lrc(p, expected_dur))
+    score = _score_lrc(best, expected_dur)
+    if not score[0]:
+        return None, score
+    return best.read_bytes(), score
+
+
+def _query_provider(query: str, provider: str, env: dict) -> tuple[str, Path | None]:
+    """Fragt syncedlyrics für einen Anbieter ab, gibt (Anbieter, Temp-LRC-Pfad|None) zurück."""
+    with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    tmp_path.unlink()
+    try:
+        subprocess.run(
+            ["syncedlyrics", query, "-o", str(tmp_path), "-p", provider],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=_PROVIDER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        tmp_path.unlink(missing_ok=True)
+        return provider, None
+    return provider, tmp_path if tmp_path.exists() else None
+
+
+def _dedupe_by_content(
+    paths: list[Path], provider_hits: list[str]
+) -> tuple[list[Path], list[str]]:
+    """Entfernt inhaltlich identische Kandidaten (gespiegelte Provider-Datenbanken).
+
+    Erster Treffer in Prioritätsreihenfolge bleibt, Duplikat-Dateien werden gelöscht.
+    """
+    seen_hashes: set[bytes] = set()
+    deduped: list[Path] = []
+    deduped_hits: list[str] = []
+    for path, provider in zip(paths, provider_hits):
+        h = hashlib.md5(path.read_bytes()).digest()
+        if h not in seen_hashes:
+            seen_hashes.add(h)
+            deduped.append(path)
+            deduped_hits.append(provider)
+        else:
+            path.unlink(missing_ok=True)  # Duplikat-Temp-Datei sofort löschen
+    return deduped, deduped_hits
 
 
 def _get_whisper_model(name: str):
@@ -556,6 +612,7 @@ def fetch_lrc(
     expected_dur: float = 0.0,
     flac_path: Path | None = None,
     existing_lrc: Path | None = None,
+    no_whisper: bool = False,
 ) -> tuple[bool, str, dict]:
     """Alle Provider befragen, bestes Ergebnis via Whisper oder Dauer-Scoring wählen.
 
@@ -563,28 +620,13 @@ def fetch_lrc(
     extras enthält score, providers, words, model (und ggf. fallback=True, consensus=True).
     """
 
-    def _query_provider(provider: str) -> tuple[str, Path | None]:
-        with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        tmp_path.unlink()
-        try:
-            subprocess.run(
-                ["syncedlyrics", query, "-o", str(tmp_path), "-p", provider],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=_PROVIDER_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            tmp_path.unlink(missing_ok=True)
-            return provider, None
-        return provider, tmp_path if tmp_path.exists() else None
-
     candidates: list[Path] = []
     provider_hits: list[str] = []
     results: dict[str, Path | None] = {}
     with ThreadPoolExecutor(max_workers=len(_ALL_PROVIDERS)) as pool:
-        futures = {pool.submit(_query_provider, p): p for p in _ALL_PROVIDERS}
+        futures = {
+            pool.submit(_query_provider, query, p, env): p for p in _ALL_PROVIDERS
+        }
         for future in as_completed(futures):
             try:
                 provider, path = future.result()
@@ -601,19 +643,7 @@ def fetch_lrc(
             provider_hits.append(provider)
 
     # Duplikate entfernen: gespiegelte Provider liefern oft identischen Inhalt.
-    # Content-Hash deduplizieren — erster Treffer (Prioritätsreihenfolge) bleibt.
-    seen_hashes: set[bytes] = set()
-    deduped: list[Path] = []
-    deduped_hits: list[str] = []
-    for path, provider in zip(candidates, provider_hits):
-        h = hashlib.md5(path.read_bytes()).digest()
-        if h not in seen_hashes:
-            seen_hashes.add(h)
-            deduped.append(path)
-            deduped_hits.append(provider)
-        else:
-            path.unlink(missing_ok=True)  # Duplikat-Temp-Datei sofort löschen
-    candidates, provider_hits = deduped, deduped_hits
+    candidates, provider_hits = _dedupe_by_content(candidates, provider_hits)
 
     # Vorhandene LRC als Kandidat einbeziehen (wird nicht gelöscht)
     all_candidates = candidates + (
@@ -654,6 +684,47 @@ def fetch_lrc(
             "words": None,
             "language": None,
         }
+    elif no_whisper:
+        # Whisper deaktiviert: 2-Provider-Konsens versuchen, sonst Dauer-Heuristik
+        # mit Reject-Schwelle (kein blindes Schreiben eines falschen Songs).
+        novocal_rep, novocal_jaccard = _provider_consensus(candidates, min_providers=2)
+        if novocal_rep is not None:
+            best_content = novocal_rep.read_bytes()
+            info_str = f"{prov_str} │ Konsens {novocal_jaccard:.0%} (2P)"
+            extras = {
+                "providers": len(candidates),
+                "provider_names": provider_hits,
+                "method": "konsens",
+                "no_vocal": False,
+                "score": round(novocal_jaccard, 3),
+                "words": None,
+                "language": None,
+            }
+        else:
+            best_content, _ = _heuristic_best(all_candidates, expected_dur)
+            if best_content is not None:
+                info_str = f"{prov_str} │ Heuristik"
+                extras = {
+                    "providers": len(candidates),
+                    "provider_names": provider_hits,
+                    "method": "heuristik",
+                    "no_vocal": False,
+                    "score": None,
+                    "words": None,
+                    "language": None,
+                }
+            else:
+                info_str = f"{prov_str} │ Heuristik Dauer-Abweichung"
+                extras = {
+                    "providers": len(candidates),
+                    "provider_names": provider_hits,
+                    "method": "heuristik",
+                    "no_vocal": False,
+                    "score": None,
+                    "reason": "dauer-abweichung",
+                    "words": None,
+                    "language": None,
+                }
     elif flac_path and flac_path.exists():
         # Kein Konsens → Whisper als primärer Entscheider.
         (
@@ -849,6 +920,15 @@ def main() -> None:
         help="Cache ignorieren, alle Tracks neu prüfen",
     )
     parser.add_argument(
+        "--no-whisper",
+        action="store_true",
+        help=(
+            "Whisper-Verifikation überspringen (Konsens/Dauer-Heuristik statt "
+            "Content-Check). Cache-Einträge mit reason=kein-vokal/unter-schwelle "
+            "werden dabei automatisch neu geprüft, auch ohne --force."
+        ),
+    )
+    parser.add_argument(
         "-V", "--version", action="version", version=f"fetch_songtext {__version__}"
     )
     args = parser.parse_args()
@@ -876,7 +956,8 @@ def main() -> None:
         print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
 
     env = _load_env()
-    _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste
+    if not args.no_whisper:
+        _get_whisper_model(_WHISPER_MODEL_FAST)  # vorladen — Meldung vor Track-Liste
     updated = skipped = not_found = errors = genre_skipped = no_tags = 0
 
     current_parent: Path | None = None
@@ -903,7 +984,11 @@ def main() -> None:
         if not args.force:
             entry = dir_cache.get(audio.name)
             if entry and _cache_entry_valid(entry):
-                if entry.get("r") != "ok" or lrc_path.exists():
+                # --no-whisper: frühere Whisper-Ablehnungen automatisch neu prüfen
+                whisper_reject_rerun = args.no_whisper and entry.get("r") == "nf" and entry.get(
+                    "reason"
+                ) in ("kein-vokal", "unter-schwelle")
+                if not whisper_reject_rerun and (entry.get("r") != "ok" or lrc_path.exists()):
                     skipped += 1
                     continue
 
@@ -961,7 +1046,13 @@ def main() -> None:
 
         try:
             found, info, extras = fetch_lrc(
-                query, dest, env, expected_dur, flac_path=audio, existing_lrc=lrc_path
+                query,
+                dest,
+                env,
+                expected_dur,
+                flac_path=audio,
+                existing_lrc=lrc_path,
+                no_whisper=args.no_whisper,
             )
         except FileNotFoundError:
             _tprint(f"{_ts()}  {rel}  syncedlyrics nicht gefunden — Abbruch.")

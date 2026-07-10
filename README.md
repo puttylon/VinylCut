@@ -145,7 +145,18 @@ python3 fetch_songtext.py "Artist - Album/"                    # einzelnes Album
 python3 fetch_songtext.py "/Pfad/zur/Datei.flac"              # einzelne Datei
 python3 fetch_songtext.py --recursive "/Musik/"                # alle Unterordner
 python3 fetch_songtext.py --force "Artist - Album/"            # Cache ignorieren
+python3 fetch_songtext.py --no-whisper --recursive "/Musik/"   # ohne Whisper-Verifikation
 ```
+
+**Optionen:**
+
+| Flag | Bedeutung |
+|------|-----------|
+| `--recursive`, `-r` | Alle Unterordner rekursiv durchsuchen und LRCs erneuern |
+| `--force`, `-f` | Cache ignorieren, alle Tracks neu prüfen |
+| `--no-whisper` | Whisper-Verifikation überspringen (Konsens/Dauer-Heuristik statt Content-Check). Cache-Einträge mit `reason=kein-vokal`/`unter-schwelle` werden automatisch neu geprüft, auch ohne `--force`. |
+| `-h`, `--help` | Hilfe anzeigen |
+| `-V`, `--version` | Versionsnummer ausgeben |
 
 **Unterstützte Formate:** FLAC, MP3, OGG, Opus, M4A, AAC, WAV
 
@@ -200,6 +211,17 @@ Vor dem Vergleich: Wiederholungsschleifen (Whisper-Halluzinationen wie „lets g
 
 Liegt auch der `small`-Score unter 40 %, wird keine LRC gespeichert.
 
+**Mit `--no-whisper`:** Schritte 4–6 entfallen komplett. Statt Schritt 4 wird
+immer ein 2-Provider-Konsens versucht (gleicher Jaccard-Schwellwert wie
+Schritt 3, aber schon ab 2 statt 3 übereinstimmenden Anbietern). Schlägt auch
+das fehl, entscheidet eine reine Dauer-Heuristik: der Kandidat mit dem besten
+`_score_lrc`-Wert wird genommen — außer seine Dauer weicht zu stark vom Track
+ab (siehe Toleranzen oben), dann wird nichts gespeichert
+(`reason: "dauer-abweichung"`). Sinnvoll wenn Whisper (`base`) auf der
+vorliegenden Sprache systematisch versagt (z.B. viele „0W kein Vokal" bei
+französischen/nicht-englischen Alben) — kostet aber die inhaltliche
+Verifikation gegen falsch zugeordnete Songtexte.
+
 ---
 
 #### Ausgabe-Zeichen
@@ -231,10 +253,17 @@ Beispiele:
 09:28:20  Artist/Album/09 Song.flac  0/0: │ Genre=Instrumental  =
 ```
 
+Mit `--no-whisper`:
+```
+09:28:20  Artist/Album/01 Song.flac  2/4: lrclib, genius │ Konsens 62% (2P)  ✓
+09:28:20  Artist/Album/02 Song.flac  2/4: netease, genius │ Heuristik  ✓
+09:28:20  Artist/Album/03 Song.flac  2/4: lrclib, genius │ Heuristik Dauer-Abweichung  =
+```
+
 - **Modell**: `[base]` oder `[small]` — welches Whisper-Modell verwendet wurde
 - **Sprache**: z.B. `de`, `en` — von `langdetect` erkannt, als Hint an Whisper übergeben
 - **Wörter**: von Whisper transkribierte Wörter (Qualitätsindikator: 5W 62% ist unsicherer als 280W 62%)
-- **Konsens**: kein Whisper nötig, Provider einig — bei `(kein Vokal)` hat die VAD ausgelöst
+- **Konsens**: kein Whisper nötig, Provider einig — bei `(kein Vokal)` hat die VAD ausgelöst, bei `(2P)` lief mit `--no-whisper` der abgesenkte 2-Provider-Konsens
 
 ---
 
@@ -254,7 +283,7 @@ Beispiele:
 | `method` | `"whisper-base"` / `"whisper-small"` / `"konsens"` / `"heuristik"` / `null` | Entscheidungsweg |
 | `no_vocal` | `true` / `false` | VAD hat keinen Gesang erkannt (bei `method=konsens`: Konsens trotzdem möglich) |
 | `score` | `0.0`–`1.0` / `null` | Whisper-Containment oder Jaccard-Konsens |
-| `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"genre"` | Grund bei `r=nf` oder `r=skip` |
+| `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"dauer-abweichung"` / `"genre"` | Grund bei `r=nf` oder `r=skip` (`dauer-abweichung` nur bei `--no-whisper`) |
 | `words` | `0`–`n` / `null` | Von Whisper transkribierte Wörter |
 | `language` | `"de"` / `"en"` / … / `null` | Erkannte Sprache (Hint an Whisper) |
 | `ts` | ISO-8601 | Zeitstempel des Laufs |
@@ -291,6 +320,12 @@ python3 lrc_analyse.py /Musik/
 ```
 
 Ausgabe: Trefferquote, verwendete Methoden, Ablehnungsgründe, Score-Verteilung, Risiko-Tracks (niedriger Score oder nur ein Anbieter) und Tracks, die ohne Whisper-Verifikation gespeichert wurden.
+
+**`whisper_analyse.py`** — zeigt speziell, ob und warum Whisper pro Track gelaufen ist (unabhängig von der Skriptversion des Cache-Eintrags):
+
+```bash
+python3 whisper_analyse.py /Musik/
+```
 
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 

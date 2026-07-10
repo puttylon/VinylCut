@@ -115,12 +115,13 @@ def analyse(root: Path) -> None:
     for e in nf_entries:
         r = _reject_reason(e)
         reject_counts[r] = reject_counts.get(r, 0) + 1
-    reject_order = ["kein-provider", "kein-vokal", "unter-schwelle", "kein-whisper"]
+    reject_order = ["kein-provider", "kein-vokal", "unter-schwelle", "kein-whisper", "dauer-abweichung"]
     reject_labels = {
-        "kein-provider":  "Kein Provider gefunden",
-        "kein-vokal":     "Kein Vokal erkannt    ",
-        "unter-schwelle": "Whisper unter Schwelle",
-        "kein-whisper":   "Kein Whisper/Score    ",
+        "kein-provider":    "Kein Provider gefunden",
+        "kein-vokal":       "Kein Vokal erkannt    ",
+        "unter-schwelle":   "Whisper unter Schwelle",
+        "kein-whisper":     "Kein Whisper/Score    ",
+        "dauer-abweichung": "--no-whisper: Dauer passt nicht",
     }
     for key in reject_order:
         n = reject_counts.get(key, 0)

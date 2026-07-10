@@ -1,5 +1,27 @@
 # VinylCut Roadmap
 
+## ✓ v1.6.0 — `--no-whisper` Flag
+
+Whisper (`base`) transkribiert nicht-englische Songs unzuverlässig — viele
+Tracks landen fälschlich bei „0W kein Vokal", obwohl Gesang vorhanden ist
+(siehe z.B. Dalida "Forever", französisch). Neues Flag `--no-whisper`
+überspringt die Whisper-Verifikation komplett:
+
+- Strikter 3-Provider-Konsens (≥40% Jaccard) bleibt unverändert der Schnellweg.
+- Ohne diesen Konsens wird jetzt immer ein 2-Provider-Konsens versucht
+  (`Konsens NN% (2P)`) — vorher nur erreichbar wenn Whisper „kein Vokal" meldete.
+- Schlägt auch das fehl: Dauer-Heuristik (`_heuristic_best`) mit Reject-Schwelle
+  — Kandidaten deren Dauer-Toleranz überschritten ist werden abgelehnt
+  (`reason: "dauer-abweichung"`) statt blind geschrieben. Vorher schrieb die
+  Legacy-Heuristik immer den besten der schlechten Kandidaten.
+- Cache-Einträge mit `reason=kein-vokal`/`unter-schwelle` werden bei
+  `--no-whisper` automatisch neu geprüft, auch ohne `--force` — spart den
+  vollen Neulauf um gezielt frühere Whisper-Ablehnungen nachzuholen.
+- Modell-Preload beim Start wird übersprungen.
+
+Dient als Zwischenschritt bis eine bessere Whisper-Modellwahl (Schritt 2:
+Stichprobe der 0W-Fehlschläge, siehe „Ideen" unten) gefunden ist.
+
 ## ✓ v1.5.3 — BFS-Traversal für --recursive
 
 Bei 20000+ Dateien in hunderten Ordnern wartete das Skript auf den vollständigen
@@ -196,6 +218,14 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 ---
 
 ## Ideen (nicht geplant)
+
+### Whisper-Modell-Stichprobe (Schritt 2 nach --no-whisper)
+Tracks sammeln, bei denen Whisper eindeutig versagt hat: `method=whisper-*`,
+`words=0`/`reason=kein-vokal`, aber ≥2 Provider liefern inhaltlich ähnliche
+LRCs (Jaccard-Indiz für tatsächlich vorhandenen Gesang). Diese Stichprobe
+dient als Testset um alternative Modelle (z.B. `medium`, `large-v3`,
+sprachspezifische Modelle) gegen `base` zu vergleichen, bevor Whisper wieder
+aktiviert wird.
 
 ### Whisper-Verifikation
 Die ersten ~30 Sekunden eines Tracks via `faster-whisper` transkribieren und

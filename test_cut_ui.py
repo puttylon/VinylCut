@@ -131,6 +131,51 @@ class TestBuildCuttingPanel:
         assert "[p] 18s abspielen" in out
 
 
+TRACKS_NO_DUR = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
+
+
+class TestLastTrackLength:
+    """Letzter Track ohne dur_s/nächsten Startpunkt: Länge via total_flac_dur."""
+
+    def test_without_total_flac_dur_shows_unknown(self):
+        panel = build_cutting_panel(
+            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
+            phase="export", export_status=["✓", "✓", "✓"],
+        )
+        out = render(panel)
+        assert "?:??" in out
+
+    def test_with_total_flac_dur_shows_real_length(self):
+        panel = build_cutting_panel(
+            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
+            phase="export", export_status=["✓", "✓", "✓"],
+            total_flac_dur=300.0,
+        )
+        out = render(panel)
+        assert "0:50.00" in out  # 300.0 - 250.0
+        assert "?:??" not in out
+
+    def test_total_footer_uses_flac_dur_when_metadata_missing(self):
+        panel = build_cutting_panel(
+            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
+            phase="export", export_status=["✓", "✓", "✓"],
+            total_flac_dur=300.0,
+        )
+        out = render(panel)
+        assert "5:00.00" in out  # Gesamtdauer im Footer
+
+    def test_does_not_affect_tracks_with_known_next_start(self):
+        # Mittlerer Track (B) hat schon einen echten nächsten Startpunkt —
+        # total_flac_dur darf dessen Länge nicht verändern.
+        panel = build_cutting_panel(
+            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
+            phase="export", export_status=["✓", "✓", "✓"],
+            total_flac_dur=300.0,
+        )
+        out = render(panel)
+        assert "2:30.00" in out  # B: 250.0 - 100.0
+
+
 class TestBuildMetadataPanel:
     def test_renders_without_error(self):
         panel = build_metadata_panel("Joy Division", "Unknown Pleasures", ["Suche..."])

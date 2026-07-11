@@ -93,14 +93,18 @@ def build_cutting_panel(
     export_status: list = None,
     lrc_status: list = None,
     preview_duration: float = 3.0,
+    total_flac_dur: float = 0.0,
 ) -> Panel:
     """Baut das Haupt-Panel für Schneiden, Export und Songtext-Suche.
 
     est: vorberechneter Schätzwert für current_i (aus estimate_start in cut.py).
          Wird nur im phase='cutting'-Infoteil verwendet.
+    total_flac_dur: tatsächliche Gesamtdauer der Quelldatei (ffprobe). Dient als
+         virtueller Endpunkt, damit der letzte Track auch ohne dur_s/nächsten
+         Startpunkt eine Länge anzeigen kann (zur Absicherung).
     """
     n = len(tracks)
-    total_dur = sum(t.get("dur_s", 0.0) for t in tracks)
+    total_dur = sum(t.get("dur_s", 0.0) for t in tracks) or total_flac_dur
 
     if phase == "cutting":
         display_starts = list(confirmed_starts) + [current_pos]
@@ -111,6 +115,9 @@ def build_cutting_panel(
             display_starts.append(prev)
     else:
         display_starts = list(confirmed_starts)
+
+    if total_flac_dur and len(display_starts) == n:
+        display_starts.append(total_flac_dur)
 
     show_export = export_status is not None
     show_lrc = lrc_status is not None

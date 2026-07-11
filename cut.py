@@ -22,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.9"
+__version__ = "1.9.10"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
@@ -504,6 +504,7 @@ def main():
             ).stdout
         )
         sr = int(probe["streams"][0]["sample_rate"])
+        flac_total_dur = mf.get_flac_duration(flac_path)
 
         n = len(data["tracks"])
         progress_path = out_dir / "progress.json"
@@ -534,6 +535,7 @@ def main():
                     last_gap,
                     est,
                     preview_duration=preview_duration,
+                    total_flac_dur=flac_total_dur,
                 )
             )
             live.refresh()
@@ -556,6 +558,7 @@ def main():
                     last_gap,
                     est,
                     preview_duration=preview_duration,
+                    total_flac_dur=flac_total_dur,
                 ),
                 prompt,
             ).lower()
@@ -583,6 +586,7 @@ def main():
                 export_status,
                 lrc_status,
                 preview_duration=preview_duration,
+                total_flac_dur=flac_total_dur,
             )
 
         # --- Schneiden ---
@@ -660,21 +664,7 @@ def main():
             if idx < len(starts) - 1:
                 len_smp = round((starts[idx + 1] - starts[idx]) * sr)
             else:
-                total_dur_s = float(
-                    subprocess.check_output(
-                        [
-                            "ffprobe",
-                            "-v",
-                            "error",
-                            "-show_entries",
-                            "format=duration",
-                            "-of",
-                            "default=noprint_wrappers=1:nokey=1",
-                            str(flac_path),
-                        ]
-                    )
-                )
-                len_smp = round((total_dur_s * sr) - start_smp)
+                len_smp = round((flac_total_dur * sr) - start_smp)
             cut_and_tag(
                 flac_path,
                 track_out_dir

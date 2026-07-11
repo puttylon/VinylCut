@@ -1,5 +1,25 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.10 — Länge des letzten Tracks zur Absicherung anzeigen
+
+Wenn ein Album keine Discogs/MB-Tracklängen liefert, wird die „Länge"-Spalte
+für alle Tracks außer dem letzten aus den bestätigten Schnittpunkten
+abgeleitet (`display_starts[i+1] - display_starts[i]`) — nur der letzte Track
+hat keinen "nächsten" Punkt und zeigte bisher `?:??`, ebenso die
+Gesamtdauer im Footer.
+
+Fix: tatsächliche Dateidauer (`mf.get_flac_duration()`) wird einmal in
+`main()` ermittelt und als `total_flac_dur` an `build_cutting_panel()`
+durchgereicht. Dort als virtueller Endpunkt an `display_starts` angehängt —
+derselbe Formel berechnet jetzt auch die Länge des letzten Tracks korrekt
+(zur Absicherung, kein Datenverlust). Footer-Gesamtdauer nutzt denselben
+Wert als Fallback wenn die Summe der `dur_s`-Felder 0 ergibt. Redundanter
+zweiter `ffprobe`-Aufruf im Export-Loop entfernt (nutzt jetzt denselben Wert).
+
+4 neue Tests in test_cut_ui.py. `cut_ui.py`-Logik automatisiert getestet
+(Console-Capture); die `cut.py`-Verdrahtung (echter ffprobe-Aufruf) braucht
+noch eine manuelle Bestätigung im laufenden Programm.
+
 ## ✓ cut.py v1.9.9 — `p<Sek>` spielt nicht mehr automatisch ab
 
 Nachbesserung zu v1.9.8: `p<Sek>` änderte die Preview-Dauer, spielte dabei

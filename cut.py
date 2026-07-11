@@ -22,9 +22,10 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.6"
+__version__ = "1.9.7"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
+_MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
 
 console = Console()
 
@@ -48,6 +49,17 @@ def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float
     if "dur_s" in tracks[i - 1]:
         return starts[i - 1] + tracks[i - 1]["dur_s"] + last_gap
     return starts[i - 1]
+
+
+def compute_last_gap(current_start: float, prev_start: float, prev_dur_s: float) -> float:
+    """Abweichung zwischen bestätigtem Start und reiner Summenschätzung.
+
+    Große Abweichungen (>= _MAX_PLAUSIBLE_GAP) sind vermutlich eine falsche
+    Discogs/MB-Tracklänge, keine echte Inter-Track-Pause — werden verworfen
+    (0.0), damit sie nicht fälschlich auf Folge-Tracks weiterwirken.
+    """
+    deviation = current_start - (prev_start + prev_dur_s)
+    return deviation if abs(deviation) < _MAX_PLAUSIBLE_GAP else 0.0
 
 
 def save_progress(progress_path: Path, history: list) -> None:
@@ -588,8 +600,8 @@ def main():
                 elif action == "ok":
                     starts.append(current_start)
                     if i > 0 and "dur_s" in data["tracks"][i - 1]:
-                        last_gap = current_start - (
-                            starts[i - 1] + data["tracks"][i - 1]["dur_s"]
+                        last_gap = compute_last_gap(
+                            current_start, starts[i - 1], data["tracks"][i - 1]["dur_s"]
                         )
                     history.append({"start": current_start, "last_gap": last_gap})
                     save_progress(progress_path, history)

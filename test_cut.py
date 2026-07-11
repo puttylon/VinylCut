@@ -1,5 +1,5 @@
 import pytest
-from cut import parse_offset, estimate_start
+from cut import compute_last_gap, parse_offset, estimate_start
 from cut_ui import fmt_dur
 
 
@@ -81,3 +81,29 @@ class TestEstimateStart:
     def test_second_transition_with_dur_s(self):
         tracks = [{"title": "A", "dur_s": 100.0}, {"title": "B", "dur_s": 200.0}, {"title": "C"}]
         assert estimate_start(2, tracks, [0.0, 102.0], 2.0) == pytest.approx(304.0)
+
+
+class TestComputeLastGap:
+    def test_no_deviation_is_zero_gap(self):
+        assert compute_last_gap(current_start=100.0, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(0.0)
+
+    def test_small_positive_deviation_is_real_gap(self):
+        # 2s Pause zwischen Tracks — plausibel, wird übernommen
+        assert compute_last_gap(current_start=102.0, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(2.0)
+
+    def test_small_negative_deviation_is_real_gap(self):
+        assert compute_last_gap(current_start=99.0, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(-1.0)
+
+    def test_just_under_threshold_is_kept(self):
+        assert compute_last_gap(current_start=109.9, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(9.9)
+
+    def test_at_threshold_is_discarded(self):
+        # |deviation| == _MAX_PLAUSIBLE_GAP (10.0) fällt raus (strikt <, nicht <=)
+        assert compute_last_gap(current_start=110.0, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(0.0)
+
+    def test_large_positive_deviation_discarded_as_wrong_metadata(self):
+        # Realer Fall: Discogs-Länge um 71s falsch — keine Pause, wird verworfen
+        assert compute_last_gap(current_start=171.15, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(0.0)
+
+    def test_large_negative_deviation_discarded_too(self):
+        assert compute_last_gap(current_start=50.0, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(0.0)

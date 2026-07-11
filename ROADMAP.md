@@ -1,5 +1,20 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.7 — last_gap verwirft unplausibel große Abweichungen
+
+Bug gefunden beim manuellen Schneiden: Discogs listete für einen Track eine
+falsche Länge (Differenz zur echten Länge: 71s). Die Korrektur des
+Startpunkts wurde von `last_gap` als „gelernte Pause" interpretiert und in
+der Vorschau auf alle folgenden (noch unbestätigten) Tracks weitergereicht —
+eine einmalige Metadaten-Korrektur wurde so fälschlich zu einer dauerhaften
+Verschiebung in der Schätzung.
+
+Neue Funktion `compute_last_gap()`: Abweichungen ≥ `_MAX_PLAUSIBLE_GAP` (10s)
+gelten als falsche Metadaten-Länge, nicht als echte Inter-Track-Pause, und
+werden verworfen (`last_gap` bleibt 0.0) statt übernommen zu werden. Echte
+Pausen (typisch < 10s bei Vinyl-Mastering) werden weiterhin gelernt und
+fortgeschrieben.
+
 ## ✓ v1.7.1 — Abbruch bei fehlendem Whisper-Modell
 
 Manueller Testlauf in einer Shell ohne aktivierte `.venv` (`which python3` zeigte

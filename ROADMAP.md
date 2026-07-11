@@ -1,5 +1,14 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.9 — `p<Sek>` spielt nicht mehr automatisch ab
+
+Nachbesserung zu v1.9.8: `p<Sek>` änderte die Preview-Dauer, spielte dabei
+aber sofort das Snippet in der neuen Länge ab (Loop-Kopf spielt unconditional
+bei jedem `continue`). Jetzt überspringt ein `skip_play`-Flag den Auto-Play
+für genau eine Runde — `p<Sek>` ändert nur den Wert, `p` allein spielt weiter
+wie gewohnt ab. Manuell im laufenden Programm bestätigt (Terminalverhalten,
+pytest kann das nicht prüfen).
+
 ## ✓ cut.py v1.9.8 — Preview-Länge live per `p<Sek>` änderbar
 
 Bisher war die Snippet-Länge nur beim Start via `--preview` fix setzbar.

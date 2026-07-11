@@ -22,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.8"
+__version__ = "1.9.9"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
@@ -588,15 +588,18 @@ def main():
         # --- Schneiden ---
         while i < n:
             current_start = estimate_start(i, data["tracks"], starts, last_gap)
+            skip_play = False
 
             while True:
                 live.update(panel())
                 live.refresh()
 
-                if normton:
-                    play_snippet_with_tone(flac_path, current_start, preview_duration)
-                else:
-                    play_snippet(flac_path, current_start, preview_duration)
+                if not skip_play:
+                    if normton:
+                        play_snippet_with_tone(flac_path, current_start, preview_duration)
+                    else:
+                        play_snippet(flac_path, current_start, preview_duration)
+                skip_play = False
 
                 action = live_input(live, panel(), "> ")
 
@@ -604,6 +607,7 @@ def main():
                     continue
                 elif (new_dur := parse_preview_duration(action)) is not None:
                     preview_duration = new_dur
+                    skip_play = True
                     continue
                 elif action == "+":
                     current_start += 0.5

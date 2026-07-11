@@ -1,5 +1,40 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.15 — Fehlende Tracklängen einzeln über MB-Recordings auffüllen
+
+Vinyl-Releases bei Discogs/MB haben oft gar keine Tracklängen katalogisiert.
+Bisher: `?:??` in der Anzeige, keine Schätzungshilfe beim Schneiden. Die
+echte Länge existiert aber fast immer anderswo (CD/Digital-Ausgabe,
+MusicBrainz-Recording).
+
+Neue Funktion `fill_missing_durations()` in `fetch_metadata.py`: sucht pro
+fehlendem Track einzeln in MusicBrainz' Recording-Datenbank (die Aufnahme
+selbst, releaseübergreifend — anders als der bestehende releaseweite
+MB-Fallback). Funktioniert dadurch auch bei Compilations/Samplern, wo
+einzelne Tracks von unterschiedlichen Original-Aufnahmen stammen. Titel/
+Reihenfolge der Tracklist bleiben unverändert, nur `dur_s` wird bei
+zuverlässigem Titel-Match ergänzt.
+
+Zwei Design-Entscheidungen kamen aus Opus-Konsultationen zustande:
+1. **Quellwahl** (vor der Implementierung): MB-Recording-Suche statt
+   externer Zusatz-API (z.B. iTunes) — nutzt bestehende Infrastruktur,
+   bessere Abdeckung bei nicht-mainstream/internationalem Material.
+2. **Median statt erster Treffer** (nach Code-Review, mit echtem Bug
+   gefunden: „Bohemian Rhapsody" landete beim ersten Treffer bei 157s statt
+   ~355s — MusicBrainz' „score"-Feld unterscheidet nicht zwischen Edit/Live/
+   Studio-Varianten, alle Top-Treffer hatten Score 100). Fix: `limit=25`
+   statt 5, Median über alle titel-passenden Ergebnisse statt des ersten —
+   robust gegen einzelne kurze/lange Ausreißer.
+
+Zusätzlich: Anführungszeichen im Titel (z.B. `She Said "Yes"`) werden jetzt
+in der Lucene-Query escaped, hätten sonst die Suche unbemerkt kaputt gemacht.
+
+12 Tests in `test_fetch_metadata.py` (davon 6 neu für `fill_missing_durations`,
+inkl. Regressionstest für den Median-Bug). In beide Aufrufer verdrahtet
+(`fetch_metadata.py main()` und `cut.py run_metadata_search()`), läuft
+unconditional nach der bestehenden Release-Suche, unabhängig vom Pfad
+(Discogs-Treffer oder direkter MB-Fallback).
+
 ## ✓ cut.py v1.9.14 — Absturz bei MusicBrainz-Tracks ohne Länge behoben
 
 `KeyError: 'dur_s'` in `fetch_metadata.score_release()`, ausgelöst über den

@@ -22,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.14"
+__version__ = "1.9.15"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
@@ -340,6 +340,14 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
                         if not any(x["id"] == c["id"] for x in all_cands):
                             all_cands.append(c)
                     refresh(best_cand)
+
+    if not all(t.get("dur_s") for t in best_cand["tracks"]):
+        status.append("Fülle fehlende Tracklängen einzeln (MusicBrainz)...")
+        refresh(best_cand)
+        filled = mf.fill_missing_durations(best_cand, artist)
+        if filled:
+            status[-1] = f"✓ {filled} Tracklänge(n) ergänzt."
+            refresh(best_cand)
 
     # Interaktiver Override-Loop
     current_cand = best_cand

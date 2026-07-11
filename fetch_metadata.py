@@ -8,6 +8,7 @@ import urllib.error
 import time
 import subprocess
 import difflib
+import statistics
 import unicodedata
 import os
 from pathlib import Path
@@ -179,6 +180,54 @@ def score_release(cand, flac_total, album):
             
     return title_pen + vinyl_pen + dur_pen + missing_pen
 
+
+def fill_missing_durations(cand: dict, artist: str) -> int:
+    """Füllt fehlende Tracklängen einzeln über MusicBrainz-Recording-Suche.
+
+    Eine "Recording" (die eigentliche Aufnahme) ist in MusicBrainz vom
+    "Release" (die konkrete Pressung) getrennt und über viele Releases
+    (CD, Digital, andere Pressungen) hinweg dieselbe — hat also fast immer
+    eine Länge, selbst wenn die Vinyl-Pressung keine listet. Anders als der
+    releaseweite MB-Fallback wird hier pro Track gesucht: funktioniert auch
+    bei Compilations/Samplern, wo einzelne Tracks von unterschiedlichen
+    Original-Aufnahmen stammen. Titel und Reihenfolge der übergebenen
+    Tracklist bleiben unverändert — nur "dur_s" wird bei einem zuverlässigen
+    Titel-Match (siehe _name_matches) ergänzt, sonst bleibt der Track wie er
+    war (kein Raten).
+
+    Bekannte Recordings zu einem Titel streuen stark (Radio-Edit, Live,
+    Remaster, Coverversionen etc. landen unter demselben/ähnlichem Titel) —
+    MusicBrainz' "score" unterscheidet nicht zwischen ihnen (oft alle 100).
+    Deshalb: Median über alle titel-passenden Treffer statt des ersten —
+    robust gegen einzelne kurze/lange Ausreißer (z.B. Radio-Edits).
+
+    Gibt die Anzahl aufgefüllter Tracks zurück.
+    """
+    filled = 0
+    for t in cand["tracks"]:
+        if t.get("dur_s"):
+            continue
+        title = t.get("title", "")
+        if not title:
+            continue
+        # Anführungszeichen im Titel würden die Lucene-Query vorzeitig schließen
+        title_esc = title.replace('"', '\\"')
+        artist_esc = artist.replace('"', '\\"')
+        query = urllib.parse.quote(f'recording:"{title_esc}" AND artist:"{artist_esc}"')
+        data = _get_mb_json(f"{MB_API}/recording?query={query}&fmt=json&limit=25")
+        if not data:
+            continue
+        lengths = [
+            rec["length"] / 1000.0
+            for rec in data.get("recordings", [])
+            if rec.get("length") and _name_matches(rec.get("title", ""), title)
+        ]
+        if lengths:
+            t["dur_s"] = statistics.median(lengths)
+            filled += 1
+    return filled
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit("Nutzung: python3 metadata_fetcher.py \"Pfad/zur/Artist - Album.flac\"")
@@ -263,6 +312,12 @@ def main():
                 for c in mb_cands:
                     if not any(x["id"] == c["id"] for x in all_cands):
                         all_cands.append(c)
+
+    if not all(t.get("dur_s") for t in best_cand["tracks"]):
+        print("  Fülle fehlende Tracklängen einzeln über MusicBrainz-Recordings...")
+        filled = fill_missing_durations(best_cand, artist)
+        if filled:
+            print(f"  ✓ {filled} Tracklänge(n) ergänzt.")
 
     # --- INTERAKTIVE SCHLEIFE ---
     current_cand = best_cand

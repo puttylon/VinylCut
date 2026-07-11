@@ -1,5 +1,5 @@
 import pytest
-from cut import compute_last_gap, parse_offset, estimate_start
+from cut import compute_last_gap, parse_offset, parse_preview_duration, estimate_start
 from cut_ui import fmt_dur
 
 
@@ -107,3 +107,34 @@ class TestComputeLastGap:
 
     def test_large_negative_deviation_discarded_too(self):
         assert compute_last_gap(current_start=50.0, prev_start=0.0, prev_dur_s=100.0) == pytest.approx(0.0)
+
+
+class TestParsePreviewDuration:
+    def test_plain_p_returns_none(self):
+        assert parse_preview_duration("p") is None
+
+    def test_valid_value_in_range(self):
+        assert parse_preview_duration("p18") == pytest.approx(18.0)
+
+    def test_decimal_value(self):
+        assert parse_preview_duration("p5.5") == pytest.approx(5.5)
+
+    def test_lower_bound_inclusive(self):
+        assert parse_preview_duration("p3") == pytest.approx(3.0)
+
+    def test_upper_bound_inclusive(self):
+        assert parse_preview_duration("p30") == pytest.approx(30.0)
+
+    def test_below_minimum_ignored(self):
+        assert parse_preview_duration("p2.9") is None
+
+    def test_above_maximum_ignored(self):
+        assert parse_preview_duration("p30.1") is None
+
+    def test_non_numeric_suffix_ignored(self):
+        assert parse_preview_duration("px") is None
+
+    def test_unrelated_action_returns_none(self):
+        assert parse_preview_duration("ok") is None
+        assert parse_preview_duration("+") is None
+        assert parse_preview_duration("") is None

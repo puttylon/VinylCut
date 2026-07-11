@@ -92,6 +92,7 @@ def build_cutting_panel(
     phase: str = "cutting",
     export_status: list = None,
     lrc_status: list = None,
+    preview_duration: float = 3.0,
 ) -> Panel:
     """Baut das Haupt-Panel für Schneiden, Export und Songtext-Suche.
 
@@ -180,7 +181,8 @@ def build_cutting_panel(
             "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim"
         )
         info.append(
-            "[p] abspielen  [+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
+            f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (3-30s)  "
+            "[+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
             "[u] rückgängig  [n] Normton  Offset: ±m:ss",
             style="dim",
         )

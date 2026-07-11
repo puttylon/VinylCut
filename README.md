@@ -124,6 +124,7 @@ python3 cut.py "Artist - Album.flac" --preview 5
 | Eingabe | Aktion |
 |---------|--------|
 | `p` | Snippet nochmal abspielen |
+| `p<Sek>` | Snippet-Länge für den Rest des Laufs ändern (z.B. `p18` → 18s). Nur 3–30s gültig, außerhalb wird die Eingabe ignoriert |
 | `+` / `-` | ±0,5 Sekunden |
 | `++` / `--` | ±2 Sekunden |
 | `ok` | Startpunkt bestätigen, nächster Track |

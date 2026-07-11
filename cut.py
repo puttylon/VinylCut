@@ -22,10 +22,12 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.7"
+__version__ = "1.9.8"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
+_MIN_PREVIEW_SEC = 3.0  # Untergrenze für "p<Sek>" (Bedienfehler-Schutz)
+_MAX_PREVIEW_SEC = 30.0  # Obergrenze für "p<Sek>"
 
 console = Console()
 
@@ -49,6 +51,24 @@ def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float
     if "dur_s" in tracks[i - 1]:
         return starts[i - 1] + tracks[i - 1]["dur_s"] + last_gap
     return starts[i - 1]
+
+
+def parse_preview_duration(action: str) -> float | None:
+    """Parst 'p<Sek>' (z.B. 'p18') zur Änderung der Preview-Dauer.
+
+    Gibt None zurück wenn kein p<Zahl>-Muster vorliegt oder der Wert
+    außerhalb [_MIN_PREVIEW_SEC, _MAX_PREVIEW_SEC] liegt — die Eingabe wird
+    dann komplett ignoriert (Bedienfehler-Schutz), nicht auf die Grenze geklemmt.
+    """
+    if not (action.startswith("p") and action[1:]):
+        return None
+    try:
+        new_dur = float(action[1:])
+    except ValueError:
+        return None
+    if _MIN_PREVIEW_SEC <= new_dur <= _MAX_PREVIEW_SEC:
+        return new_dur
+    return None
 
 
 def compute_last_gap(current_start: float, prev_start: float, prev_dur_s: float) -> float:
@@ -513,6 +533,7 @@ def main():
                     normton,
                     last_gap,
                     est,
+                    preview_duration=preview_duration,
                 )
             )
             live.refresh()
@@ -534,6 +555,7 @@ def main():
                     True,
                     last_gap,
                     est,
+                    preview_duration=preview_duration,
                 ),
                 prompt,
             ).lower()
@@ -560,6 +582,7 @@ def main():
                 phase,
                 export_status,
                 lrc_status,
+                preview_duration=preview_duration,
             )
 
         # --- Schneiden ---
@@ -578,6 +601,9 @@ def main():
                 action = live_input(live, panel(), "> ")
 
                 if action == "p":
+                    continue
+                elif (new_dur := parse_preview_duration(action)) is not None:
+                    preview_duration = new_dur
                     continue
                 elif action == "+":
                     current_start += 0.5

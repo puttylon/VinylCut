@@ -1,5 +1,18 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.8 — Preview-Länge live per `p<Sek>` änderbar
+
+Bisher war die Snippet-Länge nur beim Start via `--preview` fix setzbar.
+Neuer Befehl `p<Sek>` (z.B. `p18`) ändert sie während des Laufs, für alle
+folgenden Previews. Feste Grenzen 3–30s (`_MIN_PREVIEW_SEC`/`_MAX_PREVIEW_SEC`)
+als Bedienfehler-Schutz — außerhalb wird die Eingabe komplett ignoriert statt
+geklemmt. `p` ohne Zahl spielt weiterhin unverändert ab.
+
+Neue Funktion `parse_preview_duration()` (testbar, analog `compute_last_gap`).
+`build_cutting_panel()` bekommt `preview_duration` als neuen Keyword-Parameter
+(Default 3.0, bestehende Aufrufe unbetroffen) und zeigt sie in der Steuerzeile
+an: `[p] 18s abspielen` statt statisch `[p] abspielen`.
+
 ## ✓ cut.py v1.9.7 — last_gap verwirft unplausibel große Abweichungen
 
 Bug gefunden beim manuellen Schneiden: Discogs listete für einen Track eine

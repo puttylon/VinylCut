@@ -118,6 +118,18 @@ class TestBuildCuttingPanel:
         out = render(panel)
         assert "Unknown" in out
 
+    def test_default_preview_duration_shown(self):
+        panel = build_cutting_panel("A", "B", TRACKS, [], 0, 0.0, True, 0.0)
+        out = render(panel)
+        assert "[p] 3s abspielen" in out
+
+    def test_custom_preview_duration_shown(self):
+        panel = build_cutting_panel(
+            "A", "B", TRACKS, [], 0, 0.0, True, 0.0, preview_duration=18.0
+        )
+        out = render(panel)
+        assert "[p] 18s abspielen" in out
+
 
 class TestBuildMetadataPanel:
     def test_renders_without_error(self):

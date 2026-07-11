@@ -4,12 +4,13 @@ import re
 import os
 import json
 import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -44,7 +45,7 @@ _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluz
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_MIN_VERSION = (
-    "1.7.0"  # v1.7.0: base+VAD-Probe entfernt — alle älteren Einträge neu prüfen
+    "1.7.1"  # v1.7.1: Abbruch-Check bei fehlendem Whisper-Modell — alle Einträge neu prüfen
 )
 
 # Genres die keinen Songtext haben — Substring-Matching (Kleinschreibung)
@@ -864,7 +865,17 @@ def main() -> None:
 
     env = _load_env()
     if not args.no_whisper:
-        _get_whisper_model(_WHISPER_MODEL)  # vorladen — Meldung vor Track-Liste
+        if _get_whisper_model(_WHISPER_MODEL) is None:  # vorladen — Meldung vor Track-Liste
+            print(
+                f"FEHLER: faster-whisper nicht verfügbar — Modell '{_WHISPER_MODEL}' konnte "
+                "nicht geladen werden.\n"
+                "Läuft dieses Python in der .venv? ('which python3' sollte auf "
+                ".venv/bin/python3 zeigen, source .venv/bin/activate falls nicht.)\n"
+                "Ohne Whisper würden alle Nicht-Konsens-Tracks fälschlich als "
+                "'kein Vokal' verworfen. Abbruch — mit --no-whisper lässt sich ohne "
+                "Whisper-Verifikation fortfahren."
+            )
+            sys.exit(1)
     updated = skipped = not_found = errors = genre_skipped = no_tags = 0
 
     current_parent: Path | None = None

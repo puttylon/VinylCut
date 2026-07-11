@@ -1,5 +1,20 @@
 # VinylCut Roadmap
 
+## ✓ v1.7.1 — Abbruch bei fehlendem Whisper-Modell
+
+Manueller Testlauf in einer Shell ohne aktivierte `.venv` (`which python3` zeigte
+auf `/opt/homebrew/bin/python3` statt `.venv/bin/python3`): `faster-whisper` war
+nicht importierbar, `_get_whisper_model()` gab still `None` zurück — jeder
+Track ohne Provider-Konsens landete fälschlich bei „kein Vokal", ganz ohne
+Fehlermeldung (z.B. Rheingold „Dreiklangsdimensionen" erneut falsch verworfen,
+obwohl `small` das eigentlich löst).
+
+Neuer Hard-Check direkt nach dem Modell-Preload in `main()`: Ist Whisper aktiv
+(kein `--no-whisper`) und `_get_whisper_model()` liefert `None`, bricht das
+Skript sofort mit klarer Fehlermeldung und Exit-Code 1 ab, statt stillschweigend
+falsche Ergebnisse zu produzieren. `_CACHE_MIN_VERSION` auf `1.7.1` angehoben —
+der fehlerhafte Lauf könnte falsche Cache-Einträge geschrieben haben.
+
 ## ✓ v1.7.0 — `base` und VAD-Probe entfernt, nur noch `small`
 
 Untersuchung (Stichprobe via `whisper_sample.py`/`whisper_model_test.py`, siehe

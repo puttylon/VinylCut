@@ -1,5 +1,29 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.16 — Cover-Download läuft im Hintergrund
+
+Unerklärlicher „Hänger" direkt nach dem Akzeptieren der Metadaten
+(`[Enter] Akzeptieren...`) gemeldet und aufgeklärt: Nach der Annahme lud
+`run_metadata_search()` synchron das Cover — dabei wurden **alle** gefundenen
+Kandidaten (bis zu 20) neu nach Vinyl/Popularität sortiert und der Reihe
+nach probiert, bis einer klappt, mit 20s Timeout **pro Versuch** und ohne
+jede Bildschirm-Rückmeldung während der Schleife. Ein einzelner langsamer/
+kaputter Discogs-Bild-Link (mit echten Daten verifiziert: ein einzelner
+Cover-Download brauchte teils 3s, teils 12s) reichte für einen spürbaren,
+unerklärten Stillstand.
+
+Fix: `_download_cover()` läuft jetzt in einem Hintergrund-Thread
+(`threading.Thread(daemon=True)`), gestartet direkt nach der Metadaten-
+Annahme — der interaktive Ablauf blockiert nicht mehr. Kurz vor dem Export
+wird der Thread mit `join(timeout=20)` eingeholt, damit das Cover beim
+FLAC-Tagging sicher bereit ist (im Normalfall längst der Fall, da das
+Schneiden aller Tracks meist mehrere Minuten dauert). `run_metadata_search()`
+gibt jetzt `(data, cover_thread)` zurück statt nur `data`.
+
+Mit echtem Download-Thread verifiziert: Thread startet in 0.000s, Programm
+blockiert nicht — der eigentliche Download lief im Hintergrund weiter
+(einmal sogar 12,3s), unbemerkt statt als Hänger.
+
 ## ✓ cut.py v1.9.15 — Fehlende Tracklängen einzeln über MB-Recordings auffüllen
 
 Vinyl-Releases bei Discogs/MB haben oft gar keine Tracklängen katalogisiert.

@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +24,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.15"
+__version__ = "1.9.16"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
@@ -179,7 +181,35 @@ def cut_and_tag(
         )
 
 
-def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dict:
+def _download_cover(cover_candidates: list, out_dir: Path) -> None:
+    """Lädt das Cover vom ersten Kandidaten mit erreichbarer cover_url.
+
+    Läuft in einem Hintergrund-Thread (siehe run_metadata_search) — blockiert
+    die Metadaten-Annahme nicht mehr, ein einzelner Discogs-Kandidat mit
+    langsamer/kaputter Bild-URL soll den interaktiven Ablauf nicht bis zu
+    20s lang ohne jede Rückmeldung einfrieren. cut_and_tag() prüft vor dem
+    Einbetten ob die Datei existiert — ein Fehlschlag hier ist unkritisch,
+    die FLACs werden dann einfach ohne Cover getaggt.
+    """
+    for c in cover_candidates:
+        if not c.get("cover_url"):
+            continue
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    c["cover_url"], headers={"User-Agent": mf.DISCOGS_UA}
+                ),
+                timeout=20,
+            ) as r:
+                (out_dir / "cover.jpg").write_bytes(r.read())
+            return
+        except Exception:
+            continue
+
+
+def run_metadata_search(
+    live, flac_path: Path, out_dir: Path, token: str
+) -> tuple[dict, threading.Thread]:
     stem = flac_path.stem
     artist, album = stem.split(" - ", 1) if " - " in stem else ("Unknown", stem)
     status: list[str] = []
@@ -203,7 +233,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
             "Gespeicherte Metadaten verwenden? [j/N]: ",
         )
         if ans.lower() == "j":
-            return saved
+            return saved, None  # Cover kam bereits in einem früheren Lauf, kein Thread nötig
 
     # Frische Suche gewünscht (oder keine release.json vorhanden) — ein alter
     # Fortschritt passt zu neuen Metadaten nicht mehr zuverlässig zusammen.
@@ -215,7 +245,6 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
 
     # Discogs search
     import urllib.parse
-    import urllib.request
 
     results = []
     for page in range(1, 3):
@@ -393,27 +422,17 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
             ensure_ascii=False,
         )
 
-    # Cover herunterladen
+    # Cover im Hintergrund laden — blockiert die Metadaten-Annahme nicht mehr
+    # (ein langsamer/kaputter Discogs-Bild-Link konnte bis zu 20s ohne jede
+    # Rückmeldung "einfrieren"). cover_thread wird kurz vor dem Export
+    # eingeholt, damit das Cover beim Taggen sicher fertig ist.
     cover_sorted = sorted(
         all_cands, key=lambda c: (0 if c["is_vinyl"] else 1, -c["community_have"])
     )
-    for c in cover_sorted:
-        if not c.get("cover_url"):
-            continue
-        try:
-            with urllib.request.urlopen(
-                urllib.request.Request(
-                    c["cover_url"], headers={"User-Agent": mf.DISCOGS_UA}
-                ),
-                timeout=20,
-            ) as r:
-                (out_dir / "cover.jpg").write_bytes(r.read())
-                status.append("✓ Cover gespeichert.")
-            break
-        except Exception:
-            continue
-    else:
-        status.append("⚠ Cover-Download fehlgeschlagen.")
+    cover_thread = threading.Thread(
+        target=_download_cover, args=(cover_sorted, out_dir), daemon=True
+    )
+    cover_thread.start()
 
     refresh(current_cand)
     return {
@@ -421,7 +440,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
         "album": album,
         "release_id": best_cand["id"],
         "tracks": best_cand["tracks"],
-    }
+    }, cover_thread
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +513,7 @@ def main():
 
     with Live(console=console, screen=True, auto_refresh=False) as live:
         # --- Metadaten ---
-        data = run_metadata_search(live, flac_path, out_dir, token)
+        data, cover_thread = run_metadata_search(live, flac_path, out_dir, token)
 
         # FLAC-Samplerate
         probe = json.loads(
@@ -672,6 +691,11 @@ def main():
                 no_songtext = True
 
         # --- Export ---
+        # Cover-Download einholen falls noch nicht fertig (im Normalfall längst
+        # abgeschlossen, da das Schneiden aller Tracks meist Minuten dauert).
+        if cover_thread is not None:
+            cover_thread.join(timeout=20)
+
         export_status = [""] * n
         for idx, track in enumerate(data["tracks"]):
             live.update(panel("export", export_status))

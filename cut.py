@@ -22,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.11"
+__version__ = "1.9.12"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
@@ -200,7 +200,7 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
         ans = live_input(
             live,
             build_metadata_panel(artist, album, status),
-            "Gespeicherte Metadaten verwenden? [j/n]: ",
+            "Gespeicherte Metadaten verwenden? [j/N]: ",
         )
         if ans.lower() == "j":
             return saved
@@ -549,10 +549,10 @@ def main():
             live.refresh()
             if i >= n:
                 prompt = (
-                    f"Alle {n} Tracks bestätigt, Export fehlt noch. Fortsetzen? [j/n]: "
+                    f"Alle {n} Tracks bestätigt, Export fehlt noch. Fortsetzen? [j/N]: "
                 )
             else:
-                prompt = f"Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/n]: "
+                prompt = f"Fortschritt gefunden ({i}/{n} Tracks). Fortsetzen? [j/N]: "
             ans = live_input(
                 live,
                 build_cutting_panel(
@@ -658,7 +658,7 @@ def main():
         # --- Songtexte vorab fragen ---
         if not no_songtext:
             ans = live_input(
-                live, panel("export", ["✓"] * n), "Songtexte suchen? [j/n]: "
+                live, panel("export", ["✓"] * n), "Songtexte suchen? [j/N]: "
             )
             if ans.lower() != "j":
                 no_songtext = True

@@ -36,13 +36,13 @@ def build_metadata_panel(
 
     status_text = Text()
     for line in status_lines[-8:]:
-        status_text.append(line + "\n", style="dim")
+        status_text.append(line + "\n", style="grey35")
     parts.append(status_text)
 
     if error:
         parts.append(Text(f"\n✗ {error}", style="bold red"))
     elif candidate:
-        parts.append(Rule(style="dim"))
+        parts.append(Rule(style="grey35"))
 
         cid = candidate["id"]
         source = (
@@ -52,7 +52,7 @@ def build_metadata_panel(
         )
         info = Text()
         info.append(f"{candidate['title']}\n", style="bold")
-        info.append(f"Format: {candidate['format']}   Quelle: {source}\n", style="dim")
+        info.append(f"Format: {candidate['format']}   Quelle: {source}\n", style="grey35")
         parts.append(info)
 
         table = Table(
@@ -62,9 +62,9 @@ def build_metadata_panel(
             padding=(0, 1),
             show_edge=False,
         )
-        table.add_column("#", width=3, justify="right", style="dim")
+        table.add_column("#", width=3, justify="right", style="grey35")
         table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
-        table.add_column("Länge", width=7, justify="right", style="dim")
+        table.add_column("Länge", width=7, justify="right", style="grey35")
         for idx, t in enumerate(candidate["tracks"], 1):
             dur = fmt_dur(t["dur_s"]) if t.get("dur_s") else "?:??"
             table.add_row(f"{idx:02d}", t["title"], dur)
@@ -73,7 +73,7 @@ def build_metadata_panel(
     return Panel(
         Group(*parts),
         title=f"[bold]{artist} · {album}[/bold]",
-        subtitle="[dim]Metadatensuche[/dim]",
+        subtitle="[grey35]Metadatensuche[/grey35]",
         expand=True,
         border_style="blue dim",
     )
@@ -147,7 +147,7 @@ def build_cutting_panel(
         if phase != "cutting" or i < current_i:
             start_text = Text(fmt_dur(start_val))
             status_sym = Text("✓", style="green")
-            row_style = "dim"
+            row_style = "grey35"
         elif i == current_i:
             start_text = Text(fmt_dur(start_val), style="bold")
             status_sym = Text("→", style="bold cyan")
@@ -155,18 +155,18 @@ def build_cutting_panel(
         else:
             start_text = Text("~" + fmt_dur(start_val))
             status_sym = Text("○", style="dim yellow")
-            row_style = "dim"
+            row_style = "grey35"
 
         row = [f"{i + 1:02d}", track["title"], dur_str, start_text, status_sym]
         if show_export:
             exp = export_status[i] if i < len(export_status) else ""
-            row.append(Text(exp, style="green" if exp == "✓" else "dim"))
+            row.append(Text(exp, style="green" if exp == "✓" else "grey35"))
         if show_lrc:
             lrc = lrc_status[i] if i < len(lrc_status) else ""
             row.append(
                 Text(
                     lrc,
-                    style="green" if lrc == "✓" else ("red" if lrc == "✗" else "dim"),
+                    style="green" if lrc == "✓" else ("red" if lrc == "✗" else "grey35"),
                 )
             )
         table.add_row(*row, style=row_style)
@@ -183,15 +183,15 @@ def build_cutting_panel(
         )
         info.append(f"Position: {fmt_dur(current_pos)}   Schätzung: {fmt_dur(est)}   ")
         info.append(f"Δ {delta:+.2f}s\n", style=delta_style)
-        info.append("Normton: ", style="dim")
+        info.append("Normton: ", style="grey35")
         info.append(
-            "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim"
+            "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "grey35"
         )
         info.append(
             f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (3-30s)  "
             "[+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
             "[u] rückgängig  [n] Normton  Offset: ±m:ss",
-            style="dim",
+            style="grey35",
         )
     elif phase == "export":
         done = sum(1 for s in (export_status or []) if s == "✓")
@@ -199,7 +199,7 @@ def build_cutting_panel(
         info.append(f"Exportiere Tracks: {done}/{n}\n", style="bold")
         info.append(
             "✓ Abgeschlossen." if done == n else "Bitte warten...",
-            style="green" if done == n else "dim",
+            style="green" if done == n else "grey35",
         )
     elif phase == "songtext":
         found = sum(1 for s in (lrc_status or []) if s == "✓")
@@ -208,7 +208,7 @@ def build_cutting_panel(
         info = Text()
         info.append(f"Suche Songtexte: {checked}/{n}\n", style="bold")
         if checked == 0:
-            info.append("Bitte warten...", style="dim")
+            info.append("Bitte warten...", style="grey35")
         else:
             info.append(
                 f"✓ {found} gefunden, {missing} nicht gefunden.",
@@ -219,9 +219,9 @@ def build_cutting_panel(
 
     total_str = fmt_dur(total_dur) if total_dur else "?:??"
     return Panel(
-        Group(table, Rule(style="dim"), info),
+        Group(table, Rule(style="grey35"), info),
         title=f"[bold]{artist} · {album}[/bold]",
-        subtitle=f"[dim]{n} Tracks · {total_str}[/dim]",
+        subtitle=f"[grey35]{n} Tracks · {total_str}[/grey35]",
         expand=True,
         border_style="blue dim",
     )
@@ -239,10 +239,10 @@ def live_input(live: Live, renderable, prompt: str = "") -> str:
 
     def _render():
         inp = Text()
-        inp.append(f"  {prompt}", style="dim")
+        inp.append(f"  {prompt}", style="grey35")
         inp.append("".join(chars), style="bold")
-        inp.append("▌", style="dim")
-        return Group(renderable, Rule(style="dim"), inp, Text(""))
+        inp.append("▌", style="grey35")
+        return Group(renderable, Rule(style="grey35"), inp, Text(""))
 
     try:
         tty.setcbreak(fd)

@@ -1,5 +1,20 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.12 — Standard-Antwort bei j/n-Fragen erkennbar, besserer Kontrast
+
+Zwei UI-Verbesserungen (Screenshot-Feedback: helles Terminal-Theme, grauer
+Text auf Weiß kaum lesbar):
+
+- Alle vier `[j/n]`-Abfragen (Metadaten übernehmen, Fortsetzen, Songtexte
+  suchen) zeigen jetzt `[j/N]` — großes N markiert die Standard-Antwort bei
+  bloßem Enter (leere Eingabe zählt überall als „nein", das war schon vorher
+  so, nur nicht sichtbar).
+- `style="dim"` (Rich-ANSI-„faint"-Attribut, Helligkeit hängt vom Terminal
+  ab) in `cut_ui.py` durchgängig durch `style="grey35"` ersetzt — eine feste,
+  terminal-unabhängige Farbe mit deutlich besserem Kontrast auf hellem
+  Hintergrund. `"dim yellow"` (Pending-Symbol ○) bewusst unverändert
+  gelassen, das ist eine andere Farbsemantik.
+
 ## ✓ cut.py v1.9.11 — Absturz bei inkonsistentem progress.json/release.json behoben
 
 Realer Absturz beim Fortsetzen einer Session: `IndexError: list index out of

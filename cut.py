@@ -22,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.10"
+__version__ = "1.9.11"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
@@ -204,6 +204,10 @@ def run_metadata_search(live, flac_path: Path, out_dir: Path, token: str) -> dic
         )
         if ans.lower() == "j":
             return saved
+
+    # Frische Suche gewünscht (oder keine release.json vorhanden) — ein alter
+    # Fortschritt passt zu neuen Metadaten nicht mehr zuverlässig zusammen.
+    (out_dir / "progress.json").unlink(missing_ok=True)
 
     flac_total = mf.get_flac_duration(flac_path)
     status.append(f"Dateidauer: {flac_total / 60:.1f} min — suche Discogs...")
@@ -522,14 +526,18 @@ def main():
             starts = [h["start"] for h in history]
             last_gap = history[-1]["last_gap"] if history else 0.0
             i = len(starts)
-            est = estimate_start(i, data["tracks"], starts, last_gap)
+            # i kann > n sein wenn progress.json zu einer anderen Metadaten-Auswahl
+            # gehört (mehr/weniger Tracks) — für Panel/Schätzung klammern, sonst
+            # IndexError. starts bleibt unverändert, "n" bei der Frage unten löscht
+            # progress.json ohnehin komplett.
+            est = estimate_start(min(i, n), data["tracks"], starts, last_gap)
             live.update(
                 build_cutting_panel(
                     data["artist"],
                     data["album"],
                     data["tracks"],
                     starts,
-                    i,
+                    min(i, n - 1),
                     est,
                     normton,
                     last_gap,
@@ -562,7 +570,7 @@ def main():
                 ),
                 prompt,
             ).lower()
-            if ans != "j":
+            if ans != "j" or i > n:
                 history, starts, last_gap, i = [], [], 0.0, 0
                 progress_path.unlink()
 

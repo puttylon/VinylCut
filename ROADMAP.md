@@ -1,5 +1,36 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.11 — Absturz bei inkonsistentem progress.json/release.json behoben
+
+Realer Absturz beim Fortsetzen einer Session: `IndexError: list index out of
+range` in `estimate_start()`, weil `progress.json` mehr bestätigte Tracks
+(15) enthielt als `release.json` aktuell Tracks hat (11) — release.json und
+progress.json werden unabhängig geladen und können auseinanderlaufen (z.B.
+wenn zwischen zwei Läufen ein anderer Metadaten-Kandidat gewählt wurde).
+
+Zwei Fixes, root cause + Absicherung:
+
+1. **Root cause behoben:** `run_metadata_search()` löscht `progress.json`
+   automatisch, sobald eine frische Metadaten-Suche stattfindet (keine
+   release.json vorhanden, oder „Gespeicherte Metadaten verwenden?" mit „n"
+   beantwortet). Danach gibt es keine alten JSON-Daten mehr, die zu den neuen
+   Metadaten passen müssten — einfach die neuen Suchergebnisse nutzen.
+2. **Absicherung:** Der `i`-Index (Anzahl bestätigter Tracks) wird beim
+   Aufbau des Fortsetzen-Vorschau-Panels konsequent auf `min(i, n)` bzw.
+   `min(i, n-1)` geklammert, statt roh in `estimate_start()`/
+   `build_cutting_panel()` zu laufen. Ist `i > n` trotzdem noch der Fall
+   (z.B. bei manuell bearbeiteten Dateien), wird `progress.json` beim
+   Fortsetzen-Prompt unconditional verworfen (`ans != "j" or i > n"`), auch
+   bei versehentlichem „j".
+
+Von einer Opus-Instanz gegengeprüft: Absicherung vollständig (kein
+Absturzpfad übersehen), keine Regression in den vorherigen Fixes (v1.9.7–
+v1.9.10). Ein Restfall bleibt bewusst unbehandelt: `i < n` (weniger
+bestätigte Tracks als aktuelle Metadaten) wird mangels Erkennbarkeit
+weiterhin stillschweigend fortgesetzt — durch Fix 1 (progress.json wird bei
+jeder frischen Suche gelöscht) tritt dieser Fall in der Praxis aber nicht
+mehr auf.
+
 ## ✓ cut.py v1.9.10 — Länge des letzten Tracks zur Absicherung anzeigen
 
 Wenn ein Album keine Discogs/MB-Tracklängen liefert, wird die „Länge"-Spalte

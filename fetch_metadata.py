@@ -159,7 +159,9 @@ def search_musicbrainz(artist: str, album: str, flac_total: float, max_results: 
 
 
 def score_release(cand, flac_total, album):
-    cand_durs = [t["dur_s"] for t in cand["tracks"]]
+    # MusicBrainz-Tracks haben "dur_s" nur wenn eine Länge geliefert wurde
+    # (Key fehlt sonst komplett, anders als bei Discogs-Tracks) — .get() statt [].
+    cand_durs = [t.get("dur_s") for t in cand["tracks"]]
     have_durs = [d for d in cand_durs if d]
     
     title_pen = 0.0 if _norm_title(cand.get("title", "")) == _norm_title(album) else 100.0

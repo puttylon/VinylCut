@@ -1,5 +1,18 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.14 — Absturz bei MusicBrainz-Tracks ohne Länge behoben
+
+`KeyError: 'dur_s'` in `fetch_metadata.score_release()`, ausgelöst über den
+MusicBrainz-Fallback in `run_metadata_search()` (greift wenn Discogs keine
+Tracklängen liefert). Ursache: `fetch_musicbrainz_by_id()` setzt den Key
+`dur_s` nur, wenn MB tatsächlich eine `length` liefert — fehlt sie, fehlt der
+Key komplett (nicht `None`). Discogs-Tracks haben den Key dagegen immer
+(`fetch_discogs_by_id()` setzt ihn unconditional). `score_release()` griff
+mit `t["dur_s"]` direkt zu statt mit `.get()` — Fix ist eine Zeile.
+
+Neue Testdatei `test_fetch_metadata.py` (bisher keine vorhanden) mit 4 Tests
+für `score_release()`, inkl. Regressionstest für den fehlenden Key.
+
 ## ✓ cut.py v1.9.13 — „Länge"-Spalte bei zweistelligen Minuten nicht mehr abgeschnitten
 
 `width=7` reichte für „M:SS.SS" (7 Zeichen, z.B. `7:40.00`), aber ab 10

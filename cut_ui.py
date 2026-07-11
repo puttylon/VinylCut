@@ -188,7 +188,7 @@ def build_cutting_panel(
             "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "grey35"
         )
         info.append(
-            f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (3-30s)  "
+            f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (2-30s)  "
             "[+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
             "[u] rückgängig  [n] Normton  Offset: ±m:ss",
             style="grey35",

@@ -120,13 +120,13 @@ class TestParsePreviewDuration:
         assert parse_preview_duration("p5.5") == pytest.approx(5.5)
 
     def test_lower_bound_inclusive(self):
-        assert parse_preview_duration("p3") == pytest.approx(3.0)
+        assert parse_preview_duration("p2") == pytest.approx(2.0)
 
     def test_upper_bound_inclusive(self):
         assert parse_preview_duration("p30") == pytest.approx(30.0)
 
     def test_below_minimum_ignored(self):
-        assert parse_preview_duration("p2.9") is None
+        assert parse_preview_duration("p1.9") is None
 
     def test_above_maximum_ignored(self):
         assert parse_preview_duration("p30.1") is None

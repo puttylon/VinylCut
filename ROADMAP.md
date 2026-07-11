@@ -1,5 +1,9 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.17 — Minimum für `p<Sek>` auf 2s gesenkt
+
+`_MIN_PREVIEW_SEC` von 3s auf 2s. Grenzen jetzt 2–30s statt 3–30s.
+
 ## ✓ cut.py v1.9.16 — Cover-Download läuft im Hintergrund
 
 Unerklärlicher „Hänger" direkt nach dem Akzeptieren der Metadaten

@@ -64,7 +64,7 @@ def build_metadata_panel(
         )
         table.add_column("#", width=3, justify="right", style="grey35")
         table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
-        table.add_column("Länge", width=7, justify="right", style="grey35")
+        table.add_column("Länge", width=8, justify="right", style="grey35")
         for idx, t in enumerate(candidate["tracks"], 1):
             dur = fmt_dur(t["dur_s"]) if t.get("dur_s") else "?:??"
             table.add_row(f"{idx:02d}", t["title"], dur)
@@ -127,7 +127,7 @@ def build_cutting_panel(
     )
     table.add_column("#", width=3, justify="right")
     table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
-    table.add_column("Länge", width=7, justify="right")
+    table.add_column("Länge", width=8, justify="right")
     table.add_column("Start", width=10, justify="right")
     table.add_column("", width=2, justify="center")
     if show_export:

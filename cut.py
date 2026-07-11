@@ -22,7 +22,7 @@ from fetch_songtext import (
 )
 from fetch_songtext import __version__ as _fetch_songtext_version
 
-__version__ = "1.9.12"
+__version__ = "1.9.13"
 
 DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause

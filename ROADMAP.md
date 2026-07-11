@@ -1,5 +1,13 @@
 # VinylCut Roadmap
 
+## ✓ cut.py v1.9.13 — „Länge"-Spalte bei zweistelligen Minuten nicht mehr abgeschnitten
+
+`width=7` reichte für „M:SS.SS" (7 Zeichen, z.B. `7:40.00`), aber ab 10
+Minuten wird's „MM:SS.SS" (8 Zeichen, z.B. `11:10.00`) — wurde mit „…"
+abgeschnitten und war unlesbar (Jean-Michel Jarre „Oxygène (Part V)",
+11:10). Betraf beide Track-Tabellen (Metadaten-Vorschau und Haupt-Panel).
+Spaltenbreite auf 8 erhöht, 2 neue Tests.
+
 ## ✓ cut.py v1.9.12 — Standard-Antwort bei j/n-Fragen erkennbar, besserer Kontrast
 
 Zwei UI-Verbesserungen (Screenshot-Feedback: helles Terminal-Theme, grauer

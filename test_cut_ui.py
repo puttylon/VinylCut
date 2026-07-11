@@ -98,6 +98,13 @@ class TestBuildCuttingPanel:
         out = render(panel)
         assert "3 Tracks" in out
 
+    def test_double_digit_minutes_not_truncated(self):
+        tracks = [{"title": "Long Track", "dur_s": 670.0}, {"title": "Next"}]
+        panel = build_cutting_panel("A", "B", tracks, [], 0, 0.0, True, 0.0)
+        out = render(panel)
+        assert "11:10.00" in out
+        assert "…" not in out
+
     def test_normton_ein_shown(self):
         panel = build_cutting_panel(
             "A", "B", TRACKS, [], 0, 0.0, normton=True, last_gap=0.0
@@ -206,6 +213,19 @@ class TestBuildMetadataPanel:
         out = render(panel)
         assert "Unknown Pleasures" in out
         assert "Disorder" in out
+
+    def test_double_digit_minutes_not_truncated(self):
+        # 11:10.00 (8 Zeichen) darf nicht auf "…" abgeschnitten werden (width=7 tat das)
+        cand = {
+            "id": "1",
+            "title": "Oxygène",
+            "format": "Vinyl",
+            "tracks": [{"title": "Oxygène (Part V)", "dur_s": 670.0}],
+        }
+        panel = build_metadata_panel("Jean-Michel Jarre", "Oxygene", [], candidate=cand)
+        out = render(panel)
+        assert "11:10.00" in out
+        assert "…" not in out
 
     def test_candidate_without_duration(self):
         cand = {

@@ -259,6 +259,15 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 
 ## Ideen (nicht geplant)
 
+### Dauer-Vergleich small vs. medium (pro Schritt, nicht nur Modell-Laufzeit)
+Für eine ausgewählte Trackliste die Dauer **jedes einzelnen Schritts** der
+Whisper-Verifikation messen und small gegen medium vergleichen — nicht nur die
+reine Transkriptionszeit des Modells, sondern die **Gesamtdauer der Bewertung**
+pro Track (Provider-Abfragen, ffprobe/Dauer-Ermittlung, Transkription, Scoring
+— jeder Schritt einzeln gestoppt). Kernfrage: Wie wirkt sich ein Modellwechsel
+small→medium auf die Gesamtdauer eines kompletten Bibliotheks-Durchlaufs aus,
+nicht nur auf die Modell-Laufzeit isoliert betrachtet?
+
 ### Whisper-Modell-Stichprobe — erledigt, siehe v1.7.0
 Umgesetzt (temporär): `whisper_sample.py` (Cache nach `kein-vokal`-Ablehnungen
 mit Provider-Konsens-Bestätigung durchsuchen) und `whisper_model_test.py`

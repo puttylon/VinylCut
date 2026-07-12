@@ -1,5 +1,38 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.7.2 — Unicode-Normalisierung der Cache-Schlüssel (NFC/NFD)
+
+Bug gemeldet: Ein Track, der bereits mit v1.7.1 verarbeitet worden war,
+wurde bei einem erneuten `--recursive`-Lauf trotzdem nochmal geprüft — und
+danach stand der Eintrag doppelt in der `.fetch_songtext.json`. Kein
+Versions-Mismatch (alle Einträge waren bereits `v=1.7.1`), sondern Unicode:
+Dateien wurden zuerst lokal geschrieben, dann auf die SMB-NAS gespielt.
+macOS/SMB liefert Dateinamen mit ä/ö/ü dabei nicht garantiert in derselben
+Normalisierungsform zurück — NFC (ü als ein Zeichen) vs. NFD (u + separater
+Kombinationsakzent). Zwei Strings, die identisch aussehen, aber
+byte-verschieden sind — für `dict`/JSON-Keys zwei komplett getrennte
+Einträge. Der Cache-Lookup fand den alten Eintrag nicht, verarbeitete den
+Track neu und schrieb einen zweiten Eintrag daneben.
+
+Fix: `_load_cache()` normalisiert alle geladenen Schlüssel auf NFC; bei
+einer Kollision (gleicher Name, unterschiedliche Normalisierung) gewinnt der
+Eintrag mit dem neueren `"ts"`. Der Cache-Schlüssel im Hauptlauf wird
+ebenfalls vorab auf NFC normalisiert. Von Opus im Review zusätzlich
+gefunden: derselbe Bug lauerte in `_load_release()` beim Abgleich von
+Tracktiteln aus `release.json` gegen den Dateinamen-Stem — ebenfalls
+gefixt.
+
+Da alte Cache-Einträge dadurch nicht ungültig werden (nur die Schlüssel
+werden vereinheitlicht), bleibt `_CACHE_MIN_VERSION` unverändert — kein
+erzwungenes Neu-Prüfen der ganzen Bibliothek nötig.
+
+Zusätzlich: neues Skript `normalize_cache.py` bereinigt bereits bestehende
+`.fetch_songtext.json`-Dateien proaktiv (Vorschau standardmäßig, `--apply`
+zum Schreiben) statt nur lazy beim nächsten Zugriff auf den jeweiligen
+Ordner. Einmal über die komplette Bibliothek (`/Volumes/music/musik`)
+gelaufen: 3 Duplikate in 2 Ordnern gefunden und bereinigt (beide Betterov-
+Alben), sonst überall sauber.
+
 ## ✓ cut.py v1.9.17 — Minimum für `p<Sek>` auf 2s gesenkt
 
 `_MIN_PREVIEW_SEC` von 3s auf 2s. Grenzen jetzt 2–30s statt 3–30s.

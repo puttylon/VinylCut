@@ -3,6 +3,9 @@
 import tempfile
 from pathlib import Path
 
+import json
+import unicodedata
+
 import fetch_songtext
 from fetch_songtext import (
     _CONSENSUS_MIN_JACCARD,
@@ -15,6 +18,7 @@ from fetch_songtext import (
     _heuristic_best,
     _is_hallucination,
     _last_timestamp,
+    _load_cache,
     _provider_consensus,
     _word_overlap,
     fetch_lrc,
@@ -316,3 +320,74 @@ class TestFetchLrcNoWhisper:
         assert found is False
         assert extras["reason"] == "dauer-abweichung"
         assert not lrc_path.exists()
+
+
+class TestLoadCache:
+    """Dateinamen (ä/ö/ü) können je nach Zugriffsweg (lokal vs. SMB) NFC- oder
+    NFD-normalisiert ankommen — ohne Vereinheitlichung beim Laden verpasst der
+    Cache-Lookup vorhandene Einträge und legt Duplikate an."""
+
+    NFC = unicodedata.normalize("NFC", "Mücken.flac")  # ue als 1 Zeichen (U+00FC)
+    NFD = unicodedata.normalize("NFD", "Mücken.flac")  # u + Kombinierender Akzent (2 Zeichen)
+
+    def test_normal_load_no_duplicates(self, tmp_path):
+        (tmp_path / ".fetch_songtext.json").write_text(
+            json.dumps({"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}}),
+            encoding="utf-8",
+        )
+        cache = _load_cache(tmp_path)
+        assert cache == {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}}
+
+    def test_missing_file_returns_empty_dict(self, tmp_path):
+        assert _load_cache(tmp_path) == {}
+
+    def test_corrupt_json_returns_empty_dict(self, tmp_path):
+        (tmp_path / ".fetch_songtext.json").write_text("{kaputt", encoding="utf-8")
+        assert _load_cache(tmp_path) == {}
+
+    def test_nfc_nfd_duplicate_merged_keeps_newer(self, tmp_path):
+        assert self.NFC != self.NFD  # sicherstellen, dass die Testdaten wirklich unterschiedliche Bytes sind
+        assert unicodedata.normalize("NFC", self.NFD) == self.NFC
+        raw = {
+            self.NFC: {"r": "ok", "ts": "2026-07-11T07:31:35"},
+            self.NFD: {"r": "nf", "ts": "2026-07-12T10:48:14"},
+        }
+        (tmp_path / ".fetch_songtext.json").write_text(json.dumps(raw), encoding="utf-8")
+        cache = _load_cache(tmp_path)
+        assert len(cache) == 1
+        assert cache[self.NFC]["r"] == "nf"  # der neuere (per ts) Eintrag gewinnt
+        assert cache[self.NFC]["ts"] == "2026-07-12T10:48:14"
+
+    def test_nfd_older_than_nfc_keeps_nfc(self, tmp_path):
+        # Reihenfolge in der Datei darf keine Rolle spielen -- nur "ts" zählt
+        raw = {
+            self.NFD: {"r": "nf", "ts": "2026-07-11T07:31:35"},
+            self.NFC: {"r": "ok", "ts": "2026-07-12T10:48:14"},
+        }
+        (tmp_path / ".fetch_songtext.json").write_text(json.dumps(raw), encoding="utf-8")
+        cache = _load_cache(tmp_path)
+        assert len(cache) == 1
+        assert cache[self.NFC]["r"] == "ok"
+        assert cache[self.NFC]["ts"] == "2026-07-12T10:48:14"
+
+
+class TestLoadRelease:
+    """Gleicher Grund wie TestLoadCache: Titel aus release.json (NFC, JSON-Text)
+    müssen gegen den Dateinamen-Stem (kann über SMB als NFD ankommen) matchen."""
+
+    def test_title_lookup_matches_across_normalization_forms(self, tmp_path):
+        release = {
+            "artist": "Testartist",
+            "tracks": [{"title": unicodedata.normalize("NFC", "Mücken"), "dur_s": 123.0}],
+        }
+        (tmp_path / "release.json").write_text(json.dumps(release), encoding="utf-8")
+        artist, tracks_by_title = fetch_songtext._load_release(tmp_path)
+        assert artist == "Testartist"
+        # Lookup mit NFD-Titel (wie er z.B. aus audio.stem über SMB kommen könnte)
+        nfd_title = unicodedata.normalize("NFD", "Mücken")
+        assert tracks_by_title.get(unicodedata.normalize("NFC", nfd_title)) == 123.0
+
+    def test_missing_release_json_returns_empty(self, tmp_path):
+        artist, tracks_by_title = fetch_songtext._load_release(tmp_path)
+        assert artist == ""
+        assert tracks_by_title == {}

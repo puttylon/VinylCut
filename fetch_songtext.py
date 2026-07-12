@@ -6,11 +6,12 @@ import json
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -727,12 +728,20 @@ def fetch_lrc(
 
 
 def _load_release(folder: Path) -> tuple[str, dict]:
-    """Artist und {Titel: dur_s} aus release.json lesen."""
+    """Artist und {Titel: dur_s} aus release.json lesen.
+
+    Titel werden auf NFC normalisiert — derselbe Grund wie bei _load_cache():
+    der Titel aus release.json (JSON-Text) und der Dateiname/-stem (kann über
+    SMB anders normalisiert ankommen) müssen für den Lookup byte-gleich sein.
+    """
     try:
         with open(folder / "release.json", encoding="utf-8") as f:
             data = json.load(f)
         artist = data.get("artist", "")
-        tracks = {t["title"]: t.get("dur_s", 0.0) for t in data.get("tracks", [])}
+        tracks = {
+            unicodedata.normalize("NFC", t["title"]): t.get("dur_s", 0.0)
+            for t in data.get("tracks", [])
+        }
         return artist, tracks
     except Exception:
         return "", {}
@@ -747,9 +756,20 @@ def _parse_version(v: str) -> tuple[int, ...]:
 
 def _load_cache(folder: Path) -> dict:
     try:
-        return json.loads((folder / _CACHE_FILENAME).read_text(encoding="utf-8"))
+        raw = json.loads((folder / _CACHE_FILENAME).read_text(encoding="utf-8"))
     except Exception:
         return {}
+    # Dateinamen (v.a. ä/ö/ü) können je nach Zugriffsweg unterschiedlich
+    # Unicode-normalisiert sein (NFC vs. NFD) — z.B. lokal geschrieben, dann
+    # über SMB gelesen. Ohne Normalisierung verpasst der Cache-Lookup
+    # vorhandene Einträge und legt Duplikate an. Beim Laden auf NFC
+    # vereinheitlichen, bei Kollision den neueren Eintrag (per "ts") behalten.
+    cache: dict = {}
+    for key, entry in raw.items():
+        norm_key = unicodedata.normalize("NFC", key)
+        if norm_key not in cache or entry.get("ts", "") > cache[norm_key].get("ts", ""):
+            cache[norm_key] = entry
+    return cache
 
 
 def _save_cache(folder: Path, cache: dict) -> None:
@@ -885,6 +905,7 @@ def main() -> None:
 
     for audio in audio_files:
         lrc_path = audio.with_suffix(".lrc")
+        cache_key = unicodedata.normalize("NFC", audio.name)
 
         if audio.parent != current_parent:
             current_parent = audio.parent
@@ -900,7 +921,7 @@ def main() -> None:
 
         # Cache-Check: Track bereits verarbeitet?
         if not args.force:
-            entry = dir_cache.get(audio.name)
+            entry = dir_cache.get(cache_key)
             if entry and _cache_entry_valid(entry):
                 # --no-whisper: frühere Whisper-Ablehnungen automatisch neu prüfen
                 whisper_reject_rerun = args.no_whisper and entry.get("r") == "nf" and entry.get(
@@ -928,7 +949,7 @@ def main() -> None:
             genre_label = meta_genre.strip() if meta_genre else "Instrumental"
             _tprint(f"{_ts()}  {rel}  0/0: │ Genre={genre_label}  {symbol}")
             genre_skipped += 1
-            dir_cache[audio.name] = {
+            dir_cache[cache_key] = {
                 "v": __version__,
                 "r": "skip",
                 "outcome": outcome,
@@ -950,7 +971,7 @@ def main() -> None:
         )
         query_artist = meta_artist or artist
         query = f"{query_artist} {title}".strip()
-        expected_dur = tracks_by_title.get(title, 0.0)
+        expected_dur = tracks_by_title.get(unicodedata.normalize("NFC", title), 0.0)
 
         use_compare = args.recursive or lrc_path.exists()
         if use_compare:
@@ -1019,7 +1040,7 @@ def main() -> None:
             _tprint(f"{_ts()}  {rel}  {info}  {'✓' if found else '='}")
 
         if cache_result is not None:
-            dir_cache[audio.name] = {
+            dir_cache[cache_key] = {
                 "v": __version__,
                 "r": cache_result,
                 "ts": datetime.now().isoformat(timespec="seconds"),

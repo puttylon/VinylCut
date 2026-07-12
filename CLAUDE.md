@@ -20,6 +20,7 @@ Dieses Dokument dient als Leitfaden für die KI-Unterstützung in diesem Reposit
     - README.md auf aktuelle Flags, Befehle und Abhängigkeiten aktualisieren
 	-- help auf dann aktuelle Funktionen und Änderung anpassen
 	- jeder Bugfix erhöht die Versionsnummer x.y.n n um eins.
+- **Parallele Claude-Code-Sessions:** Wenn absehbar mehrere Sessions gleichzeitig an diesem Repo arbeiten, jede Session per `git worktree` in ein eigenes Verzeichnis + Branch isolieren (ein Branch allein reicht nicht — Working Tree und Index sind pro Verzeichnis, nicht pro Branch). Für einzelne Sessions: kein Branch-Zwang, direkt auf `main`.
 	
 
 ## 3. Bibliotheken & Terminal-Code

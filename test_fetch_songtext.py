@@ -1,10 +1,13 @@
 """Unit-Tests für fetch_songtext.py — reine Logikfunktionen."""
 
 import tempfile
+import time
 from pathlib import Path
 
 import json
 import unicodedata
+
+import pytest
 
 import fetch_songtext
 from fetch_songtext import (
@@ -12,6 +15,9 @@ from fetch_songtext import (
     _CONSENSUS_MIN_PROVIDERS,
     _HALLUCINATION_MAX_UNIQUE_RATIO,
     _HALLUCINATION_MIN_WORDS,
+    _RATE_LIMIT_BASE_SEC,
+    _RATE_LIMIT_FLOOR_SEC,
+    _RATE_LIMIT_MAX_SEC,
     _VOCALS_MIN_WORDS,
     _extract_lrc_words,
     _first_timestamp,
@@ -20,6 +26,9 @@ from fetch_songtext import (
     _last_timestamp,
     _load_cache,
     _provider_consensus,
+    _rate_limit_report,
+    _rate_limit_wait,
+    _save_cache,
     _word_overlap,
     fetch_lrc,
 )
@@ -371,6 +380,41 @@ class TestLoadCache:
         assert cache[self.NFC]["ts"] == "2026-07-12T10:48:14"
 
 
+class TestSaveCache:
+    """_save_cache() muss gegen parallel laufende fetch_songtext-Instanzen
+    im selben Ordner robust sein: Ohne Lock+Reload-vor-Schreiben würde ein
+    Prozess, der vor dem Schreiben eines anderen Prozesses geladen hat,
+    dessen Eintrag beim eigenen Schreiben stillschweigend verlieren."""
+
+    def test_normal_save_roundtrips(self, tmp_path):
+        _save_cache(tmp_path, {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}})
+        assert _load_cache(tmp_path) == {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}}
+
+    def test_concurrent_write_does_not_lose_other_processes_entry(self, tmp_path):
+        # Prozess A lädt den (leeren) Ordner.
+        cache_a = _load_cache(tmp_path)
+        # Prozess B schreibt währenddessen einen anderen Track (A weiß nichts davon).
+        _save_cache(tmp_path, {"b.flac": {"r": "ok", "ts": "2026-01-01T00:00:01"}})
+        # Prozess A verarbeitet seinen eigenen Track und schreibt jetzt.
+        cache_a["a.flac"] = {"r": "ok", "ts": "2026-01-01T00:00:02"}
+        _save_cache(tmp_path, cache_a)
+        # B's Eintrag darf nicht verloren gegangen sein.
+        result = _load_cache(tmp_path)
+        assert result == {
+            "a.flac": {"r": "ok", "ts": "2026-01-01T00:00:02"},
+            "b.flac": {"r": "ok", "ts": "2026-01-01T00:00:01"},
+        }
+
+    def test_conflicting_same_key_newer_ts_wins(self, tmp_path):
+        cache_a = _load_cache(tmp_path)
+        # Prozess B schreibt denselben Track zuerst, mit neuerem ts.
+        _save_cache(tmp_path, {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:05"}})
+        # Prozess A hatte den Track vorher geladen (leer) und schreibt mit älterem ts nach.
+        cache_a["a.flac"] = {"r": "nf", "ts": "2026-01-01T00:00:01"}
+        _save_cache(tmp_path, cache_a)
+        assert _load_cache(tmp_path)["a.flac"]["ts"] == "2026-01-01T00:00:05"
+
+
 class TestLoadRelease:
     """Gleicher Grund wie TestLoadCache: Titel aus release.json (NFC, JSON-Text)
     müssen gegen den Dateinamen-Stem (kann über SMB als NFD ankommen) matchen."""
@@ -391,3 +435,82 @@ class TestLoadRelease:
         artist, tracks_by_title = fetch_songtext._load_release(tmp_path)
         assert artist == ""
         assert tracks_by_title == {}
+
+
+class TestRateLimit:
+    """Backoff-Logik für Provider-Rate-Limits (siehe ROADMAP v1.7.3).
+
+    Recherchiert im syncedlyrics-Quellcode: Musixmatch meldet Rate-Limits
+    über stderr ("Got status code N"), NetEase nur über eine generische
+    Fehlermeldung, Genius/lrclib geben KEIN Signal — dort greift nur der
+    proaktive Mindestabstand (_RATE_LIMIT_FLOOR_SEC), auch bei sauberem
+    Erfolg (leeres stderr)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_state(self):
+        fetch_songtext._rate_limit_state.clear()
+        yield
+        fetch_songtext._rate_limit_state.clear()
+
+    def test_clean_success_sets_only_proactive_floor(self):
+        _rate_limit_report("lrclib", "")
+        state = fetch_songtext._rate_limit_state["lrclib"]
+        assert state["consecutive_hits"] == 0
+        remaining = state["next_allowed"] - time.monotonic()
+        assert 0 < remaining <= _RATE_LIMIT_FLOOR_SEC
+
+    def test_status_402_triggers_base_backoff(self):
+        _rate_limit_report("musixmatch", "[Musixmatch] Got status code 402 for foo")
+        state = fetch_songtext._rate_limit_state["musixmatch"]
+        assert state["consecutive_hits"] == 1
+        remaining = state["next_allowed"] - time.monotonic()
+        assert _RATE_LIMIT_FLOOR_SEC < remaining <= _RATE_LIMIT_BASE_SEC
+
+    def test_status_401_captcha_triggers_longer_backoff_than_402(self):
+        _rate_limit_report("musixmatch", "[Musixmatch] Got status code 401 for foo")
+        remaining_401 = (
+            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"] - time.monotonic()
+        )
+        fetch_songtext._rate_limit_state.clear()
+        _rate_limit_report("musixmatch", "[Musixmatch] Got status code 402 for foo")
+        remaining_402 = (
+            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"] - time.monotonic()
+        )
+        assert remaining_401 > remaining_402
+
+    def test_netease_generic_error_treated_like_402(self):
+        _rate_limit_report("netease", "An error occurred while searching for an LRC on NetEase")
+        assert fetch_songtext._rate_limit_state["netease"]["consecutive_hits"] == 1
+
+    def test_repeated_hits_escalate_up_to_cap(self):
+        for _ in range(10):
+            _rate_limit_report("musixmatch", "Got status code 402 for foo")
+        remaining = fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"] - time.monotonic()
+        assert remaining <= _RATE_LIMIT_MAX_SEC
+
+    def test_clean_success_after_hits_resets_consecutive_count(self):
+        _rate_limit_report("musixmatch", "Got status code 402 for foo")
+        assert fetch_songtext._rate_limit_state["musixmatch"]["consecutive_hits"] == 1
+        _rate_limit_report("musixmatch", "")
+        assert fetch_songtext._rate_limit_state["musixmatch"]["consecutive_hits"] == 0
+
+    def test_genius_gets_only_proactive_floor_no_reactive_signal_possible(self):
+        # Genius/lrclib melden laut syncedlyrics-Quellcode nie ein Rate-Limit-
+        # Signal im stderr, auch nicht bei HTTP 429 — stderr bleibt leer.
+        _rate_limit_report("genius", "")
+        remaining = fetch_songtext._rate_limit_state["genius"]["next_allowed"] - time.monotonic()
+        assert remaining <= _RATE_LIMIT_FLOOR_SEC
+
+    def test_wait_returns_immediately_without_prior_lock(self):
+        start = time.monotonic()
+        _rate_limit_wait("unbekannter_provider")
+        assert time.monotonic() - start < 0.05
+
+    def test_wait_sleeps_until_next_allowed(self):
+        fetch_songtext._rate_limit_state["lrclib"] = {
+            "next_allowed": time.monotonic() + 0.1,
+            "consecutive_hits": 0,
+        }
+        start = time.monotonic()
+        _rate_limit_wait("lrclib")
+        assert time.monotonic() - start >= 0.09

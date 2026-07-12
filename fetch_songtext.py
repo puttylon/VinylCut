@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fcntl
 import hashlib
 import re
 import os
@@ -6,16 +7,32 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.7.2"
+__version__ = "1.7.3"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
 _AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
+
+# Rate-Limit-Backoff pro Provider (siehe _rate_limit_report()). Recherchiert im
+# syncedlyrics-Quellcode: Musixmatch meldet Rate-Limits über einen im JSON
+# eingebetteten status_code (402 = Kontingent, 401 = Captcha/Anti-Bot), NetEase
+# nur über eine generische Exception, Genius und lrclib geben laut Quellcode
+# GAR KEIN Signal — dort greift nur der proaktive Mindestabstand.
+_RATE_LIMIT_FLOOR_SEC = 1.5  # proaktiver Mindestabstand zwischen Anfragen pro Provider
+_RATE_LIMIT_BASE_SEC = 10.0  # reaktive Basis-Strafe bei 402/generischem Fehler — verankert an
+# syncedlyrics' eigenem time.sleep(10) beim Musixmatch-Token-Refresh nach 401
+_RATE_LIMIT_CAPTCHA_SEC = 30.0  # längerer Cooldown bei 401/Captcha (Anti-Bot, kurzer Retry hilft nicht)
+_RATE_LIMIT_MAX_SEC = 60.0  # Eskalations-Obergrenze bei wiederholten Treffern
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_state: dict[str, dict] = {}  # provider -> {"next_allowed": float, "consecutive_hits": int}
 
 # LRC-Timestamps enden oft vor dem Track-Ende (Instrumental-Outro → kein Text).
 # Asymmetrische Toleranz: zu kurz ist normal, zu lang bedeutet falscher Song.
@@ -45,6 +62,7 @@ _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluz
 # _HALLUCINATION_AVG_LOGPROB entfernt: sprachbiased (Deutsch < Englisch), _is_hallucination reicht
 
 _CACHE_FILENAME = ".fetch_songtext.json"
+_CACHE_LOCKFILE = ".fetch_songtext.lock"  # schützt _save_cache vor parallel laufenden Instanzen
 _CACHE_MIN_VERSION = (
     "1.7.1"  # v1.7.1: Abbruch-Check bei fehlendem Whisper-Modell — alle Einträge neu prüfen
 )
@@ -180,19 +198,63 @@ def _heuristic_best(
     return best.read_bytes(), score
 
 
+def _rate_limit_wait(provider: str) -> None:
+    """Wartet, falls für `provider` noch eine proaktive/reaktive Sperre besteht."""
+    with _rate_limit_lock:
+        next_allowed = _rate_limit_state.get(provider, {}).get("next_allowed", 0.0)
+    wait = next_allowed - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+
+
+def _rate_limit_report(provider: str, stderr: str) -> None:
+    """Wertet stderr auf Rate-Limit-Signale aus und setzt ggf. eine Sperre.
+
+    Musixmatch meldet Rate-Limits über einen im JSON eingebetteten status_code
+    ("Got status code N for ..." auf stderr, siehe syncedlyrics/providers/
+    musixmatch.py): 402 = Kontingent/Rate-Limit, 401 = Captcha/Anti-Bot (kein
+    kurzer Retry sinnvoll). NetEase liefert nur eine generische Exception-
+    Meldung ("An error occurred while searching for an LRC on ..."). Genius
+    und lrclib geben laut Quellcode bei HTTP-Fehlern (inkl. 429) KEIN Signal
+    — sie liefern still None zurück, ununterscheidbar von "nicht gefunden".
+    Dort greift ausschließlich der proaktive Mindestabstand (Fallback-Zweig
+    unten, auch bei sauberem Erfolg — das ist der proaktive Floor).
+    """
+    with _rate_limit_lock:
+        state = _rate_limit_state.setdefault(provider, {"next_allowed": 0.0, "consecutive_hits": 0})
+        if re.search(r"[Gg]ot status code 401", stderr) or "captcha" in stderr.lower():
+            delay = min(_RATE_LIMIT_CAPTCHA_SEC * (2**state["consecutive_hits"]), _RATE_LIMIT_MAX_SEC)
+            state["consecutive_hits"] += 1
+        elif re.search(r"[Gg]ot status code 402", stderr) or (
+            "An error occurred while searching for an LRC on" in stderr
+        ):
+            delay = min(_RATE_LIMIT_BASE_SEC * (2**state["consecutive_hits"]), _RATE_LIMIT_MAX_SEC)
+            state["consecutive_hits"] += 1
+        else:
+            state["consecutive_hits"] = 0
+            delay = _RATE_LIMIT_FLOOR_SEC
+        state["next_allowed"] = time.monotonic() + delay
+
+
 def _query_provider(query: str, provider: str, env: dict) -> tuple[str, Path | None]:
-    """Fragt syncedlyrics für einen Anbieter ab, gibt (Anbieter, Temp-LRC-Pfad|None) zurück."""
+    """Fragt syncedlyrics für einen Anbieter ab, gibt (Anbieter, Temp-LRC-Pfad|None) zurück.
+
+    Wartet vorab auf eine ggf. bestehende Rate-Limit-Sperre (_rate_limit_wait)
+    und wertet stderr danach auf Rate-Limit-Signale aus (_rate_limit_report).
+    """
+    _rate_limit_wait(provider)
     with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     tmp_path.unlink()
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["syncedlyrics", query, "-o", str(tmp_path), "-p", provider],
             capture_output=True,
             text=True,
             env=env,
             timeout=_PROVIDER_TIMEOUT,
         )
+        _rate_limit_report(provider, result.stderr)
     except subprocess.TimeoutExpired:
         tmp_path.unlink(missing_ok=True)
         return provider, None
@@ -773,12 +835,35 @@ def _load_cache(folder: Path) -> dict:
 
 
 def _save_cache(folder: Path, cache: dict) -> None:
+    """Schreibt den Cache-Ordnerstand — sicher gegen parallel laufende
+    fetch_songtext-Instanzen im selben Ordner: Lock halten, aktuellen
+    Diskstand frisch laden, mit `cache` mergen (neuerer "ts" gewinnt je
+    Schlüssel), erst dann schreiben. Ohne das würde ein zweiter Prozess,
+    der vor unserem letzten Schreibvorgang geladen hat, unsere Einträge
+    beim eigenen Schreiben stillschweigend überschreiben (Lost-Update).
+    """
+    lock_path = folder / _CACHE_LOCKFILE
     try:
+        lockfile = open(lock_path, "w")
+    except OSError:
+        lockfile = None
+
+    try:
+        if lockfile is not None:
+            fcntl.flock(lockfile, fcntl.LOCK_EX)
+        disk_cache = _load_cache(folder)
+        for key, entry in cache.items():
+            if key not in disk_cache or entry.get("ts", "") >= disk_cache[key].get("ts", ""):
+                disk_cache[key] = entry
         (folder / _CACHE_FILENAME).write_text(
-            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(disk_cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except OSError:
         pass  # nicht kritisch — Track wird beim nächsten Lauf erneut geprüft
+    finally:
+        if lockfile is not None:
+            fcntl.flock(lockfile, fcntl.LOCK_UN)
+            lockfile.close()
 
 
 def _cache_entry_valid(entry: dict) -> bool:

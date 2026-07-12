@@ -1,5 +1,40 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.7.3 — Rate-Limit-Backoff pro Provider
+
+Frage: Bekommt man Probleme mit den Lyrics-Providern bei mehreren parallelen
+Instanzen? Im syncedlyrics-Quellcode direkt nachgesehen (nicht geraten),
+mit Opus die Design-Optionen abgewogen. Ergebnis: **stark asymmetrisch**.
+
+- **Musixmatch**: meldet Rate-Limits über einen im JSON eingebetteten
+  `status_code` — geloggt als `"Got status code N for ..."` auf stderr.
+  402 = Kontingent/Rate-Limit, 401 = Captcha/Anti-Bot-Reaktion.
+- **NetEase**: kein explizites Signal, aber eine generische Exception bei
+  unerwarteter (Block-)Antwort, geloggt über `logger.error(...)`.
+- **Genius und lrclib**: geben laut Quellcode bei JEDEM HTTP-Fehler
+  (inkl. 429) **kein Signal** — `if not r.ok: return None`, still, nicht
+  von "nicht gefunden" unterscheidbar. Ein Rate-Limit sieht dort identisch
+  aus wie ein echtes Fehlen der Lyrics — stille False Negatives.
+
+Fix: `_query_provider()` wartet jetzt vor jeder Anfrage auf eine ggf.
+bestehende Sperre (`_rate_limit_wait`) und wertet stderr danach aus
+(`_rate_limit_report`), pro Provider in einem Lock-geschützten
+In-Memory-State (`next_allowed`, `consecutive_hits`, `time.monotonic()`).
+
+- 402/generischer Fehler → Basis-Backoff 10s (verankert an syncedlyrics'
+  eigenem `time.sleep(10)` beim Musixmatch-Token-Refresh nach 401),
+  eskalierend bei Wiederholung, Obergrenze 60s.
+- 401/Captcha → 30s Basis (kurzer Retry hilft bei Anti-Bot nicht).
+- Genius/lrclib (kein Signal möglich) → proaktiver Mindestabstand von 1,5s
+  zwischen Anfragen greift immer, auch bei sauberem Erfolg.
+- Sleep passiert im Worker-Thread selbst (nicht vor `submit()`), damit die
+  anderen 3 Provider nicht mitgebremst werden. `returncode` ist als Signal
+  unbrauchbar (0 sowohl bei "nicht gefunden" als auch bei Rate-Limit) —
+  ausschließlich stderr-Parsing zählt.
+
+`result.stdout`/`result.stderr` wurden bisher komplett verworfen — werden
+jetzt für die Auswertung gebraucht und mitgelesen.
+
 ## ✓ fetch_songtext.py v1.7.2 — Unicode-Normalisierung der Cache-Schlüssel (NFC/NFD)
 
 Bug gemeldet: Ein Track, der bereits mit v1.7.1 verarbeitet worden war,

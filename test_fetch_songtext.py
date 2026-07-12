@@ -1,5 +1,6 @@
 """Unit-Tests für fetch_songtext.py — reine Logikfunktionen."""
 
+import errno
 import tempfile
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ import fetch_songtext
 from fetch_songtext import (
     _CONSENSUS_MIN_JACCARD,
     _CONSENSUS_MIN_PROVIDERS,
+    _FOLDER_BUSY,
     _HALLUCINATION_MAX_UNIQUE_RATIO,
     _HALLUCINATION_MIN_WORDS,
     _RATE_LIMIT_BASE_SEC,
@@ -28,7 +30,9 @@ from fetch_songtext import (
     _provider_consensus,
     _rate_limit_report,
     _rate_limit_wait,
+    _release_folder,
     _save_cache,
+    _try_claim_folder,
     _word_overlap,
     fetch_lrc,
 )
@@ -413,6 +417,56 @@ class TestSaveCache:
         cache_a["a.flac"] = {"r": "nf", "ts": "2026-01-01T00:00:01"}
         _save_cache(tmp_path, cache_a)
         assert _load_cache(tmp_path)["a.flac"]["ts"] == "2026-01-01T00:00:05"
+
+
+class TestFolderClaim:
+    """_try_claim_folder()/_release_folder(): non-blocking Ordner-Sperre für
+    bewusst parallele Instanzen. EAGAIN/EWOULDBLOCK (echt belegt) -> _FOLDER_BUSY,
+    Aufrufer überspringt den Ordner. Jeder andere OSError (z.B. ENOTSUP auf
+    Netzwerk-Mounts ohne flock-Support) -> None, Aufrufer arbeitet unkoordiniert
+    weiter statt fälschlich die ganze Bibliothek zu überspringen."""
+
+    def test_first_claim_succeeds(self, tmp_path):
+        lock = _try_claim_folder(tmp_path)
+        assert lock is not None and lock is not _FOLDER_BUSY
+        _release_folder(lock)
+
+    def test_second_claim_while_held_returns_busy(self, tmp_path):
+        lock_a = _try_claim_folder(tmp_path)
+        lock_b = _try_claim_folder(tmp_path)
+        assert lock_b is _FOLDER_BUSY
+        _release_folder(lock_a)
+
+    def test_claim_possible_again_after_release(self, tmp_path):
+        lock_a = _try_claim_folder(tmp_path)
+        _release_folder(lock_a)
+        lock_b = _try_claim_folder(tmp_path)
+        assert lock_b is not None and lock_b is not _FOLDER_BUSY
+        _release_folder(lock_b)
+
+    def test_save_cache_reuses_held_lock_without_deadlock(self, tmp_path):
+        lock = _try_claim_folder(tmp_path)
+        _save_cache(
+            tmp_path, {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}}, lockfile=lock
+        )
+        _release_folder(lock)
+        assert _load_cache(tmp_path) == {
+            "a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}
+        }
+
+    def test_flock_eagain_maps_to_busy(self, tmp_path, monkeypatch):
+        def raise_eagain(*a, **k):
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(fetch_songtext.fcntl, "flock", raise_eagain)
+        assert _try_claim_folder(tmp_path) is _FOLDER_BUSY
+
+    def test_flock_unsupported_falls_back_to_unlocked(self, tmp_path, monkeypatch):
+        def raise_enotsup(*a, **k):
+            raise OSError(errno.ENOTSUP, "Operation not supported")
+
+        monkeypatch.setattr(fetch_songtext.fcntl, "flock", raise_enotsup)
+        assert _try_claim_folder(tmp_path) is None
 
 
 class TestLoadRelease:

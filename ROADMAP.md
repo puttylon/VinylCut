@@ -1,5 +1,70 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.7.5 — Ordner-Claim für bewusst parallele Instanzen
+
+Live beobachtet: Zwei bewusst parallel gestartete `fetch_songtext.py -r`-Instanzen
+über dieselbe Bibliothek standen beide zur selben Sekunde im selben Album
+(`C/CocoRosie/Tales of a GrassWidow`) — die DFS-Traversal ist deterministisch
+sortiert, ohne Koordination laufen beide Instanzen praktisch im Gleichschritt
+und machen jeden Track doppelt (Provider-Abfragen + Whisper-Transkription).
+
+Der `_save_cache`-Lock aus v1.7.3 schützt nur den finalen JSON-Schreibvorgang
+vor Lost-Updates — verhindert aber nicht, dass beide Instanzen denselben Track
+überhaupt erst bearbeiten. Der Rate-Limit-Backoff aus v1.7.3 ist zudem reiner
+In-Memory-Zustand pro Prozess und koordiniert nichts zwischen zwei OS-Prozessen.
+
+Fix: Beim Betreten eines neuen Ordners versucht die Instanz, `.fetch_songtext.lock`
+exklusiv und non-blocking zu sperren (`_try_claim_folder`). Gelingt das nicht
+(andere Instanz hält die Sperre bereits), wird der komplette Ordner ohne jede
+Track-Bearbeitung übersprungen. Die Sperre wird für die gesamte Bearbeitungszeit
+des Ordners gehalten und erst beim Wechsel zum nächsten Ordner freigegeben.
+
+Fail-open statt fail-closed: Ein `OSError` beim Locken wird nur dann als "andere
+Instanz hält den Ordner" gewertet, wenn `errno` tatsächlich `EAGAIN`/`EWOULDBLOCK`
+ist. Jeder andere Fehler (z.B. `ENOTSUP` auf Netzwerk-Mounts ohne flock-Support)
+führt stattdessen zu unkoordiniertem Weiterarbeiten — sonst würden beide
+Instanzen bei jedem Locking-Aussetzer denselben Ordner überspringen und im
+Extremfall die ganze Bibliothek still auslassen.
+
+Mit Opus review-gegengeprüft und auf dem echten SMB-Mount (`/Volumes/music`,
+Synology via smbfs) empirisch verifiziert: `flock` zwischen zwei echten
+Prozessen funktioniert dort korrekt (Prozess B wird sauber blockiert, solange
+A die Sperre hält). Kuriosität am Rande, ohne Auswirkung auf diesen Code: zwei
+Filehandles *im selben Prozess* auf dieselbe Datei blockieren sich auf diesem
+SMB-Mount nicht gegenseitig (lokal auf `/tmp` schon) — betrifft uns nicht, da
+nie zwei Handles gleichzeitig im selben Prozess offen sind.
+
+## ✓ fetch_songtext.py v1.7.4 — Whisper-Hänger durch Decode-Parameter behoben
+
+Live beobachtet: Ein Track (Yazoo – "I Before E Except After C") hing bei der
+Whisper-Verifikation ~21 Minuten statt normal ~40-100s. Wahrscheinlicher
+Mechanismus: `model.transcribe()` lief mit Standard-`temperature`-Fallback-
+Liste `[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]` — schlägt ein Segment die Qualitäts-
+prüfung fehl, wird es mit bis zu 6 verschiedenen Temperaturen neu versucht.
+Bei 16 Segmenten (8-Minuten-Kontext) macht das im Worst Case 96 statt 16
+Dekodier-Versuche. Zusätzlich `condition_on_previous_text=True` (Standard):
+ein einzelnes halluziniertes Segment kann die Qualität aller folgenden
+Segmente mitreißen, da jedes Segment auf dem vorherigen aufbaut.
+
+Erst ein Subprozess-basierter Hard-Timeout erwogen (Modell-Neuladung pro
+Whisper-Aufruf, ~2s Zusatzkosten) — auf Wunsch des Nutzers verworfen, da die
+laufenden Zusatzkosten pro Aufruf zu hoch waren ("das muss bleiben wie es war,
+sonst"). Stattdessen den wahrscheinlichen Auslöser direkt behoben, ohne
+jeden Mehraufwand im Normalfall.
+
+Fix: `temperature=0.0` (kein Fallback-Loop mehr, ein Versuch pro Segment)
+und `condition_on_previous_text=False` (kein Fortpflanzen eines schlechten
+Segments) in `_transcribe()`.
+
+Mit A/B-Test auf den 7 Original-Tracks aus dem Hang-Report verifiziert (echte
+Messung, kein geratener Wert): der Track, der zuvor bei >21 Min. hing, hing
+mit den alten Parametern im Test erneut (>300s Sicherheits-Timeout gerissen),
+lief mit den neuen Parametern in 86s durch. Bei den übrigen 6 Tracks im
+Schnitt 25-65% schneller. Erkennungsqualität (Containment-Score der Whisper-
+Wörter gegen die bereits vorhandene korrekte LRC) unverändert: Durchschnitt
+alt 78,8% vs. neu 77,9% (−0,9 Prozentpunkte, 3× besser/3× schlechter je nach
+Track, kein systematisches Muster — normale Streuung).
+
 ## ✓ fetch_songtext.py v1.7.3 — Rate-Limit-Backoff pro Provider
 
 Frage: Bekommt man Probleme mit den Lyrics-Providern bei mehreren parallelen

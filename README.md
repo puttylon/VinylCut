@@ -258,6 +258,8 @@ Mit `--no-whisper`:
 
 **Cache** (`.fetch_songtext.json` pro Ordner): Ein Eintrag pro Track — beim nächsten Lauf wird der Track übersprungen. `--force` ignoriert den Cache komplett.
 
+**Parallele Instanzen:** `fetch_songtext.py -r` kann bewusst mehrfach gleichzeitig über dieselbe Bibliothek gestartet werden. Jede Instanz sperrt sich beim Betreten eines Ordners exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
+
 **Felder je Eintrag:**
 
 | Feld | Werte | Bedeutung |

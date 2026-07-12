@@ -175,7 +175,7 @@ Für jeden Track läuft folgendes Verfahren — in dieser Reihenfolge:
 
 **Schritt 2 — Provider-Abfragen**
 
-Die vier Anbieter `lrclib`, `musixmatch`, `netease` und `genius` werden gleichzeitig befragt (je max. 20 s Timeout). Artist und Titel kommen aus den Audio-Tags. Identische LRCs von verschiedenen Anbietern (gespiegelte Datenbanken) werden per Inhalt-Hash dedupliziert.
+Die vier Anbieter `lrclib`, `musixmatch`, `netease` und `genius` werden gleichzeitig befragt (je max. 20 s Timeout). Artist und Titel kommen aus den Audio-Tags. Klammer-Zusätze im Titel (`(Live In Osaka Japan 16th August 1972)`, `[Deluxe Edition 2014 Remix]` u.ä.) werden für den Suchbegriff entfernt — Lyrics-Provider kennen meist nur den Kern-Titel, der Songtext ist ohnehin identisch zur Studio-Version. Title-Tag und Dateiname bleiben davon unberührt. Identische LRCs von verschiedenen Anbietern (gespiegelte Datenbanken) werden per Inhalt-Hash dedupliziert.
 
 **Schritt 3 — Provider-Konsens (Schnellweg)**
 

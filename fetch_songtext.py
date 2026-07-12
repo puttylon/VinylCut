@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-__version__ = "1.7.5"
+__version__ = "1.7.6"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -127,6 +127,18 @@ def _read_audio_tags(audio_path: Path) -> tuple[str, str, str]:
         return artist, title, genre
     except Exception:
         return "", "", ""
+
+
+def _clean_query_title(title: str) -> str:
+    """Entfernt Klammer-Zusätze (Live/Remix/Remaster/Edit/…) für die Provider-Suche.
+
+    Lyrics-Provider indizieren i.d.R. nur den Kern-Songtitel — lange Zusätze wie
+    "(Live In Osaka Japan 16th August 1972) (2014 Remix)" führen zu 0 Treffern,
+    obwohl der Songtext (identisch zur Studio-Version) längst vorhanden wäre.
+    Nur für den Suchbegriff verwendet — Title-Tag/Dateiname/.lrc bleiben unberührt.
+    """
+    cleaned = re.sub(r"\s*[\(\[][^\(\)\[\]]*[\)\]]", "", title).strip()
+    return cleaned or title
 
 
 def _is_skip_genre(genre: str) -> bool:
@@ -1136,7 +1148,7 @@ def main() -> None:
             audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem
         )
         query_artist = meta_artist or artist
-        query = f"{query_artist} {title}".strip()
+        query = f"{query_artist} {_clean_query_title(title)}".strip()
         expected_dur = tracks_by_title.get(unicodedata.normalize("NFC", title), 0.0)
 
         use_compare = args.recursive or lrc_path.exists()

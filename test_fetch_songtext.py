@@ -21,6 +21,7 @@ from fetch_songtext import (
     _RATE_LIMIT_FLOOR_SEC,
     _RATE_LIMIT_MAX_SEC,
     _VOCALS_MIN_WORDS,
+    _clean_query_title,
     _extract_lrc_words,
     _first_timestamp,
     _heuristic_best,
@@ -36,6 +37,27 @@ from fetch_songtext import (
     _word_overlap,
     fetch_lrc,
 )
+
+
+class TestCleanQueryTitle:
+    def test_ohne_klammern_unveraendert(self):
+        assert _clean_query_title("Highway Star") == "Highway Star"
+
+    def test_eine_klammer_entfernt(self):
+        assert _clean_query_title("Highway Star (Live In Osaka)") == "Highway Star"
+
+    def test_mehrere_klammern_entfernt(self):
+        title = "Highway Star (Live In Osaka Japan 16th August 1972) (2014 Remix)"
+        assert _clean_query_title(title) == "Highway Star"
+
+    def test_eckige_klammer_entfernt(self):
+        assert _clean_query_title("Made In Japan [Deluxe Edition 2014 Remix]") == "Made In Japan"
+
+    def test_nur_klammer_faellt_auf_original_zurueck(self):
+        assert _clean_query_title("(Live)") == "(Live)"
+
+    def test_klammer_mitten_im_titel(self):
+        assert _clean_query_title("I Want You (She's So Heavy) Reprise") == "I Want You Reprise"
 
 
 class TestIsHallucination:

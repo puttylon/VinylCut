@@ -1,5 +1,33 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.7.6 — Klammer-Zusätze aus Suchtitel entfernt
+
+Live beobachtet (Deep Purple – "Made In Japan [Deluxe Edition 2014 Remix]"):
+Live-/Deluxe-Alben liefern reihenweise `0/4: — │ kein Provider`, obwohl der
+Songtext (identisch zur Studio-Version) längst existiert. Ursache: Der
+Such-Query wurde 1:1 aus dem Title-Tag gebaut, inkl. Zusätzen wie
+`"Highway Star (Live In Osaka Japan 16th August 1972) (2014 Remix)"` — die
+Lyrics-Provider indizieren aber nur den Kern-Titel `"Highway Star"` und liefern
+auf den langen String keinen Treffer.
+
+Fix: `_clean_query_title()` entfernt alle `(...)`/`[...]`-Zusätze pauschal aus
+dem Titel, bevor der Such-Query gebaut wird (`query = f"{artist} {_clean_query_title(title)}"`).
+Title-Tag, Dateiname und die gespeicherte `.lrc` bleiben unverändert — nur der
+Suchbegriff wird bereinigt. Fällt bei einem rein aus Klammern bestehenden
+Titel auf den Original-Titel zurück (leerer Query wäre sinnlos).
+
+Bewusst pauschal statt Schlüsselwort-Liste (Live/Remix/Remaster/…): eine Liste
+müsste bei jedem neuen Zusatz in der Bibliothek nachgepflegt werden, das
+pauschale Entfernen deckt auch unbekannte künftige Schreibweisen ab. Risiko
+(Titel, bei denen die Klammer Teil des eigentlichen Songnamens ist, z.B.
+"I Want You (She's So Heavy)") wird als vernachlässigbar eingestuft, da die
+Lyrics ohnehin identisch zur ungeklammerten Kurzform sind.
+
+Bereits im Cache stehende `kein-provider`-Treffer werden NICHT automatisch neu
+geprüft — stattdessen wurden die betroffenen Cache-Einträge einmalig aus den
+`.fetch_songtext.json`-Dateien in der Bibliothek gelöscht, sodass nur die
+tatsächlich betroffenen Tracks beim nächsten Lauf neu verarbeitet werden.
+
 ## ✓ fetch_songtext.py v1.7.5 — Ordner-Claim für bewusst parallele Instanzen
 
 Live beobachtet: Zwei bewusst parallel gestartete `fetch_songtext.py -r`-Instanzen

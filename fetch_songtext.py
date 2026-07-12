@@ -405,14 +405,19 @@ def _transcribe(
 ) -> tuple[list[str], float, float]:
     """Transkribiert context_sec Sekunden ab start, gibt (words, no_speech_prob, avg_logprob) zurück.
 
-    temperature=0.0 (statt der Standard-Fallback-Liste [0.0..1.0]) und
-    condition_on_previous_text=False: verhindert die Multiplikation von
-    Dekodier-Versuchen (bis zu 6x pro Segment) und das Fortpflanzen eines
-    einzelnen halluzinierten Segments auf alle folgenden — der wahrscheinliche
-    Mechanismus hinter einem beobachteten ~21-Minuten-Hänger (statt normal
-    ~40-100s). Mit A/B-Test auf 7 realen Tracks verifiziert: im Schnitt 25-65%
-    schneller, Erkennungsqualität (Containment-Score ggü. vorhandener LRC)
-    unverändert (±2-5 Prozentpunkte, ohne systematische Richtung).
+    condition_on_previous_text=False (temperature bleibt Standard-Fallback-
+    Liste [0.0..1.0] — unverändert). Mit isoliertem Test gegen beide bekannten
+    Problem-Tracks verifiziert: der frühere ~21-Minuten-Hänger (Yazoo) läuft
+    damit in 160s durch, ohne die Temperatur-Liste anzufassen. Ein zuvor
+    fälschlich als "kein Vokal" eingestufter Track (Wiederholungsschleife bei
+    temperature=0.0 ohne Fallback) besteht jetzt stabil über mehrere Läufe.
+    Die eigentliche Ursache des Hängers war offenbar, dass ein einzelnes
+    schlechtes Segment sich über condition_on_previous_text=True auf alle
+    folgenden Segmente fortpflanzt — nicht die Temperatur-Fallback-Liste
+    selbst. Frühere Versuche mit reduzierter/fixer temperature (0.0 bzw.
+    [0.0, 0.4]) wurden verworfen: ersteres führte zu echten Fehlklassi-
+    fikationen, letzteres war nicht-deterministisch (Sampling bei Temperatur
+    >0 macht Wiederholungen desselben Tracks unterschiedlich).
     """
     if _get_whisper_model(model_name) is None:
         return [], 1.0, 0.0
@@ -438,7 +443,7 @@ def _transcribe(
             capture_output=True,
         )
         model = _whisper_models[model_name]
-        kwargs: dict = {"beam_size": 1, "temperature": 0.0, "condition_on_previous_text": False}
+        kwargs: dict = {"beam_size": 1, "condition_on_previous_text": False}
         if language:
             kwargs["language"] = language
         segs = list(model.transcribe(str(tmp_wav), **kwargs)[0])
@@ -551,9 +556,13 @@ def _whisper_best(
     lrc_lang = _detect_lrc_language(candidates)
 
     cache: dict[int, _CacheVal] = {}
+    distinct = len({round(start / 3) for _, start in candidate_starts})
+    done = 0
     for _, start in candidate_starts:
         key = round(start / 3)
         if key not in cache:
+            done += 1
+            _print_status(f"  {flac_path.name}  Whisper transkribiert ({done}/{distinct})...")
             words, no_speech, logprob = _transcribe(
                 flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
             )
@@ -1089,6 +1098,7 @@ def main() -> None:
 
         meta_artist, meta_title, meta_genre = _read_audio_tags(audio)
         rel = str(audio.relative_to(root))
+        _print_status(f"  {rel}  wird geprüft...")
 
         # Keine Tags → Suche unzuverlässig, überspringen (kein Cache-Eintrag)
         if not meta_artist and not meta_title:

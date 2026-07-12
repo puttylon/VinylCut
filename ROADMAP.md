@@ -34,36 +34,41 @@ Filehandles *im selben Prozess* auf dieselbe Datei blockieren sich auf diesem
 SMB-Mount nicht gegenseitig (lokal auf `/tmp` schon) — betrifft uns nicht, da
 nie zwei Handles gleichzeitig im selben Prozess offen sind.
 
-## ✓ fetch_songtext.py v1.7.4 — Whisper-Hänger durch Decode-Parameter behoben
+## ✓ fetch_songtext.py v1.7.4 — Whisper-Hänger durch condition_on_previous_text=False behoben
 
 Live beobachtet: Ein Track (Yazoo – "I Before E Except After C") hing bei der
-Whisper-Verifikation ~21 Minuten statt normal ~40-100s. Wahrscheinlicher
-Mechanismus: `model.transcribe()` lief mit Standard-`temperature`-Fallback-
-Liste `[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]` — schlägt ein Segment die Qualitäts-
-prüfung fehl, wird es mit bis zu 6 verschiedenen Temperaturen neu versucht.
-Bei 16 Segmenten (8-Minuten-Kontext) macht das im Worst Case 96 statt 16
-Dekodier-Versuche. Zusätzlich `condition_on_previous_text=True` (Standard):
-ein einzelnes halluziniertes Segment kann die Qualität aller folgenden
-Segmente mitreißen, da jedes Segment auf dem vorherigen aufbaut.
+Whisper-Verifikation ~21 Minuten statt normal ~40-100s.
 
-Erst ein Subprozess-basierter Hard-Timeout erwogen (Modell-Neuladung pro
-Whisper-Aufruf, ~2s Zusatzkosten) — auf Wunsch des Nutzers verworfen, da die
-laufenden Zusatzkosten pro Aufruf zu hoch waren ("das muss bleiben wie es war,
-sonst"). Stattdessen den wahrscheinlichen Auslöser direkt behoben, ohne
-jeden Mehraufwand im Normalfall.
+Drei Varianten durchprobiert, mit echten Messungen statt Vermutung:
 
-Fix: `temperature=0.0` (kein Fallback-Loop mehr, ein Versuch pro Segment)
-und `condition_on_previous_text=False` (kein Fortpflanzen eines schlechten
-Segments) in `_transcribe()`.
+1. **`temperature=0.0`** (kein Fallback-Loop) — behob den Hänger, führte aber
+   live zu einer echten Fehlklassifikation: ein Track mit klaren Vocals
+   (Jimmy Somerville, "I Feel Love-Johnny Remember Me") geriet in eine
+   Wiederholungsschleife ("love to love you baby" × 50+) und wurde fälschlich
+   als "kein Vokal" verworfen — die alte Fallback-Liste hätte diese Schleife
+   nachweislich nach 1-2 Versuchen verlassen. Verworfen.
+2. **`temperature=[0.0, 0.4]`** (Kompromiss) — instabil: zwei Läufe mit
+   identischen Parametern auf demselben Track lieferten unterschiedliche
+   Ergebnisse (einmal bestanden, einmal durchgefallen), da Sampling bei
+   Temperatur > 0 echten Zufall in die Dekodierung bringt. Verworfen.
+3. **`condition_on_previous_text=False`, temperature unverändert Standard**
+   — isoliert getestet gegen beide Problem-Tracks: der Yazoo-Hänger lief in
+   160s durch (statt >21 Min.), der Jimmy-Somerville-Track bestand über zwei
+   Läufe hinweg stabil (kein Flip-Flop mehr). **Umgesetzt.**
 
-Mit A/B-Test auf den 7 Original-Tracks aus dem Hang-Report verifiziert (echte
-Messung, kein geratener Wert): der Track, der zuvor bei >21 Min. hing, hing
-mit den alten Parametern im Test erneut (>300s Sicherheits-Timeout gerissen),
-lief mit den neuen Parametern in 86s durch. Bei den übrigen 6 Tracks im
-Schnitt 25-65% schneller. Erkennungsqualität (Containment-Score der Whisper-
-Wörter gegen die bereits vorhandene korrekte LRC) unverändert: Durchschnitt
-alt 78,8% vs. neu 77,9% (−0,9 Prozentpunkte, 3× besser/3× schlechter je nach
-Track, kein systematisches Muster — normale Streuung).
+Vermutlicher Mechanismus: nicht die Temperatur-Fallback-Liste selbst war das
+Problem, sondern dass sich ein einzelnes schlechtes Segment über
+`condition_on_previous_text=True` auf alle folgenden Segmente fortpflanzt
+und so den Hänger über den gesamten Kontext hinweg verstärkt.
+
+Nebenbefund beim Testen (separates, unabhängiges Problem, nicht behoben):
+Bei besagtem Jimmy-Somerville-Track fand Musixmatch den falschen Song
+("You Make Me Feel Mighty Real" von Sylvester statt der echten Medley-
+Lyrics) — der Containment-Score lag trotzdem knapp über der Akzeptanz-
+schwelle (41,7%), nur durch geteiltes generisches Pop-Vokabular ("love",
+"you", "feel"). Whisper selbst transkribierte den echten Song-Inhalt
+("Johnny remember me" etc.) korrekt — das Whisper-Ergebnis war nicht die
+Ursache. Bisher durch den jetzt behobenen "kein Vokal"-Bug verdeckt.
 
 ## ✓ fetch_songtext.py v1.7.3 — Rate-Limit-Backoff pro Provider
 

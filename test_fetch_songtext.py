@@ -1,6 +1,7 @@
 """Unit-Tests für fetch_songtext.py — reine Logikfunktionen."""
 
 import errno
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ import unicodedata
 
 import pytest
 
+import cache_store
 import fetch_songtext
 from fetch_songtext import (
     _CONSENSUS_MIN_JACCARD,
@@ -319,7 +321,9 @@ class TestHeuristicBest:
 def _fake_query_provider(contents: dict[str, str]):
     """Ersetzt fetch_songtext._query_provider — liefert LRC-Inhalte ohne Netzwerk."""
 
-    def _fake(query: str, provider: str, env: dict) -> tuple[str, Path | None]:
+    def _fake(
+        query: str, provider: str, env: dict, artist: str = "", title: str = ""
+    ) -> tuple[str, Path | None]:
         if provider not in contents:
             return provider, None
         return provider, _make_lrc(contents[provider])
@@ -924,3 +928,192 @@ class TestFastFlagMain:
         out = capsys.readouterr().out
         assert "aufgeschoben" in out
         assert "1 aufgeschoben für Whisper" in out
+
+
+class TestProviderCache:
+    """_query_provider mit echtem cache_store (siehe CACHE_DESIGN.md)."""
+
+    def _open(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        return conn
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+
+    def test_cache_hit_skips_live_query(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(
+            conn, "lrclib", "the artist", "the title", "treffer", "[00:01.00]Hallo Welt"
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("Live-Abfrage darf bei Cache-Treffer nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        provider, path = fetch_songtext._query_provider(
+            "the artist the title", "lrclib", {}, artist="the artist", title="the title"
+        )
+        assert path is not None
+        assert "Hallo Welt" in path.read_text(encoding="utf-8")
+
+    def test_cache_nichts_hit_skips_live_query(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "genius", "x", "y", "nichts", None)
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("Live-Abfrage darf bei gecachtem 'nichts' nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        provider, path = fetch_songtext._query_provider(
+            "x y", "genius", {}, artist="x", title="y"
+        )
+        assert path is None
+
+    def test_clean_miss_is_cached_as_nichts(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+
+        class _Result:
+            stderr = ""
+
+        def _fake_run(*a, **k):
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        provider, path = fetch_songtext._query_provider(
+            "a b", "lrclib", {}, artist="a", title="b"
+        )
+        assert path is None
+        cached = cache_store.get_provider(conn, "lrclib", "a", "b")
+        assert cached == {"status": "nichts", "content": None}
+
+    def test_transient_error_is_not_cached(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+
+        class _Result:
+            stderr = "Got status code 402"
+
+        def _fake_run(*a, **k):
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "musixmatch", {}, artist="a", title="b")
+        assert cache_store.get_provider(conn, "musixmatch", "a", "b") is None
+
+    def test_timeout_is_not_cached(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+
+        def _fake_run(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "netease", {}, artist="a", title="b")
+        assert cache_store.get_provider(conn, "netease", "a", "b") is None
+
+    def test_no_cache_conn_falls_back_to_live(self, monkeypatch):
+        fetch_songtext._cache_conn = None  # simuliert --no-cache / fehlende DB
+
+        class _Result:
+            stderr = ""
+
+        called = []
+
+        def _fake_run(*a, **k):
+            called.append(1)
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
+        assert called, "Ohne offene Cache-Verbindung muss live abgefragt werden"
+
+
+class TestTranscriptCache:
+    """_cached_transcribe mit echtem cache_store."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+
+    def test_cache_hit_skips_transcribe(self, tmp_path, monkeypatch):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        audio_key = cache_store.audio_key_for(flac)
+        params_key = cache_store.params_key_for(
+            start=0.0,
+            ctx=30.0,
+            language="de",
+            beam_size=1,
+            condition_on_previous_text=False,
+        )
+        cache_store.put_transcript(
+            conn,
+            audio_key,
+            fetch_songtext._WHISPER_MODEL,
+            params_key,
+            "hallo welt",
+            0.1,
+            -0.2,
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("_transcribe darf bei Cache-Treffer nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+        words, no_speech, logprob = fetch_songtext._cached_transcribe(
+            flac, 0.0, 30.0, "de"
+        )
+        assert words == ["hallo", "welt"]
+        assert no_speech == 0.1
+        assert logprob == -0.2
+
+    def test_miss_transcribes_and_writes_cache(self, tmp_path, monkeypatch):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+
+        flac = tmp_path / "song2.flac"
+        flac.write_bytes(b"y")
+
+        def _fake_transcribe(path, start, ctx, model, language=None):
+            return ["neu", "erkannt"], 0.05, -0.3
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fake_transcribe)
+        words, no_speech, logprob = fetch_songtext._cached_transcribe(
+            flac, 0.0, 30.0, "de"
+        )
+        assert words == ["neu", "erkannt"]
+
+        audio_key = cache_store.audio_key_for(flac)
+        params_key = cache_store.params_key_for(
+            start=0.0,
+            ctx=30.0,
+            language="de",
+            beam_size=1,
+            condition_on_previous_text=False,
+        )
+        cached = cache_store.get_transcript(
+            conn, audio_key, fetch_songtext._WHISPER_MODEL, params_key
+        )
+        assert cached["transcript"] == "neu erkannt"
+
+
+class TestCacheCliFlags:
+    def test_help_lists_cache_flags(self):
+        out = subprocess.run(
+            ["python3", "fetch_songtext.py", "--help"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "--no-cache" in out
+        assert "--refresh-cache" in out
+        assert "--cache-ttl" in out

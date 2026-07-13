@@ -906,6 +906,10 @@ Neuer Fallback: Whisper erkennt keine Sprache, aber ≥ 2 Provider und ≥ 10 Ly
 trotzdem gespeichert (Vokalsong mit ungewöhnlichem Vokalstil, z. B. Falco "Vienna Calling").
 Artist/Titel-Abfrage nutzt FLAC-Metadaten (seit v1.2.7) statt Dateinamen.
 
-## Geplant: Cache-Modul
+## v1.9.0: Cache-Modul (erledigt)
 
 Siehe `CACHE_DESIGN.md` — intelligenter SQLite-Cache (Anbieter-Antworten + Whisper-Transkripte), damit Neuaufbauten nach Code-Änderungen ohne erneute Provider-Abfragen/Whisper laufen. Grundprinzip: läuft immer auch mit leerer/fehlender DB.
+
+- `cache_store.py` — Speicherschicht (SQLite, WAL): `texte` (Liedtexte, per SHA-256-Fingerabdruck dedupliziert), `quelle` (Provider-/`"lokal"`-Treffer inkl. TTL), `gehoert` (Whisper-Transkripte, geschlüsselt über Datei+Modell+Parameter).
+- `cache_seed.py <bibliothekspfad>` — liest alle vorhandenen `.lrc` als Quelle `"lokal"` in den Cache ein.
+- `fetch_songtext.py`: neue Flags `--no-cache`, `--refresh-cache`, `--cache-ttl TAGE` (Default 30). Provider-Abfragen (`_query_provider`) und Whisper-Transkription (`_cached_transcribe`) cachen transparent — geschützter Import (`cache_store` fehlt → Verhalten exakt wie vorher). Drei Ausgänge sauber getrennt: Treffer und „wirklich nichts" werden gecacht, transiente Fehler (Timeout/Rate-Limit/Captcha) nie.

@@ -17,7 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-__version__ = "1.8.0"
+try:
+    import cache_store
+except ImportError:
+    cache_store = None
+
+__version__ = "1.9.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -124,6 +129,15 @@ _SKIP_GENRE_KEYWORDS = {
 
 
 _whisper_models: dict = {}  # name → WhisperModel
+
+# Cache-Modul (siehe CACHE_DESIGN.md). _cache_conn wird einmal pro Lauf in main()
+# gesetzt (None = Cache inaktiv: cache_store fehlt, --no-cache, oder DB-Open
+# fehlgeschlagen). _cache_lock schützt die eine Connection gegen gleichzeitigen
+# Zugriff aus den Provider-Worker-Threads (_query_provider läuft im ThreadPoolExecutor).
+_cache_conn = None
+_cache_ttl_days = 30
+_cache_refresh = False
+_cache_lock = threading.Lock()
 
 
 def _ts() -> str:
@@ -238,7 +252,7 @@ def _rate_limit_wait(provider: str) -> None:
         time.sleep(wait)
 
 
-def _rate_limit_report(provider: str, stderr: str) -> None:
+def _rate_limit_report(provider: str, stderr: str) -> bool:
     """Wertet stderr auf Rate-Limit-Signale aus und setzt ggf. eine Sperre.
 
     Musixmatch meldet Rate-Limits über einen im JSON eingebetteten status_code
@@ -250,6 +264,10 @@ def _rate_limit_report(provider: str, stderr: str) -> None:
     — sie liefern still None zurück, ununterscheidbar von "nicht gefunden".
     Dort greift ausschließlich der proaktive Mindestabstand (Fallback-Zweig
     unten, auch bei sauberem Erfolg — das ist der proaktive Floor).
+
+    Gibt True zurück, wenn ein transientes Rate-Limit/Captcha/Fehler-Signal
+    erkannt wurde (für den Cache: solche Ergebnisse dürfen nicht als "nichts"
+    gespeichert werden — siehe CACHE_DESIGN.md).
     """
     with _rate_limit_lock:
         state = _rate_limit_state.setdefault(
@@ -261,6 +279,7 @@ def _rate_limit_report(provider: str, stderr: str) -> None:
                 _RATE_LIMIT_MAX_SEC,
             )
             state["consecutive_hits"] += 1
+            hit = True
         elif re.search(r"[Gg]ot status code 402", stderr) or (
             "An error occurred while searching for an LRC on" in stderr
         ):
@@ -269,18 +288,58 @@ def _rate_limit_report(provider: str, stderr: str) -> None:
                 _RATE_LIMIT_MAX_SEC,
             )
             state["consecutive_hits"] += 1
+            hit = True
         else:
             state["consecutive_hits"] = 0
             delay = _RATE_LIMIT_FLOOR_SEC
+            hit = False
         state["next_allowed"] = time.monotonic() + delay
+        return hit
 
 
-def _query_provider(query: str, provider: str, env: dict) -> tuple[str, Path | None]:
+def _query_provider(
+    query: str, provider: str, env: dict, artist: str = "", title: str = ""
+) -> tuple[str, Path | None]:
     """Fragt syncedlyrics für einen Anbieter ab, gibt (Anbieter, Temp-LRC-Pfad|None) zurück.
 
     Wartet vorab auf eine ggf. bestehende Rate-Limit-Sperre (_rate_limit_wait)
     und wertet stderr danach auf Rate-Limit-Signale aus (_rate_limit_report).
+
+    Cache (siehe CACHE_DESIGN.md), nur aktiv wenn cache_store importiert werden
+    konnte UND _cache_conn offen ist: vor der Live-Abfrage wird `get_provider`
+    geprüft (außer bei --refresh-cache), danach wird das Ergebnis klassifiziert
+    — Treffer/"nichts" werden gecacht, transiente Fehler (Timeout/Rate-Limit/
+    Captcha) NIE, sonst würden gedrosselte Läufe Songs fälschlich 30 Tage lang
+    als "hat keinen Text" abstempeln.
     """
+    use_cache = cache_store is not None and _cache_conn is not None
+    artist_key = title_key = None
+    if use_cache:
+        artist_key = cache_store.normalize_key(artist)
+        title_key = cache_store.normalize_key(title)
+        if not _cache_refresh:
+            cached = None
+            try:
+                with _cache_lock:
+                    cached = cache_store.get_provider(
+                        _cache_conn,
+                        provider,
+                        artist_key,
+                        title_key,
+                        ttl_days=_cache_ttl_days,
+                    )
+            except Exception:
+                cached = None  # Cache-Fehler dürfen den Lauf nie stören — einfach live abfragen
+            if cached is not None:
+                if cached["status"] == "treffer" and cached["content"]:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".lrc", delete=False, mode="w", encoding="utf-8"
+                    ) as tmp:
+                        tmp.write(cached["content"])
+                        tmp_path = Path(tmp.name)
+                    return provider, tmp_path
+                return provider, None  # "nichts" gecacht
+
     _rate_limit_wait(provider)
     with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -293,11 +352,24 @@ def _query_provider(query: str, provider: str, env: dict) -> tuple[str, Path | N
             env=env,
             timeout=_PROVIDER_TIMEOUT,
         )
-        _rate_limit_report(provider, result.stderr)
+        transient = _rate_limit_report(provider, result.stderr)
     except subprocess.TimeoutExpired:
         tmp_path.unlink(missing_ok=True)
-        return provider, None
-    return provider, tmp_path if tmp_path.exists() else None
+        return provider, None  # Timeout ist transient — nie cachen
+
+    found_path = tmp_path if tmp_path.exists() else None
+    if use_cache and not transient:
+        try:
+            content = found_path.read_text(encoding="utf-8") if found_path else None
+            status = "treffer" if content else "nichts"
+            with _cache_lock:
+                cache_store.put_provider(
+                    _cache_conn, provider, artist_key, title_key, status, content
+                )
+        except Exception:
+            pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+
+    return provider, found_path
 
 
 def _dedupe_by_content(
@@ -637,6 +709,65 @@ def _provider_consensus(
     return None, avg
 
 
+def _cached_transcribe(
+    flac_path: Path,
+    start: float,
+    ctx: float,
+    language: str | None,
+) -> tuple[list[str], float, float]:
+    """Wrapper um _transcribe() mit Cache (siehe CACHE_DESIGN.md).
+
+    Cached wird das RAW-Transkript (Wörter, no_speech_prob, avg_logprob) —
+    die Halluzinations-Erkennung (_is_hallucination) wird bei jedem Aufruf
+    frisch auf das (gecachte oder frische) Ergebnis angewendet, damit sich
+    ihre Schwellwerte künftig ändern können, ohne den Cache zu invalidieren.
+    Nur aktiv wenn cache_store importiert werden konnte UND _cache_conn offen ist.
+    """
+    use_cache = cache_store is not None and _cache_conn is not None
+    audio_key = params_key = None
+    if use_cache:
+        try:
+            audio_key = cache_store.audio_key_for(flac_path)
+            params_key = cache_store.params_key_for(
+                start=start,
+                ctx=ctx,
+                language=language,
+                beam_size=1,
+                condition_on_previous_text=False,
+            )
+            if not _cache_refresh:
+                with _cache_lock:
+                    cached = cache_store.get_transcript(
+                        _cache_conn, audio_key, _WHISPER_MODEL, params_key
+                    )
+                if cached is not None:
+                    words = cached["transcript"].split() if cached["transcript"] else []
+                    return words, cached["no_speech_prob"], cached["avg_logprob"]
+        except Exception:
+            use_cache = False  # Cache-Fehler dürfen den Lauf nie stören
+
+    words, no_speech, logprob = _transcribe(
+        flac_path, start, ctx, _WHISPER_MODEL, language=language
+    )
+
+    if use_cache:
+        try:
+            with _cache_lock:
+                cache_store.put_transcript(
+                    _cache_conn,
+                    audio_key,
+                    _WHISPER_MODEL,
+                    params_key,
+                    " ".join(words),
+                    no_speech,
+                    logprob,
+                )
+        except Exception:
+            pass
+
+    return words, no_speech, logprob
+
+
 def _whisper_best(
     flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
 ) -> tuple[Path | None, float, bool, int, str, str | None]:
@@ -677,8 +808,8 @@ def _whisper_best(
             _print_status(
                 f"  {flac_path.name}  Whisper transkribiert ({done}/{distinct})..."
             )
-            words, no_speech, logprob = _transcribe(
-                flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
+            words, no_speech, logprob = _cached_transcribe(
+                flac_path, start, ctx, lrc_lang
             )
             if _is_hallucination(words):
                 words = []
@@ -723,8 +854,14 @@ def fetch_lrc(
     existing_lrc: Path | None = None,
     no_whisper: bool = False,
     fast: bool = False,
+    artist: str = "",
+    title: str = "",
 ) -> tuple[bool, str, dict]:
     """Alle Provider befragen, bestes Ergebnis via Whisper oder Dauer-Scoring wählen.
+
+    `artist`/`title` (Titel bereits via _clean_query_title bereinigt, GENAU wie
+    beim Bau von `query`) werden nur für den Provider-Cache gebraucht (siehe
+    CACHE_DESIGN.md / _query_provider) — ohne Cache bleiben sie ungenutzt.
 
     Gibt (gefunden, info_str, extras) zurück.
     extras enthält score, providers, words, model (und ggf. fallback=True, consensus=True,
@@ -745,7 +882,8 @@ def fetch_lrc(
     results: dict[str, Path | None] = {}
     with ThreadPoolExecutor(max_workers=len(_ALL_PROVIDERS)) as pool:
         futures = {
-            pool.submit(_query_provider, query, p, env): p for p in _ALL_PROVIDERS
+            pool.submit(_query_provider, query, p, env, artist, title): p
+            for p in _ALL_PROVIDERS
         }
         for future in as_completed(futures):
             try:
@@ -1204,6 +1342,23 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Provider-/Whisper-Cache (fetch_songtext_cache.db) komplett ignorieren",
+    )
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Cache-Treffer überspringen (frisch holen/hören), Ergebnis aber neu in den Cache schreiben",
+    )
+    parser.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=30,
+        metavar="TAGE",
+        help="Cache-Gültigkeit in Tagen für Provider-Treffer (Default 30)",
+    )
+    parser.add_argument(
         "--rebuild-idf",
         action="store_true",
         help=(
@@ -1241,6 +1396,21 @@ def main() -> None:
         print(f"\n=== SONGTEXTE ({mode}) — {_ts()} ===\n")
     else:
         print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
+
+    global _cache_conn, _cache_ttl_days, _cache_refresh
+    _cache_ttl_days = args.cache_ttl
+    _cache_refresh = args.refresh_cache
+    _cache_conn = None
+    if cache_store is not None and not args.no_cache:
+        try:
+            _cache_conn = cache_store.open_cache(
+                Path(__file__).parent / "fetch_songtext_cache.db"
+            )
+        except Exception as e:
+            print(
+                f"Warnung: Cache-Datenbank konnte nicht geöffnet werden ({e}) — Cache inaktiv."
+            )
+            _cache_conn = None
 
     env = _load_env()
     if not args.no_whisper and not args.fast:
@@ -1348,7 +1518,8 @@ def main() -> None:
             audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem
         )
         query_artist = meta_artist or artist
-        query = f"{query_artist} {_clean_query_title(title)}".strip()
+        clean_title = _clean_query_title(title)
+        query = f"{query_artist} {clean_title}".strip()
         expected_dur = tracks_by_title.get(unicodedata.normalize("NFC", title), 0.0)
 
         use_compare = args.recursive or lrc_path.exists()
@@ -1371,6 +1542,8 @@ def main() -> None:
                 existing_lrc=lrc_path,
                 no_whisper=args.no_whisper,
                 fast=args.fast,
+                artist=query_artist,
+                title=clean_title,
             )
         except FileNotFoundError:
             _tprint(f"{_ts()}  {rel}  syncedlyrics nicht gefunden — Abbruch.")

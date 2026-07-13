@@ -161,6 +161,9 @@ python3 fetch_songtext.py --rebuild-idf "/Musik/"               # IDF-Tabelle ne
 | `--no-whisper` | Whisper-Verifikation überspringen (Konsens/Dauer-Heuristik statt Content-Check). Cache-Einträge mit `reason=kein-vokal`/`unter-schwelle` werden automatisch neu geprüft, auch ohne `--force`. |
 | `--fast` | Zwei-Phasen-Workflow, Phase 1 (siehe unten): Konsens und „kein Provider" werden erledigt und gecacht, alles was Whisper bräuchte wird **aufgeschoben** — kein Cache-Eintrag, vorhandene `.lrc` bleibt unangetastet. |
 | `--rebuild-idf` | Baut die IDF-Tabelle (für die Whisper-Matching-Metrik, siehe unten) aus allen `*.lrc` unter `path` neu auf und beendet sich — kein normaler Lauf danach. |
+| `--no-cache` | Provider-/Whisper-Cache (`fetch_songtext_cache.db`, siehe `CACHE_DESIGN.md`) komplett ignorieren — Verhalten wie ohne Cache-Modul. |
+| `--refresh-cache` | Cache-Treffer überspringen (frisch von Anbieter holen / neu anhören), Ergebnis wird trotzdem neu in den Cache geschrieben. |
+| `--cache-ttl TAGE` | Cache-Gültigkeit für Provider-Treffer in Tagen (Default 30). |
 | `-h`, `--help` | Hilfe anzeigen |
 | `-V`, `--version` | Versionsnummer ausgeben |
 
@@ -291,6 +294,8 @@ Info steckt im Methoden-Teil nach `│`.
 **Parallele Instanzen:** `fetch_songtext.py -r` kann bewusst mehrfach gleichzeitig über dieselbe Bibliothek gestartet werden. Jede Instanz sperrt sich beim Betreten eines Ordners exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
 
 **IDF-Tabelle** (`fetch_songtext_idf.json`, neben dem Skript, nicht in der Bibliothek): Dokumentfrequenz je Wort über alle `.lrc`-Dateien der Bibliothek — Basis für die Whisper-Matching-Metrik in Schritt 5. Wird nicht automatisch aktualisiert; bei größeren Bibliotheks-Änderungen einmalig `--rebuild-idf <bibliothekspfad>` laufen lassen. Fehlt die Datei, bricht das Skript beim ersten Whisper-Verifikations-Schritt mit einer klaren Fehlermeldung ab (kein stiller Fallback).
+
+**Cache-Modul** (`fetch_songtext_cache.db`, neben dem Skript; Design siehe `CACHE_DESIGN.md`): speichert erfolgreiche Provider-Antworten (inkl. lokaler `.lrc`, Quelle `"lokal"`, eingelesen per `cache_seed.py <bibliothekspfad>`) und Whisper-Transkripte, damit ein Neuaufbau der Bibliothek nach Code-Änderungen ohne erneute Provider-Abfragen/Whisper-Läufe möglich ist. Grundprinzip: das Skript läuft **immer auch mit leerer oder fehlender Datenbank** exakt wie ohne Cache — der Cache ist nur ein Beschleuniger, nie eine Voraussetzung. Provider-Treffer verfallen nach 30 Tagen (`--cache-ttl`); transiente Fehler (Timeout/Rate-Limit/Captcha) werden nie gecacht. Mit `--no-cache` komplett deaktivieren, mit `--refresh-cache` einmalig auffrischen.
 
 **Felder je Eintrag:**
 

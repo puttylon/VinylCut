@@ -181,7 +181,15 @@ def put_transcript(
         "ON CONFLICT(datei_kennung, modell, parameter_key) DO UPDATE SET "
         "transkript=excluded.transkript, no_speech_prob=excluded.no_speech_prob, "
         "avg_logprob=excluded.avg_logprob, datum=excluded.datum",
-        (audio_key, model, params_key, transcript, no_speech_prob, avg_logprob, _now_iso()),
+        (
+            audio_key,
+            model,
+            params_key,
+            transcript,
+            no_speech_prob,
+            avg_logprob,
+            _now_iso(),
+        ),
     )
     conn.commit()
 

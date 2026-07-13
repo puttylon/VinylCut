@@ -1,6 +1,6 @@
 # Cache-Modul — Design
 
-> **Status:** implementiert (v1.9.0, Schema normalisiert seit v1.9.2). Dieses Dokument beschreibt den aktuellen Stand.
+> **Status:** implementiert (v1.9.0, Schema normalisiert seit v1.9.2, `transkripte` auf Song-Identität umgestellt seit v1.9.3). Dieses Dokument beschreibt den aktuellen Stand.
 
 ## Grundprinzip (das Wichtigste zuerst)
 
@@ -55,16 +55,21 @@ Jeder Text wird unter dem **Fingerabdruck** (SHA-256 des Inhalts) gespeichert. L
 | `fingerabdruck` | Primärschlüssel |
 | `inhalt` | der LRC-Text |
 
-### 4. `transkripte` — Whisper-Ergebnis MIT Parametern
+### 4. `transkripte` — EIN Whisper-Transkript je Song
+Seit v1.9.3 an derselben Künstler+Titel-Identität wie `songs` hängend — nicht mehr an Datei/Modell/Parameter gebunden. Begründung: Path-Bindung invalidierte den Cache unnötig bei Umbenennungen/Verschiebungen der Audiodatei; Künstler+Titel ist stabiler und passt zum bereits bestehenden Prinzip der `songs`-Tabelle.
+
 | Spalte | Bedeutung |
 |---|---|
-| `datei_kennung` | Pfad + Größe + Änderungsdatum (ändert sich die Datei → neu anhören) |
-| `modell` | z. B. `small` |
-| `parameter_key` | kanonischer Schlüssel aller ergebnisrelevanten Einstellungen (Fenster-Start, -Länge, Sprache, `beam_size`, `condition_on_previous_text`, …) |
+| `song_id` | Primärschlüssel, → `songs.id` |
 | `transkript`, `no_speech_prob`, `avg_logprob` | das Gehörte + Kennzahlen |
+| `modell` | z. B. `small` — **reine Info-Spalte, nicht Teil des Schlüssels** |
 | `datum` | Zeitpunkt |
 
-Primärschlüssel: (`datei_kennung`, `modell`, `parameter_key`). **Wiederverwendung nur, wenn Datei UND Modell UND Parameter passen** — jede Änderung macht den Eintrag automatisch ungültig.
+**Ein Song = EIN Transkript**, unabhängig von Modell oder Fenster-Parametern (Start, Länge, Sprache, `beam_size`, …) künftiger Aufrufe — die werden bei jedem Bedarf einfach wiederverwendet statt neu zu transkribieren. Nach Bereinigung der Klammer-Zusätze (`_clean_query_title`) teilen sich mehrere Versionen/Mixe desselben Songs (z. B. Dance Mix, Radio Version, Extended Mix) bewusst EIN gemeinsames Transkript — kein Bug.
+
+In `_whisper_best` wird VOR der Fenster-Schleife geprüft, ob für den Song bereits ein Transkript vorliegt: bei Treffer wird die komplette Whisper-Verarbeitung für den Lauf übersprungen (nur die Vergleichslogik gegen die LRC-Kandidaten läuft weiter); bei Fehltreffer läuft die bestehende Fenster-Schleife wie bisher, und am Ende wird genau einmal das zum gewählten (oder — falls keiner akzeptiert wurde — bestverfügbaren) Kandidaten gehörende Transkript persistent gespeichert. Die Halluzinations-Erkennung (`_is_hallucination`) wird dabei immer frisch auf das (gecachte oder frische) Rohtranskript angewendet, damit sich ihre Schwellwerte künftig ändern können, ohne den Cache zu invalidieren.
+
+**Migration (v1.9.2 → v1.9.3):** Beim ersten `open_cache()` nach dem Schema-Wechsel werden bestehende Zeilen im alten Format (`datei_kennung`/`modell`/`parameter_key`) automatisch übernommen — Künstler/Titel werden aus den Audio-Tags der (noch existierenden) Datei gelesen, nicht neu transkribiert. Die alte Tabelle bleibt als `transkripte_alt_v1`-Backup erhalten. Nicht migrierbare Zeilen (Datei fehlt oder Tags nicht lesbar) werden mit sichtbarer Warnung übersprungen, nie stillschweigend verworfen.
 
 ## Die drei Ausgänge einer Anbieter-Abfrage
 

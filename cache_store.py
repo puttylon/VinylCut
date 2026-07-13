@@ -10,7 +10,8 @@ Schema (normalisiert):
     ergebnisse  — eine Zeile pro (Song, Provider): Treffer/Nichts/Fehlschlag,
                   bei Fehlschlag mit Grund; verweist bei Treffer auf `texte`
     texte       — jeder Liedtext-Inhalt genau einmal (SHA-256-Fingerabdruck)
-    transkripte — Whisper-Ergebnisse je Audiodatei+Modell+Parameter
+    transkripte — EIN Whisper-Transkript je Song (Künstler+Titel-Identität,
+                  wie `songs` — nicht mehr an Datei/Modell/Parameter gebunden)
 
 Ein Fehlschlag (Timeout/Rate-Limit/Captcha) wird IMMER festgehalten (Status
 "fehlschlag" + Grund) — nie stillschweigend verworfen. Er zählt aber nie als
@@ -21,7 +22,6 @@ damit der Aufrufer beim nächsten Lauf erneut live fragt.
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -29,7 +29,18 @@ from pathlib import Path
 
 DEFAULT_TTL_DAYS = 30
 
-_SCHEMA = """
+_TRANSKRIPTE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS transkripte (
+    song_id INTEGER PRIMARY KEY REFERENCES songs(id),
+    transkript TEXT,
+    no_speech_prob REAL,
+    avg_logprob REAL,
+    modell TEXT,
+    datum TEXT
+);
+"""
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS songs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     artist_key TEXT NOT NULL,
@@ -54,16 +65,7 @@ CREATE TABLE IF NOT EXISTS ergebnisse (
     UNIQUE (song_id, quelle)
 );
 
-CREATE TABLE IF NOT EXISTS transkripte (
-    datei_kennung TEXT,
-    modell TEXT,
-    parameter_key TEXT,
-    transkript TEXT,
-    no_speech_prob REAL,
-    avg_logprob REAL,
-    datum TEXT,
-    PRIMARY KEY (datei_kennung, modell, parameter_key)
-);
+{_TRANSKRIPTE_SCHEMA}
 """
 
 
@@ -86,7 +88,121 @@ def open_cache(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
     conn.commit()
+    _migrate_transkripte_v1_to_v2(conn)
     return conn
+
+
+def _migrate_transkripte_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Migriert `transkripte` vom alten Datei-Schlüssel (v1) auf Song-Identität (v2).
+
+    Läuft bei jedem open_cache() automatisch mit, greift aber nur einmal: eine
+    PRAGMA table_info-Prüfung erkennt die alte Spalte `datei_kennung` — fehlt
+    sie (frische DB oder schon migriert), passiert nichts (idempotent).
+
+    Alte Zeilen werden aus dem im Pfad enthaltenen Datei-Tag (Künstler/Titel)
+    rekonstruiert — NICHT neu transkribiert. Mehrere alte Zeilen zur selben
+    Datei (unterschiedliche Fenster-Parameter) werden auf die jüngste (nach
+    `datum`) reduziert, weil das neue Schema nur EIN Transkript pro Song kennt.
+    Nicht migrierbare Zeilen (Datei fehlt / keine Tags lesbar) werden NIE
+    stillschweigend verworfen, sondern nur nicht übernommen — mit sichtbarer
+    Warnung inkl. Grund. Die alte Tabelle bleibt als `transkripte_alt_v1`
+    Backup erhalten (kein DROP).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(transkripte)").fetchall()}
+    if "datei_kennung" not in cols:
+        return  # schon im neuen Format oder frische DB — nichts zu tun
+
+    import fetch_songtext  # lazy: fetch_songtext importiert seinerseits cache_store
+
+    old_rows = conn.execute(
+        "SELECT datei_kennung, modell, transkript, no_speech_prob, avg_logprob, datum "
+        "FROM transkripte"
+    ).fetchall()
+
+    # Pro Pfad nur die juengste Zeile behalten (alte Zeilen: Datei+Modell+
+    # Parameter-Schluessel, oft mehrere Fenster-Starts je Datei — neues Schema
+    # kennt nur genau EIN Transkript je Song).
+    by_path: dict[str, tuple] = {}
+    for (
+        datei_kennung,
+        modell,
+        transkript,
+        no_speech_prob,
+        avg_logprob,
+        datum,
+    ) in old_rows:
+        path_str = datei_kennung.rsplit("|", 2)[0]
+        existing = by_path.get(path_str)
+        if existing is None or datum > existing[-1]:
+            by_path[path_str] = (modell, transkript, no_speech_prob, avg_logprob, datum)
+
+    migrated: list[tuple] = []
+    failed: list[tuple[str, str]] = []
+    for path_str, (
+        modell,
+        transkript,
+        no_speech_prob,
+        avg_logprob,
+        datum,
+    ) in by_path.items():
+        path = Path(path_str)
+        if not path.exists():
+            failed.append((path_str, "Datei fehlt"))
+            continue
+        try:
+            artist, title, _genre = fetch_songtext._read_audio_tags(path)
+        except Exception:
+            artist, title = "", ""
+        if not artist and not title:
+            failed.append((path_str, "keine Tags lesbar"))
+            continue
+        clean_title = fetch_songtext._clean_query_title(title)
+        artist_key = normalize_key(artist)
+        titel_key = normalize_key(clean_title)
+        migrated.append(
+            (
+                artist_key,
+                titel_key,
+                modell,
+                transkript,
+                no_speech_prob,
+                avg_logprob,
+                datum,
+            )
+        )
+
+    conn.execute("ALTER TABLE transkripte RENAME TO transkripte_alt_v1")
+    conn.executescript(_TRANSKRIPTE_SCHEMA)
+
+    for (
+        artist_key,
+        titel_key,
+        modell,
+        transkript,
+        no_speech_prob,
+        avg_logprob,
+        datum,
+    ) in migrated:
+        song_id = _get_or_create_song(conn, artist_key, titel_key)
+        conn.execute(
+            "INSERT INTO transkripte "
+            "(song_id, transkript, no_speech_prob, avg_logprob, modell, datum) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(song_id) DO UPDATE SET "
+            "transkript=excluded.transkript, no_speech_prob=excluded.no_speech_prob, "
+            "avg_logprob=excluded.avg_logprob, modell=excluded.modell, datum=excluded.datum",
+            (song_id, transkript, no_speech_prob, avg_logprob, modell, datum),
+        )
+    conn.commit()
+
+    print(
+        f"Migration transkripte v1->v2: {len(migrated)}/{len(by_path)} Pfade migriert "
+        f"({len(old_rows)} alte Zeilen gelesen) — transkripte_alt_v1 bleibt als Backup."
+    )
+    if failed:
+        print(f"  {len(failed)} nicht migrierbar:")
+        for path_str, reason in failed:
+            print(f"    - {reason}: {path_str}")
 
 
 def normalize_key(text: str) -> str:
@@ -212,13 +328,18 @@ def put_provider(
 
 
 def get_transcript(
-    conn: sqlite3.Connection, audio_key: str, model: str, params_key: str
+    conn: sqlite3.Connection, artist_key: str, titel_key: str
 ) -> dict | None:
-    """Liefert ein gecachtes Whisper-Transkript oder None."""
+    """Liefert das gecachte Whisper-Transkript für (artist_key, titel_key) oder None.
+
+    Legt bei Fehlen KEINEN Song an (reiner Lookup) — existiert der Song nicht
+    oder hat er noch kein Transkript, wird None geliefert.
+    """
     row = conn.execute(
-        "SELECT transkript, no_speech_prob, avg_logprob FROM transkripte "
-        "WHERE datei_kennung=? AND modell=? AND parameter_key=?",
-        (audio_key, model, params_key),
+        "SELECT t.transkript, t.no_speech_prob, t.avg_logprob "
+        "FROM transkripte t JOIN songs s ON s.id = t.song_id "
+        "WHERE s.artist_key=? AND s.titel_key=?",
+        (artist_key, titel_key),
     ).fetchone()
     if row is None:
         return None
@@ -232,41 +353,28 @@ def get_transcript(
 
 def put_transcript(
     conn: sqlite3.Connection,
-    audio_key: str,
-    model: str,
-    params_key: str,
+    artist_key: str,
+    titel_key: str,
     transcript: str,
     no_speech_prob: float,
     avg_logprob: float,
+    modell: str | None = None,
+    genre: str | None = None,
 ) -> None:
-    """Speichert (Upsert) ein Whisper-Transkript mitsamt Kennzahlen."""
+    """Speichert (Upsert) das EINE Whisper-Transkript für diesen Song.
+
+    `modell` ist reine Info-Spalte, nicht Teil des Schlüssels — pro Song wird
+    genau ein Transkript vorgehalten, unabhängig von Modell/Fenster-Parametern
+    künftiger Aufrufe. Legt den Song bei Bedarf an (siehe _get_or_create_song).
+    """
+    song_id = _get_or_create_song(conn, artist_key, titel_key, genre)
     conn.execute(
         "INSERT INTO transkripte "
-        "(datei_kennung, modell, parameter_key, transkript, no_speech_prob, avg_logprob, datum) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(datei_kennung, modell, parameter_key) DO UPDATE SET "
+        "(song_id, transkript, no_speech_prob, avg_logprob, modell, datum) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(song_id) DO UPDATE SET "
         "transkript=excluded.transkript, no_speech_prob=excluded.no_speech_prob, "
-        "avg_logprob=excluded.avg_logprob, datum=excluded.datum",
-        (
-            audio_key,
-            model,
-            params_key,
-            transcript,
-            no_speech_prob,
-            avg_logprob,
-            _now_iso(),
-        ),
+        "avg_logprob=excluded.avg_logprob, modell=excluded.modell, datum=excluded.datum",
+        (song_id, transcript, no_speech_prob, avg_logprob, modell, _now_iso()),
     )
     conn.commit()
-
-
-def audio_key_for(path: Path) -> str:
-    """Bildet einen Dateikennungs-Schlüssel aus Pfad, Größe und Änderungsdatum."""
-    resolved = path.resolve()
-    stat = resolved.stat()
-    return f"{resolved}|{stat.st_size}|{int(stat.st_mtime)}"
-
-
-def params_key_for(**kwargs) -> str:
-    """Bildet einen kanonischen, deterministischen Schlüssel aus Parametern."""
-    return json.dumps(kwargs, sort_keys=True, ensure_ascii=False)

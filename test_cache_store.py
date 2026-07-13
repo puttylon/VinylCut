@@ -1,8 +1,15 @@
 """Tests für die Cache-Speicherschicht (cache_store.py)."""
 
+import shutil
+import sqlite3
+import subprocess
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import cache_store as cs
+
+_HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
 
 def test_open_cache_legt_schema_an(tmp_path):
@@ -192,10 +199,8 @@ def test_genre_wird_am_song_gespeichert(tmp_path):
 
 def test_transcript_roundtrip(tmp_path):
     conn = cs.open_cache(tmp_path / "cache.db")
-    cs.put_transcript(
-        conn, "audio-key-1", "small", '{"beam_size": 5}', "gesungener text", 0.02, -0.3
-    )
-    ergebnis = cs.get_transcript(conn, "audio-key-1", "small", '{"beam_size": 5}')
+    cs.put_transcript(conn, "artist a", "title a", "gesungener text", 0.02, -0.3)
+    ergebnis = cs.get_transcript(conn, "artist a", "title a")
     assert ergebnis == {
         "transcript": "gesungener text",
         "no_speech_prob": 0.02,
@@ -203,53 +208,193 @@ def test_transcript_roundtrip(tmp_path):
     }
 
 
-def test_transcript_anderer_params_key_kein_treffer(tmp_path):
+def test_transcript_anderer_song_kein_treffer(tmp_path):
     conn = cs.open_cache(tmp_path / "cache.db")
-    cs.put_transcript(
-        conn, "audio-key-1", "small", '{"beam_size": 5}', "text", 0.02, -0.3
-    )
-    assert cs.get_transcript(conn, "audio-key-1", "small", '{"beam_size": 1}') is None
+    cs.put_transcript(conn, "artist a", "title a", "text", 0.02, -0.3)
+    assert cs.get_transcript(conn, "artist a", "andere titel") is None
+
+
+def test_transcript_ohne_song_gibt_none_und_legt_nichts_an(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    assert cs.get_transcript(conn, "unbekannt", "unbekannt") is None
+    assert conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0] == 0
 
 
 def test_transcript_upsert(tmp_path):
     conn = cs.open_cache(tmp_path / "cache.db")
-    cs.put_transcript(conn, "audio-key-1", "small", "params", "alter text", 0.1, -0.5)
-    cs.put_transcript(conn, "audio-key-1", "small", "params", "neuer text", 0.05, -0.2)
-    ergebnis = cs.get_transcript(conn, "audio-key-1", "small", "params")
+    cs.put_transcript(conn, "artist a", "title a", "alter text", 0.1, -0.5)
+    cs.put_transcript(conn, "artist a", "title a", "neuer text", 0.05, -0.2)
+    ergebnis = cs.get_transcript(conn, "artist a", "title a")
     assert ergebnis["transcript"] == "neuer text"
 
 
-def test_audio_key_for_deterministisch(tmp_path):
-    datei = tmp_path / "song.wav"
-    datei.write_bytes(b"x" * 1000)
-    schluessel1 = cs.audio_key_for(datei)
-    schluessel2 = cs.audio_key_for(datei)
-    assert schluessel1 == schluessel2
-    assert str(datei.resolve()) in schluessel1
-    assert "1000" in schluessel1
+def test_transcript_teilt_sich_song_mit_provider_cache(tmp_path):
+    """Ein Song = eine Zeile in `songs`, gemeinsam genutzt von Provider- und Transkript-Cache."""
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs.put_provider(conn, "lrclib", "artist a", "title a", "treffer", "lyrics")
+    cs.put_transcript(conn, "artist a", "title a", "text", 0.1, -0.5)
+    assert conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0] == 1
 
 
-def test_audio_key_for_aendert_sich_bei_groessenaenderung(tmp_path):
-    datei = tmp_path / "song.wav"
-    datei.write_bytes(b"x" * 1000)
-    schluessel1 = cs.audio_key_for(datei)
-    datei.write_bytes(b"x" * 2000)
-    schluessel2 = cs.audio_key_for(datei)
-    assert schluessel1 != schluessel2
-
-
-def test_params_key_for_deterministisch_und_ordnungsunabhaengig():
-    a = cs.params_key_for(beam_size=5, language="de", vad=True)
-    b = cs.params_key_for(vad=True, language="de", beam_size=5)
-    assert a == b
-
-
-def test_params_key_for_unterschiedliche_werte_unterschiedlicher_key():
-    a = cs.params_key_for(beam_size=5)
-    b = cs.params_key_for(beam_size=1)
-    assert a != b
+def test_transcript_modell_ist_reine_info_spalte(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs.put_transcript(conn, "artist a", "title a", "text", 0.1, -0.5, modell="small")
+    modell = conn.execute(
+        "SELECT t.modell FROM transkripte t JOIN songs s ON s.id=t.song_id "
+        "WHERE s.artist_key=? AND s.titel_key=?",
+        ("artist a", "title a"),
+    ).fetchone()[0]
+    assert modell == "small"
+    # modell ist nicht Teil des Schluessels: Upsert mit anderem Modell ersetzt
+    # dieselbe Zeile statt eine zweite anzulegen.
+    cs.put_transcript(
+        conn, "artist a", "title a", "neuer text", 0.05, -0.2, modell="anderes-modell"
+    )
+    anzahl = conn.execute("SELECT COUNT(*) FROM transkripte").fetchone()[0]
+    assert anzahl == 1
 
 
 def test_normalize_key():
     assert cs.normalize_key("  The Beatles  ") == "the beatles"
     assert cs.normalize_key("HEY JUDE") == "hey jude"
+
+
+def _make_tagged_flac(path, artist: str, title: str) -> None:
+    """Erzeugt eine winzige, echte FLAC-Datei mit lesbaren ARTIST/TITLE-Tags."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=8000:cl=mono",
+            "-t",
+            "0.2",
+            "-metadata",
+            f"artist={artist}",
+            "-metadata",
+            f"title={title}",
+            str(path),
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg nicht verfügbar")
+class TestMigrationTranskripteV1ZuV2:
+    """_migrate_transkripte_v1_to_v2: alte Datei-Zeilen -> neue Song-Identität."""
+
+    def _old_format_db(
+        self, db_path, datei_kennung, transkript, no_speech, logprob, datum
+    ):
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(
+            """
+            CREATE TABLE songs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artist_key TEXT NOT NULL,
+                titel_key TEXT NOT NULL,
+                genre TEXT,
+                UNIQUE (artist_key, titel_key)
+            );
+            CREATE TABLE texte (fingerabdruck TEXT PRIMARY KEY, inhalt TEXT);
+            CREATE TABLE ergebnisse (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                song_id INTEGER NOT NULL REFERENCES songs(id),
+                quelle TEXT NOT NULL,
+                status TEXT NOT NULL,
+                fehlergrund TEXT,
+                fingerabdruck TEXT REFERENCES texte(fingerabdruck),
+                datum TEXT NOT NULL,
+                UNIQUE (song_id, quelle)
+            );
+            CREATE TABLE transkripte (
+                datei_kennung TEXT,
+                modell TEXT,
+                parameter_key TEXT,
+                transkript TEXT,
+                no_speech_prob REAL,
+                avg_logprob REAL,
+                datum TEXT,
+                PRIMARY KEY (datei_kennung, modell, parameter_key)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO transkripte "
+            "(datei_kennung, modell, parameter_key, transkript, no_speech_prob, avg_logprob, datum) "
+            "VALUES (?, 'small', '{\"start\": 0.0}', ?, ?, ?, ?)",
+            (datei_kennung, transkript, no_speech, logprob, datum),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_migriert_bestehende_zeile_unter_artist_titel_key(self, tmp_path):
+        flac = tmp_path / "song.flac"
+        _make_tagged_flac(flac, "The Migrators", "Old Song (Live Version)")
+        stat = flac.stat()
+        datei_kennung = f"{flac.resolve()}|{stat.st_size}|{int(stat.st_mtime)}"
+
+        db_path = tmp_path / "cache.db"
+        self._old_format_db(
+            db_path,
+            datei_kennung,
+            "alter transkribierter text",
+            0.05,
+            -0.3,
+            "2026-01-01T00:00:00+00:00",
+        )
+
+        conn = cs.open_cache(db_path)
+
+        cached = cs.get_transcript(conn, "the migrators", "old song")
+        assert cached == {
+            "transcript": "alter transkribierter text",
+            "no_speech_prob": 0.05,
+            "avg_logprob": -0.3,
+        }
+
+        # Backup-Tabelle bleibt mit der Originalzeile erhalten.
+        alt_row = conn.execute(
+            "SELECT datei_kennung, transkript FROM transkripte_alt_v1"
+        ).fetchone()
+        assert alt_row == (datei_kennung, "alter transkribierter text")
+
+    def test_fehlende_datei_wird_nicht_migriert_aber_gewarnt(self, tmp_path, capsys):
+        datei_kennung = f"{tmp_path / 'verschwunden.flac'}|1234|1700000000"
+        db_path = tmp_path / "cache.db"
+        self._old_format_db(
+            db_path,
+            datei_kennung,
+            "verlorener text",
+            0.9,
+            -1.0,
+            "2026-01-01T00:00:00+00:00",
+        )
+
+        conn = cs.open_cache(db_path)
+
+        assert conn.execute("SELECT COUNT(*) FROM transkripte").fetchone()[0] == 0
+        out = capsys.readouterr().out
+        assert "nicht migrierbar" in out
+        assert "Datei fehlt" in out
+
+    def test_migration_ist_idempotent(self, tmp_path):
+        flac = tmp_path / "song.flac"
+        _make_tagged_flac(flac, "Idempotent Artist", "Idempotent Song")
+        stat = flac.stat()
+        datei_kennung = f"{flac.resolve()}|{stat.st_size}|{int(stat.st_mtime)}"
+
+        db_path = tmp_path / "cache.db"
+        self._old_format_db(
+            db_path, datei_kennung, "text", 0.05, -0.3, "2026-01-01T00:00:00+00:00"
+        )
+
+        conn = cs.open_cache(db_path)
+        conn.close()
+        # zweites Oeffnen darf nicht erneut migrieren/scheitern (alte Spalte ist weg)
+        conn2 = cs.open_cache(db_path)
+        cached = cs.get_transcript(conn2, "idempotent artist", "idempotent song")
+        assert cached["transcript"] == "text"

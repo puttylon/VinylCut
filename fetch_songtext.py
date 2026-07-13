@@ -22,7 +22,7 @@ try:
 except ImportError:
     cache_store = None
 
-__version__ = "1.9.2"
+__version__ = "1.9.3"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -740,71 +740,27 @@ def _provider_consensus(
     return None, avg
 
 
-def _cached_transcribe(
-    flac_path: Path,
-    start: float,
-    ctx: float,
-    language: str | None,
-) -> tuple[list[str], float, float]:
-    """Wrapper um _transcribe() mit Cache (siehe CACHE_DESIGN.md).
-
-    Cached wird das RAW-Transkript (Wörter, no_speech_prob, avg_logprob) —
-    die Halluzinations-Erkennung (_is_hallucination) wird bei jedem Aufruf
-    frisch auf das (gecachte oder frische) Ergebnis angewendet, damit sich
-    ihre Schwellwerte künftig ändern können, ohne den Cache zu invalidieren.
-    Nur aktiv wenn cache_store importiert werden konnte UND _cache_conn offen ist.
-    """
-    use_cache = cache_store is not None and _cache_conn is not None
-    audio_key = params_key = None
-    if use_cache:
-        try:
-            audio_key = cache_store.audio_key_for(flac_path)
-            params_key = cache_store.params_key_for(
-                start=start,
-                ctx=ctx,
-                language=language,
-                beam_size=1,
-                condition_on_previous_text=False,
-            )
-            if not _cache_refresh:
-                with _cache_lock:
-                    cached = cache_store.get_transcript(
-                        _cache_conn, audio_key, _WHISPER_MODEL, params_key
-                    )
-                if cached is not None:
-                    words = cached["transcript"].split() if cached["transcript"] else []
-                    return words, cached["no_speech_prob"], cached["avg_logprob"]
-        except Exception:
-            use_cache = False  # Cache-Fehler dürfen den Lauf nie stören
-
-    words, no_speech, logprob = _transcribe(
-        flac_path, start, ctx, _WHISPER_MODEL, language=language
-    )
-
-    if use_cache:
-        try:
-            with _cache_lock:
-                cache_store.put_transcript(
-                    _cache_conn,
-                    audio_key,
-                    _WHISPER_MODEL,
-                    params_key,
-                    " ".join(words),
-                    no_speech,
-                    logprob,
-                )
-        except Exception:
-            pass
-
-    return words, no_speech, logprob
-
-
 def _whisper_best(
-    flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
+    flac_path: Path,
+    candidates: list[Path],
+    expected_dur: float = 0.0,
+    artist: str = "",
+    title: str = "",
 ) -> tuple[Path | None, float, bool, int, str, str | None]:
     """Verifikation via small: bester Kandidat nach IDF-Jaccard-Score (_idf_jaccard).
 
     Gibt (bester Kandidat, score, has_vocals, words, model_used, language) zurück.
+
+    Song-Transkript-Cache (siehe CACHE_DESIGN.md, Künstler+Titel-Identität wie
+    beim Provider-Cache): existiert bereits ein gecachtes Transkript für
+    (artist, title), wird die GESAMTE Fenster-Schleife/alle Whisper-Aufrufe für
+    diesen Lauf übersprungen — das gecachte Transkript entscheidet direkt über
+    has_vocals/total_words, die Vergleichslogik (idf-Jaccard je LRC-Kandidat)
+    läuft unverändert weiter. Bei einem Cache-Miss läuft die bestehende
+    Fenster-Schleife wie bisher, aber am Ende wird GENAU EINMAL das zum
+    gewählten (oder — falls keiner akzeptiert wurde — bestverfügbaren)
+    Kandidaten gehörende Transkript persistent gecacht, damit derselbe Song
+    beim nächsten Lauf nicht erneut komplett durchgehört werden muss.
     """
     if _get_whisper_model(_WHISPER_MODEL) is None:
         return (None, 0.0, False, 0, "", None)
@@ -824,12 +780,81 @@ def _whisper_best(
             start = 0.0
         candidate_starts.append((p, start))
 
-    # cache: start_key → (words, no_speech_prob, avg_logprob)
-    _CacheVal = tuple[list[str], float, float]
-
     lrc_lang = _detect_lrc_language(candidates)
 
+    use_cache = cache_store is not None and _cache_conn is not None
+    artist_key = titel_key = None
+    cached_transcript: dict | None = None
+    if use_cache:
+        artist_key = cache_store.normalize_key(artist)
+        titel_key = cache_store.normalize_key(title)
+        if not _cache_refresh:
+            try:
+                with _cache_lock:
+                    cached_transcript = cache_store.get_transcript(
+                        _cache_conn, artist_key, titel_key
+                    )
+            except Exception:
+                cached_transcript = None  # Cache-Fehler dürfen den Lauf nie stören
+
+    def _score_against(words: list[str], p: Path) -> float:
+        if not words:
+            return 0.0
+        try:
+            return _idf_jaccard(
+                set(words),
+                set(_extract_lrc_words(p.read_text(encoding="utf-8"))),
+                n_docs,
+                df,
+            )
+        except Exception:
+            return 0.0
+
+    if cached_transcript is not None:
+        # Song-Cache-Treffer: kein einziger Whisper-Aufruf für diesen Lauf.
+        words = (
+            cached_transcript["transcript"].split()
+            if cached_transcript["transcript"]
+            else []
+        )
+        if _is_hallucination(words):
+            words = []
+        no_speech = cached_transcript["no_speech_prob"]
+        logprob = cached_transcript["avg_logprob"]
+        total_words = len(words)
+        has_vocals = (
+            no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
+        )
+
+        best_path: Path | None = None
+        best_score = 0.0
+        for p, _start in candidate_starts:
+            score = _score_against(words, p)
+            if score > best_score:
+                best_score = score
+                best_path = p
+
+        return (
+            best_path,
+            best_score,
+            has_vocals,
+            total_words,
+            _WHISPER_MODEL,
+            lrc_lang,
+        )
+
+    # Cache-Miss: bestehende Fenster-Schleife unverändert.
+    # cache: start_key → (words, no_speech_prob, avg_logprob) — hier bereits
+    # halluzinationsgefiltert, für die Score-/Vokal-Logik dieses Laufs.
+    # raw_cache: dieselben Keys, aber die UNGEFILTERTEN Whisper-Wörter — nur
+    # diese werden persistiert, damit die Halluzinations-Erkennung beim
+    # nächsten Abruf frisch (mit ggf. geänderten Schwellwerten) erneut auf das
+    # Rohtranskript angewendet werden kann, statt an einer alten Filterung
+    # festzuhängen.
+    _CacheVal = tuple[list[str], float, float]
+
     cache: dict[int, _CacheVal] = {}
+    raw_cache: dict[int, _CacheVal] = {}
     distinct = len({round(start / 3) for _, start in candidate_starts})
     done = 0
     for _, start in candidate_starts:
@@ -839,9 +864,10 @@ def _whisper_best(
             _print_status(
                 f"  {flac_path.name}  Whisper transkribiert ({done}/{distinct})..."
             )
-            words, no_speech, logprob = _cached_transcribe(
-                flac_path, start, ctx, lrc_lang
+            words, no_speech, logprob = _transcribe(
+                flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
             )
+            raw_cache[key] = (words, no_speech, logprob)
             if _is_hallucination(words):
                 words = []
             cache[key] = (words, no_speech, logprob)
@@ -854,24 +880,50 @@ def _whisper_best(
         avg_no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
     )
 
-    best_path: Path | None = None
+    best_path = None
     best_score = 0.0
+    abs_best_path: Path | None = None
+    abs_best_score = -1.0
+    abs_best_key: int | None = None
     for p, start in candidate_starts:
-        words, _, _ = cache.get(round(start / 3), ([], 1.0, 0.0))
-        if not words:
-            continue
-        try:
-            score = _idf_jaccard(
-                set(words),
-                set(_extract_lrc_words(p.read_text(encoding="utf-8"))),
-                n_docs,
-                df,
-            )
-        except Exception:
-            score = 0.0
+        key = round(start / 3)
+        words, _, _ = cache.get(key, ([], 1.0, 0.0))
+        score = _score_against(words, p)
+        if score > abs_best_score:
+            abs_best_score = score
+            abs_best_path = p
+            abs_best_key = key
         if score > best_score:
             best_score = score
             best_path = p
+
+    # GENAU EINMAL persistent cachen: das Transkript des gewählten best_path,
+    # oder — wenn kein Kandidat akzeptiert wurde (kein-vokal/unter-schwelle) —
+    # das bestverfügbare (höchster Score), sonst das erste berechnete Fenster.
+    if use_cache:
+        if best_path is not None:
+            chosen_key = round(
+                next(s for p, s in candidate_starts if p == best_path) / 3
+            )
+        elif abs_best_path is not None:
+            chosen_key = abs_best_key
+        else:
+            chosen_key = round(candidate_starts[0][1] / 3) if candidate_starts else None
+        if chosen_key is not None and chosen_key in raw_cache:
+            chosen_words, chosen_no_speech, chosen_logprob = raw_cache[chosen_key]
+            try:
+                with _cache_lock:
+                    cache_store.put_transcript(
+                        _cache_conn,
+                        artist_key,
+                        titel_key,
+                        " ".join(chosen_words),
+                        chosen_no_speech,
+                        chosen_logprob,
+                        modell=_WHISPER_MODEL,
+                    )
+            except Exception:
+                pass
 
     return (best_path, best_score, has_vocals, total_words, _WHISPER_MODEL, lrc_lang)
 
@@ -1046,7 +1098,9 @@ def fetch_lrc(
             whisper_words,
             model_used,
             lrc_lang,
-        ) = _whisper_best(flac_path, all_candidates, expected_dur)
+        ) = _whisper_best(
+            flac_path, all_candidates, expected_dur, artist=artist, title=title
+        )
 
         method = f"whisper-{model_used}" if model_used else "heuristik"
         model_str = f"[{model_used}]" if model_used else ""

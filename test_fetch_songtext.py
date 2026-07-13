@@ -916,7 +916,13 @@ class TestFastFlagMain:
         monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
         monkeypatch.setattr(fetch_songtext, "_get_whisper_model", _fail_if_called)
 
-        monkeypatch.setattr("sys.argv", ["fetch_songtext.py", str(album), "--fast"])
+        # --no-cache: main() ohne Cache-Mock würde sonst die ECHTE
+        # fetch_songtext_cache.db neben dem Skript öffnen (Path(__file__).parent-
+        # Pfad) — mit dem oben global gepatchten _read_audio_tags ("Artist"/
+        # "Song") wäre das eine reale Datenkorruption der Produktions-DB.
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", str(album), "--fast", "--no-cache"]
+        )
         fetch_songtext.main()
 
         # Kein Cache-Eintrag für den aufgeschobenen Track.
@@ -1077,79 +1083,111 @@ class TestProviderCache:
 
 
 class TestTranscriptCache:
-    """_cached_transcribe mit echtem cache_store."""
+    """_whisper_best mit echtem cache_store: Song-Identität (Künstler+Titel)
+
+    statt Datei-Identität. Ein gecachtes Transkript gehört zu GENAU EINEM Song
+    (artist_key/titel_key) — unabhängig von Datei, Modell oder Fenster-Parametern.
+    """
 
     def teardown_method(self):
         fetch_songtext._cache_conn = None
         fetch_songtext._cache_refresh = False
 
-    def test_cache_hit_skips_transcribe(self, tmp_path, monkeypatch):
+    def _prep(self, monkeypatch, tmp_path):
         conn = cache_store.open_cache(tmp_path / "cache.db")
         fetch_songtext._cache_conn = conn
         fetch_songtext._cache_ttl_days = 30
         fetch_songtext._cache_refresh = False
-
-        flac = tmp_path / "song.flac"
-        flac.write_bytes(b"x")
-        audio_key = cache_store.audio_key_for(flac)
-        params_key = cache_store.params_key_for(
-            start=0.0,
-            ctx=30.0,
-            language="de",
-            beam_size=1,
-            condition_on_previous_text=False,
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(fetch_songtext, "_load_idf", lambda: (1, {}))
+        monkeypatch.setattr(
+            fetch_songtext, "_detect_lrc_language", lambda candidates: None
         )
+        return conn
+
+    def _make_lrc(self, tmp_path, name, content):
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_cache_hit_skips_transcribe(self, tmp_path, monkeypatch):
+        conn = self._prep(monkeypatch, tmp_path)
         cache_store.put_transcript(
-            conn,
-            audio_key,
-            fetch_songtext._WHISPER_MODEL,
-            params_key,
-            "hallo welt",
-            0.1,
-            -0.2,
+            conn, "the artist", "the title", "hello world foo bar", 0.1, -0.2
         )
 
         def _fail_if_called(*a, **k):
-            pytest.fail("_transcribe darf bei Cache-Treffer nicht laufen")
+            pytest.fail("_transcribe darf bei Song-Cache-Treffer nicht laufen")
 
         monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
-        words, no_speech, logprob = fetch_songtext._cached_transcribe(
-            flac, 0.0, 30.0, "de"
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]hello world foo bar\n")
+
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="The Artist", title="The Title"
         )
-        assert words == ["hallo", "welt"]
-        assert no_speech == 0.1
-        assert logprob == -0.2
+        assert best_path == lrc
+        assert has_vocals is True
+        assert words == 4
 
     def test_miss_transcribes_and_writes_cache(self, tmp_path, monkeypatch):
-        conn = cache_store.open_cache(tmp_path / "cache.db")
-        fetch_songtext._cache_conn = conn
-        fetch_songtext._cache_ttl_days = 30
-        fetch_songtext._cache_refresh = False
+        self._prep(monkeypatch, tmp_path)
+
+        def _fake_transcribe(path, start, ctx, model, language=None):
+            return ["hello", "world", "foo", "bar"], 0.05, -0.3
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fake_transcribe)
 
         flac = tmp_path / "song2.flac"
         flac.write_bytes(b"y")
+        lrc = self._make_lrc(tmp_path, "b.lrc", "[00:01.00]hello world foo bar\n")
 
-        def _fake_transcribe(path, start, ctx, model, language=None):
-            return ["neu", "erkannt"], 0.05, -0.3
-
-        monkeypatch.setattr(fetch_songtext, "_transcribe", _fake_transcribe)
-        words, no_speech, logprob = fetch_songtext._cached_transcribe(
-            flac, 0.0, 30.0, "de"
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="Another Artist", title="Another Title"
         )
-        assert words == ["neu", "erkannt"]
+        assert best_path == lrc
 
-        audio_key = cache_store.audio_key_for(flac)
-        params_key = cache_store.params_key_for(
-            start=0.0,
-            ctx=30.0,
-            language="de",
-            beam_size=1,
-            condition_on_previous_text=False,
-        )
         cached = cache_store.get_transcript(
-            conn, audio_key, fetch_songtext._WHISPER_MODEL, params_key
+            fetch_songtext._cache_conn, "another artist", "another title"
         )
-        assert cached["transcript"] == "neu erkannt"
+        assert cached["transcript"] == "hello world foo bar"
+        assert cached["no_speech_prob"] == 0.05
+        assert cached["avg_logprob"] == -0.3
+
+    def test_zweiter_lauf_selber_song_nutzt_cache_ohne_erneutes_transkribieren(
+        self, tmp_path, monkeypatch
+    ):
+        """Zwei verschiedene Kandidaten-Pfade/Fenster für DENSELBEN Song (artist+title):
+        der zweite _whisper_best-Aufruf nutzt den Song-Cache, _transcribe läuft nur einmal."""
+        self._prep(monkeypatch, tmp_path)
+
+        calls = []
+
+        def _counting_transcribe(path, start, ctx, model, language=None):
+            calls.append(path)
+            return ["hello", "world", "foo", "bar"], 0.05, -0.3
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _counting_transcribe)
+
+        flac1 = tmp_path / "song_v1.flac"
+        flac1.write_bytes(b"y1")
+        lrc1 = self._make_lrc(tmp_path, "c1.lrc", "[00:01.00]hello world foo bar\n")
+
+        flac2 = tmp_path / "song_v2.flac"
+        flac2.write_bytes(b"y2")
+        lrc2 = self._make_lrc(tmp_path, "c2.lrc", "[00:05.00]hello world foo bar\n")
+
+        fetch_songtext._whisper_best(
+            flac1, [lrc1], artist="Same Artist", title="Same Title"
+        )
+        assert len(calls) == 1
+
+        fetch_songtext._whisper_best(
+            flac2, [lrc2], artist="Same Artist", title="Same Title"
+        )
+        assert len(calls) == 1  # kein zweiter _transcribe-Aufruf für denselben Song
 
 
 class TestCacheCliFlags:

@@ -906,6 +906,10 @@ Neuer Fallback: Whisper erkennt keine Sprache, aber ≥ 2 Provider und ≥ 10 Ly
 trotzdem gespeichert (Vokalsong mit ungewöhnlichem Vokalstil, z. B. Falco "Vienna Calling").
 Artist/Titel-Abfrage nutzt FLAC-Metadaten (seit v1.2.7) statt Dateinamen.
 
+## v1.9.3: Transkript-Cache auf Song-Identität umgestellt (erledigt)
+
+`transkripte` hing bisher an Datei-Pfad+Größe+Datum — invalidierte den Cache unnötig bei Umbenennungen/Verschiebungen. Umgestellt auf Künstler+Titel (analog `songs`, siehe `CACHE_DESIGN.md`): **ein Song = EIN Whisper-Transkript**, unabhängig von Modell/Fenster-Parametern. Nach Bereinigung der Klammer-Zusätze teilen sich mehrere Versionen/Mixe desselben Songs bewusst ein gemeinsames Transkript. `_whisper_best` prüft jetzt vor der Fenster-Schleife auf einen Song-Cache-Treffer (überspringt bei Treffer alle Whisper-Aufrufe komplett) und schreibt am Ende genau einmal das Transkript des gewählten (bzw. bestverfügbaren) Kandidaten zurück. Bestehende Zeilen im alten Format wurden automatisch migriert (Künstler/Titel aus den Audio-Tags gelesen, nicht neu transkribiert); die alte Tabelle bleibt als `transkripte_alt_v1`-Backup erhalten. `audio_key_for`/`params_key_for` entfernt (keine Aufrufer mehr).
+
 ## v1.9.2: Cache-Bugfixes + Schema-Normalisierung (erledigt)
 
 Zwei reale Fehler behoben, die den Cache seit v1.9.0 unbrauchbar machten:

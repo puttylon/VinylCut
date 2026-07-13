@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-__version__ = "1.7.7"
+__version__ = "1.7.8"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1022,8 +1022,26 @@ def _try_claim_folder(folder: Path) -> "IO | None | object":
 def _release_folder(lockfile: "IO | None | object") -> None:
     if lockfile is None or lockfile is _FOLDER_BUSY:
         return
-    fcntl.flock(lockfile, fcntl.LOCK_UN)
-    lockfile.close()
+    # Robust gegen einen bereits ungültigen Deskriptor: Während ein Ordner
+    # bearbeitet wird, laufen nebenläufig etliche Subprozesse (syncedlyrics,
+    # ffmpeg) und C-Bibliotheken (ctranslate2/faster-whisper zum Audio-Dekodieren).
+    # Schließt eine davon versehentlich den rohen fd der Lock-Datei quer weg,
+    # steht das Python-Objekt noch offen, aber flock(LOCK_UN) scheitert dann mit
+    # OSError EBADF ("Bad file descriptor") — das riss zuvor den ganzen
+    # (rekursiven) Lauf ab. flock-Sperren sind an die offene Dateibeschreibung
+    # gebunden: Sobald deren fd schließt, gibt der Kernel die Sperre automatisch
+    # frei. Ist der fd hier also schon weg, ist die Sperre bereits aufgehoben und
+    # LOCK_UN nur noch redundant — das Schlucken verletzt die Parallel-Instanz-
+    # Semantik nicht, sondern verhindert nur den Absturz. (ValueError deckt den
+    # Fall ab, dass das Python-Objekt selbst bereits geschlossen wurde.)
+    try:
+        fcntl.flock(lockfile, fcntl.LOCK_UN)
+    except (OSError, ValueError):
+        pass
+    try:
+        lockfile.close()
+    except (OSError, ValueError):
+        pass
 
 
 def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None:

@@ -527,6 +527,27 @@ class TestFolderClaim:
         monkeypatch.setattr(fetch_songtext.fcntl, "flock", raise_enotsup)
         assert _try_claim_folder(tmp_path) is None
 
+    def test_release_survives_externally_closed_fd(self, tmp_path):
+        """Regression (v1.7.8): Wird der rohe fd der Lock-Datei quergeschlossen
+        (z.B. durch einen nebenläufigen Subprozess/C-Bibliothek), steht das
+        Python-Objekt noch offen und flock(LOCK_UN) wirft OSError EBADF. Das darf
+        den Lauf nicht mehr abbrechen — der Kernel hat die Sperre beim Schließen
+        des fd bereits freigegeben."""
+        import os
+
+        lock = _try_claim_folder(tmp_path)
+        assert lock is not None and lock is not _FOLDER_BUSY
+        os.close(lock.fileno())  # fd quer wegschließen, Objekt bleibt "offen"
+        _release_folder(lock)  # darf nicht mehr werfen
+
+    def test_release_survives_closed_lock_object(self, tmp_path):
+        """_release_folder muss auch idempotent gegen ein bereits geschlossenes
+        Lock-Objekt sein (ValueError statt OSError)."""
+        lock = _try_claim_folder(tmp_path)
+        assert lock is not None and lock is not _FOLDER_BUSY
+        lock.close()
+        _release_folder(lock)  # darf nicht mehr werfen
+
 
 class TestLoadRelease:
     """Gleicher Grund wie TestLoadCache: Titel aus release.json (NFC, JSON-Text)

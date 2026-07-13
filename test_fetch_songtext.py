@@ -382,6 +382,84 @@ class TestFetchLrcNoWhisper:
         assert not lrc_path.exists()
 
 
+class TestFetchLrcFast:
+    """Integrationstests für den `fast`-Parameter von fetch_lrc(): Phase 1 des
+    Zwei-Phasen-Workflows. Konsens und 'kein Provider' laufen wie im
+    Normalmodus, der Whisper-Fall wird stattdessen aufgeschoben (kein
+    Whisper, keine Heuristik-Vermutung, kein Schreiben der .lrc)."""
+
+    LRC_A = TestProviderConsensus.LRC_A
+    LRC_B = TestProviderConsensus.LRC_B
+    LRC_C = TestProviderConsensus.LRC_C
+
+    def test_3p_konsens_schreibt_normal_trotz_fast(self, tmp_path, monkeypatch):
+        # 3 Provider einig → Konsens wird auch mit fast=True direkt geschrieben,
+        # ganz ohne Whisper (wie im Normalmodus).
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider(
+                {"lrclib": self.LRC_A, "genius": self.LRC_B, "netease": self.LRC_C}
+            ),
+        )
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc("query", lrc_path, env={}, fast=True)
+        assert found is True
+        assert extras["method"] == "konsens"
+        assert extras.get("deferred") is None
+        assert lrc_path.exists()
+
+    def test_kein_provider_bleibt_kein_provider_trotz_fast(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc("query", lrc_path, env={}, fast=True)
+        assert found is False
+        assert extras["reason"] == "kein-provider"
+        assert extras.get("deferred") is None
+        assert not lrc_path.exists()
+
+    def test_whisper_fall_wird_aufgeschoben_ohne_whisper_aufruf(
+        self, tmp_path, monkeypatch
+    ):
+        # Nur 2 Provider → kein 3er-Konsens → im Normalmodus liefe jetzt
+        # Whisper. Mit fast=True muss stattdessen aufgeschoben werden.
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.LRC_A, "genius": self.LRC_B}),
+        )
+
+        def _fail_if_called(*args, **kwargs):
+            pytest.fail("Whisper darf im --fast-Modus nicht aufgerufen werden")
+
+        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_called)
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+
+        flac_path = tmp_path / "dummy.flac"
+        flac_path.write_bytes(b"")  # nur .exists() zählt, Inhalt irrelevant
+
+        existing_lrc = tmp_path / "existing.lrc"
+        existing_content = b"[00:01.00]alte Zeile\n"
+        existing_lrc.write_bytes(existing_content)
+
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc(
+            "query",
+            lrc_path,
+            env={},
+            flac_path=flac_path,
+            existing_lrc=existing_lrc,
+            fast=True,
+        )
+
+        assert found is False
+        assert extras["deferred"] is True
+        assert "aufgeschoben" in info
+        assert not lrc_path.exists()  # nichts geschrieben
+        # Vorhandene .lrc bleibt komplett unangetastet
+        assert existing_lrc.read_bytes() == existing_content
+
+
 class TestLoadCache:
     """Dateinamen (ä/ö/ü) können je nach Zugriffsweg (lokal vs. SMB) NFC- oder
     NFD-normalisiert ankommen — ohne Vereinheitlichung beim Laden verpasst der
@@ -792,3 +870,57 @@ class TestBuildIdf:
         assert data["df"]["world"] == 1
         assert data["df"]["there"] == 1
         assert "" not in data["df"]
+
+
+class TestFastFlagMain:
+    """End-to-End-Test über main(): --fast darf für einen aufgeschobenen
+    Whisper-Fall weder einen Cache-Eintrag schreiben noch die vorhandene
+    .lrc anfassen (Voraussetzung für den Zwei-Phasen-Workflow: Phase 2,
+    ein normaler Lauf, muss den Track als ungesehen wiederfinden)."""
+
+    def test_fast_defers_without_cache_entry_or_lrc_write(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")  # Inhalt irrelevant, nur .exists() zählt
+        lrc_path = audio.with_suffix(".lrc")
+        old_lrc_content = b"[00:01.00]alte Zeile\n"
+        lrc_path.write_bytes(old_lrc_content)
+
+        monkeypatch.setattr(
+            fetch_songtext, "_read_audio_tags", lambda p: ("Artist", "Song", "")
+        )
+        # Nur 2 Provider treffen -> kein 3er-Konsens möglich -> im Normalmodus
+        # liefe jetzt Whisper.
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider(
+                {
+                    "lrclib": TestProviderConsensus.LRC_A,
+                    "genius": TestProviderConsensus.LRC_B,
+                }
+            ),
+        )
+
+        def _fail_if_called(*args, **kwargs):
+            pytest.fail("Whisper darf im --fast-Modus nicht aufgerufen werden")
+
+        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_called)
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", _fail_if_called)
+
+        monkeypatch.setattr("sys.argv", ["fetch_songtext.py", str(album), "--fast"])
+        fetch_songtext.main()
+
+        # Kein Cache-Eintrag für den aufgeschobenen Track.
+        cache = _load_cache(album)
+        assert cache == {}
+        # Vorhandene .lrc bleibt komplett unangetastet.
+        assert lrc_path.read_bytes() == old_lrc_content
+
+        out = capsys.readouterr().out
+        assert "aufgeschoben" in out
+        assert "1 aufgeschoben für Whisper" in out

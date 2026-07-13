@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-__version__ = "1.7.9"
+__version__ = "1.8.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -722,11 +722,22 @@ def fetch_lrc(
     flac_path: Path | None = None,
     existing_lrc: Path | None = None,
     no_whisper: bool = False,
+    fast: bool = False,
 ) -> tuple[bool, str, dict]:
     """Alle Provider befragen, bestes Ergebnis via Whisper oder Dauer-Scoring wählen.
 
     Gibt (gefunden, info_str, extras) zurück.
-    extras enthält score, providers, words, model (und ggf. fallback=True, consensus=True).
+    extras enthält score, providers, words, model (und ggf. fallback=True, consensus=True,
+    deferred=True).
+
+    `fast`: Zwei-Phasen-Workflow (Phase 1). Konsens (≥3 Provider) und "kein
+    Provider" laufen wie im Normalmodus. Der Fall, in dem Whisper anliefe
+    (Konsens verfehlt, `flac_path` vorhanden), wird stattdessen aufgeschoben:
+    kein Whisper, keine Heuristik-Vermutung, `found=False` mit
+    `extras["deferred"] = True`. Anders als `--no-whisper` wird hier NICHT
+    geraten — der Aufrufer darf für diesen Fall keinen Cache-Eintrag schreiben
+    und die vorhandene `.lrc` nicht anfassen, damit ein späterer Normal-Lauf
+    den Track als ungesehen erneut prüft.
     """
 
     candidates: list[Path] = []
@@ -838,6 +849,25 @@ def fetch_lrc(
                     "words": None,
                     "language": None,
                 }
+    elif fast and flac_path and flac_path.exists():
+        # --fast (Phase 1): hier würde im Normalpfad Whisper laufen — statt
+        # dessen aufschieben (kein Whisper, keine Heuristik-Vermutung). Der
+        # Aufrufer erkennt extras["deferred"] und schreibt bewusst KEINEN
+        # Cache-Eintrag, damit Phase 2 (normaler Lauf) den Track als
+        # ungesehen erneut prüft.
+        best_content = None
+        info_str = f"{prov_str} │ aufgeschoben (Whisper)"
+        extras = {
+            "providers": len(candidates),
+            "provider_names": provider_hits,
+            "method": None,
+            "no_vocal": False,
+            "score": None,
+            "reason": "deferred-whisper",
+            "words": None,
+            "language": None,
+            "deferred": True,
+        }
     elif flac_path and flac_path.exists():
         # Kein Konsens → Whisper als primärer Entscheider.
         (
@@ -1160,6 +1190,20 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Zwei-Phasen-Workflow, Phase 1: nur Konsens (≥3 Provider) und "
+            "'kein Provider' werden erledigt und gecacht. Tracks, die im "
+            "Normalmodus Whisper bräuchten, werden aufgeschoben — kein "
+            "Whisper, keine Heuristik-Vermutung, KEIN Cache-Eintrag, "
+            "vorhandene .lrc bleibt unangetastet. Ein späterer normaler "
+            "Lauf (Phase 2) verarbeitet diese Lücken automatisch, da sie "
+            "ungecacht sind. Anders als --no-whisper: dort würde geraten "
+            "und das Ergebnis fälschlich als erledigt gecacht."
+        ),
+    )
+    parser.add_argument(
         "--rebuild-idf",
         action="store_true",
         help=(
@@ -1199,7 +1243,9 @@ def main() -> None:
         print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
 
     env = _load_env()
-    if not args.no_whisper:
+    if not args.no_whisper and not args.fast:
+        # --fast braucht Whisper nie (Whisper-Fälle werden aufgeschoben) —
+        # Modell-Ladezeit hier sparen ist der ganze Sinn des Flags.
         if (
             _get_whisper_model(_WHISPER_MODEL) is None
         ):  # vorladen — Meldung vor Track-Liste
@@ -1214,7 +1260,7 @@ def main() -> None:
             )
             sys.exit(1)
         _load_idf()  # vorladen — Meldung vor Track-Liste, nicht erst beim ersten Track
-    updated = skipped = not_found = errors = genre_skipped = no_tags = 0
+    updated = skipped = not_found = errors = genre_skipped = no_tags = deferred = 0
 
     current_parent: Path | None = None
     dir_cache: dict = {}
@@ -1324,6 +1370,7 @@ def main() -> None:
                 flac_path=audio,
                 existing_lrc=lrc_path,
                 no_whisper=args.no_whisper,
+                fast=args.fast,
             )
         except FileNotFoundError:
             _tprint(f"{_ts()}  {rel}  syncedlyrics nicht gefunden — Abbruch.")
@@ -1331,7 +1378,17 @@ def main() -> None:
             errors += 1
             break
 
-        if use_compare:
+        if extras.get("deferred"):
+            # --fast: Whisper-Fall aufgeschoben — Datei-Symbol ist strikt nur
+            # das Datei-Ergebnis (hier: nichts angefasst → "="), die
+            # "aufgeschoben"-Info steckt bereits in info_str nach │. Kein
+            # Cache-Eintrag (cache_result bleibt None), vorhandene .lrc bleibt
+            # unangetastet, damit Phase 2 den Track als ungesehen erneut prüft.
+            if use_compare:
+                dest.unlink(missing_ok=True)
+            _tprint(f"{_ts()}  {rel}  {info}  =")
+            deferred += 1
+        elif use_compare:
             if not found:
                 dest.unlink(missing_ok=True)
                 had_lrc = lrc_path.exists()
@@ -1387,6 +1444,8 @@ def main() -> None:
         summary += f", {genre_skipped} Genre übersprungen"
     if no_tags:
         summary += f", {no_tags} ohne Tags"
+    if deferred:
+        summary += f", {deferred} aufgeschoben für Whisper"
     if errors:
         summary += f", {errors} Fehler"
     print(f"\n{summary}.")

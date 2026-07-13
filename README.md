@@ -147,6 +147,8 @@ python3 fetch_songtext.py "/Pfad/zur/Datei.flac"              # einzelne Datei
 python3 fetch_songtext.py --recursive "/Musik/"                # alle Unterordner
 python3 fetch_songtext.py --force "Artist - Album/"            # Cache ignorieren
 python3 fetch_songtext.py --no-whisper --recursive "/Musik/"   # ohne Whisper-Verifikation
+python3 fetch_songtext.py --fast --recursive "/Musik/"          # Phase 1: schneller Lauf, Whisper-Fälle aufgeschoben
+python3 fetch_songtext.py --recursive "/Musik/"                 # Phase 2: normaler Lauf, füllt die Lücken
 python3 fetch_songtext.py --rebuild-idf "/Musik/"               # IDF-Tabelle neu aufbauen
 ```
 
@@ -157,6 +159,7 @@ python3 fetch_songtext.py --rebuild-idf "/Musik/"               # IDF-Tabelle ne
 | `--recursive`, `-r` | Alle Unterordner rekursiv durchsuchen und LRCs erneuern |
 | `--force`, `-f` | Cache ignorieren, alle Tracks neu prüfen |
 | `--no-whisper` | Whisper-Verifikation überspringen (Konsens/Dauer-Heuristik statt Content-Check). Cache-Einträge mit `reason=kein-vokal`/`unter-schwelle` werden automatisch neu geprüft, auch ohne `--force`. |
+| `--fast` | Zwei-Phasen-Workflow, Phase 1 (siehe unten): Konsens und „kein Provider" werden erledigt und gecacht, alles was Whisper bräuchte wird **aufgeschoben** — kein Cache-Eintrag, vorhandene `.lrc` bleibt unangetastet. |
 | `--rebuild-idf` | Baut die IDF-Tabelle (für die Whisper-Matching-Metrik, siehe unten) aus allen `*.lrc` unter `path` neu auf und beendet sich — kein normaler Lauf danach. |
 | `-h`, `--help` | Hilfe anzeigen |
 | `-V`, `--version` | Versionsnummer ausgeben |
@@ -211,6 +214,21 @@ ab (siehe Toleranzen oben), dann wird nichts gespeichert
 (z. B. für einen schnellen Durchlauf ohne Modell-Ladezeit) — kostet die
 inhaltliche Verifikation gegen falsch zugeordnete Songtexte.
 
+**Mit `--fast` (Zwei-Phasen-Workflow):** Anders als `--no-whisper` wird hier
+nicht geraten. Konsens (Schritt 3) und „kein Provider" laufen unverändert und
+werden ganz normal gecacht — dort wird ohnehin nie Whisper gebraucht. Für
+jeden Track, der im Normalmodus jetzt Whisper bräuchte (Konsens verfehlt,
+Audiodatei vorhanden), wird **nichts** gemacht: kein Whisper, keine
+Dauer-Heuristik-Vermutung, **kein Cache-Eintrag**, eine vorhandene `.lrc`
+bleibt unangetastet. Das Skript lädt in diesem Modus auch das Whisper-Modell
+und die IDF-Tabelle gar nicht erst (spart die Ladezeit).
+
+Weil aufgeschobene Tracks keinen Cache-Eintrag bekommen, verarbeitet sie ein
+späterer **normaler Lauf** (Phase 2, ohne `--fast`/`--no-whisper`) automatisch
+als „ungesehen" — mit voller Whisper-Verifikation. Gedacht für: schnell die
+einfachen Fälle (Konsens) erledigen, dann in Ruhe (oder über Nacht) die
+Whisper-pflichtigen Lücken in einem zweiten Lauf schließen.
+
 ---
 
 #### Ausgabe-Zeichen
@@ -248,6 +266,15 @@ Mit `--no-whisper`:
 09:28:20  Artist/Album/02 Song.flac  2/4: netease, genius │ Heuristik  ✓
 09:28:20  Artist/Album/03 Song.flac  2/4: lrclib, genius │ Heuristik Dauer-Abweichung  =
 ```
+
+Mit `--fast`:
+```
+09:28:20  Artist/Album/01 Song.flac  3/4: lrclib, netease, genius │ Konsens 92%  ✓
+09:28:20  Artist/Album/02 Song.flac  0/4: — │ kein Provider  =
+09:28:20  Artist/Album/03 Song.flac  2/4: lrclib, genius │ aufgeschoben (Whisper)  =
+```
+Das Datei-Symbol bei „aufgeschoben" ist immer `=` (nichts angefasst) — die
+Info steckt im Methoden-Teil nach `│`.
 
 - **Modell**: `[small]` — einziges Whisper-Modell (seit v1.7.0, `base` entfernt)
 - **Sprache**: z.B. `de`, `en` — von `langdetect` erkannt, als Hint an Whisper übergeben

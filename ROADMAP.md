@@ -1,5 +1,38 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.8.0 — `--fast`: Zwei-Phasen-Workflow
+
+Neues Flag `--fast` für einen schnellen ersten Lauf (Phase 1), der nur die
+Fälle erledigt, die kein Whisper brauchen, und alles Whisper-Bedürftige offen
+lässt, damit ein späterer normaler Lauf (Phase 2) genau diese Lücken füllt.
+
+Pro Track: 3+ Provider-Konsens und „kein Provider" laufen unverändert (dort
+wird ohnehin nie Whisper gebraucht). Der Fall, in dem im Normalmodus jetzt
+Whisper anliefe (Konsens verfehlt, Audiodatei vorhanden), wird stattdessen
+**aufgeschoben** — kein Whisper, keine Dauer-Heuristik-Vermutung, **kein
+Cache-Eintrag**, vorhandene `.lrc` bleibt unangetastet. Weil aufgeschobene
+Tracks keinen Cache-Eintrag bekommen, verarbeitet sie ein normaler Lauf ohne
+`--fast` automatisch als „ungesehen".
+
+Anders als `--no-whisper`: dort würde im Whisper-Fall geraten (2-Provider-
+Konsens/Dauer-Heuristik) und das Ergebnis als erledigt gecacht — `--fast`
+vermeidet genau das bewusst, um die Lücke für Phase 2 offen zu lassen.
+
+Umsetzung: `fetch_lrc()` bekommt Parameter `fast: bool`. Direkt an der
+Stelle, wo im Normalpfad Whisper anliefe (`elif flac_path and
+flac_path.exists():`), wird bei `fast=True` vorher abgezweigt und ein
+Sentinel-Ergebnis (`found=False`, `extras["deferred"] = True`, `reason:
+"deferred-whisper"`) zurückgegeben — ohne `_whisper_best`/`_transcribe`
+aufzurufen. `main()` erkennt `extras["deferred"]`, schreibt keinen
+Cache-Eintrag, fasst die vorhandene `.lrc` nicht an und zählt den Track in
+einer eigenen Statistik (`deferred`), die auch die Zusammenfassung am
+Laufende ausweist (`"N aufgeschoben für Whisper"`). Datei-Symbol dabei strikt
+`=` (nichts angefasst) — die „aufgeschoben"-Info steht im Methoden-Teil nach
+`│`, nicht im Symbol.
+
+Whisper-Modell und IDF-Tabelle werden mit `--fast` gar nicht erst geladen
+(spart die Ladezeit) — sie werden in diesem Modus nie gebraucht.
+
 ## ✓ fetch_songtext.py v1.7.9 — IDF-Tabelle sichtbar benannt
 
 `.fetch_songtext_idf.json` (versteckt) → `fetch_songtext_idf.json` (sichtbar,

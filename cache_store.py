@@ -51,8 +51,17 @@ def open_cache(db_path: Path) -> sqlite3.Connection:
 
     Setzt WAL-Modus und einen busy_timeout, damit parallele --fast-Läufe
     gleichzeitig schreiben können, ohne sich gegenseitig zu blockieren.
+
+    check_same_thread=False: die Provider-Abfragen laufen in fetch_songtext.py
+    über einen ThreadPoolExecutor in Worker-Threads, während die Verbindung im
+    Hauptthread geöffnet wird. fetch_songtext._cache_lock serialisiert alle
+    Zugriffe bereits vollständig — ohne dieses Flag lehnt sqlite3 jeden Zugriff
+    aus einem anderen Thread mit "SQLite objects created in a thread can only
+    be used in that same thread" ab (wurde von der bewusst großzügigen
+    except-Exception-Absicherung um jeden Cache-Aufruf bislang stillschweigend
+    verschluckt — der Cache blieb dadurch trotz laufender Läufe leer).
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_SCHEMA)

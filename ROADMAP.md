@@ -905,3 +905,7 @@ Overlap-Schwellwert von 12 % auf 6 % gesenkt (deckt Grenzfälle wie gemischtspra
 Neuer Fallback: Whisper erkennt keine Sprache, aber ≥ 2 Provider und ≥ 10 Lyrics-Zeilen → LRC
 trotzdem gespeichert (Vokalsong mit ungewöhnlichem Vokalstil, z. B. Falco "Vienna Calling").
 Artist/Titel-Abfrage nutzt FLAC-Metadaten (seit v1.2.7) statt Dateinamen.
+
+## Geplant: Cache-Modul
+
+Siehe `CACHE_DESIGN.md` — intelligenter SQLite-Cache (Anbieter-Antworten + Whisper-Transkripte), damit Neuaufbauten nach Code-Änderungen ohne erneute Provider-Abfragen/Whisper laufen. Grundprinzip: läuft immer auch mit leerer/fehlender DB.

@@ -147,6 +147,7 @@ python3 fetch_songtext.py "/Pfad/zur/Datei.flac"              # einzelne Datei
 python3 fetch_songtext.py --recursive "/Musik/"                # alle Unterordner
 python3 fetch_songtext.py --force "Artist - Album/"            # Cache ignorieren
 python3 fetch_songtext.py --no-whisper --recursive "/Musik/"   # ohne Whisper-Verifikation
+python3 fetch_songtext.py --rebuild-idf "/Musik/"               # IDF-Tabelle neu aufbauen
 ```
 
 **Optionen:**
@@ -156,6 +157,7 @@ python3 fetch_songtext.py --no-whisper --recursive "/Musik/"   # ohne Whisper-Ve
 | `--recursive`, `-r` | Alle Unterordner rekursiv durchsuchen und LRCs erneuern |
 | `--force`, `-f` | Cache ignorieren, alle Tracks neu prüfen |
 | `--no-whisper` | Whisper-Verifikation überspringen (Konsens/Dauer-Heuristik statt Content-Check). Cache-Einträge mit `reason=kein-vokal`/`unter-schwelle` werden automatisch neu geprüft, auch ohne `--force`. |
+| `--rebuild-idf` | Baut die IDF-Tabelle (für die Whisper-Matching-Metrik, siehe unten) aus allen `*.lrc` unter `path` neu auf und beendet sich — kein normaler Lauf danach. |
 | `-h`, `--help` | Hilfe anzeigen |
 | `-V`, `--version` | Versionsnummer ausgeben |
 
@@ -189,11 +191,11 @@ Aus dem Text der Provider-LRCs wird die Sprache erkannt (z. B. `de`, `en`, `fr`)
 
 **Schritt 5 — Whisper-Verifikation (small)**
 
-Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `small`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **Containment**: Anteil der Whisper-Wörter, die in der LRC vorkommen (`|Whisper ∩ LRC| ÷ |Whisper|`). Diese Metrik ist asymmetrisch — sie bestraft nicht, wenn die LRC mehr Text enthält als Whisper gehört hat (z. B. Verse, die außerhalb des Fensters liegen).
+Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `small`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **IDF-gewichtetes Jaccard** (seit v1.7.7, ersetzt die frühere Containment-Metrik): `Σ idf(w) für w in (Whisper ∩ LRC) ÷ Σ idf(w) für w in (Whisper ∪ LRC)`. Seltene, inhaltstragende Wörter zählen dabei stark, häufige Stopwords kaum — das verhindert Fehlmatches, bei denen zufällig ein paar generische Wörter übereinstimmen, obwohl der Song nicht passt. Die IDF-Werte (Dokumentfrequenz je Wort über die gesamte Bibliothek) stammen aus `.fetch_songtext_idf.json` neben dem Skript, aufgebaut per `--rebuild-idf`.
 
 Vor dem Vergleich: Wiederholungsschleifen (Whisper-Halluzinationen wie „lets go lets go lets go") werden erkannt und verworfen — die Einzigartigkeit der Wörter muss hoch genug sein *und* kein einzelnes Wort darf dominieren.
 
-Score ≥ 40 % → LRC gespeichert. Darunter → kein Treffer. Kein zweiter Pass, kein Vorab-Check mehr (`base` und die VAD-Probe wurden in v1.7.0 entfernt — `base` transkribierte nicht-englische Songs unzuverlässig und lieferte falsch-negative „kein Vokal"-Ergebnisse; die VAD-Probe diente nur dazu, einen inzwischen ebenfalls entfernten zweiten Pass zu gaten).
+Score ≥ 0,065 (IDF-Jaccard, an 20 gelabelten Songs über 5 Sprachen validiert) → LRC gespeichert. Darunter → kein Treffer. Kein zweiter Pass, kein Vorab-Check mehr (`base` und die VAD-Probe wurden in v1.7.0 entfernt — `base` transkribierte nicht-englische Songs unzuverlässig und lieferte falsch-negative „kein Vokal"-Ergebnisse; die VAD-Probe diente nur dazu, einen inzwischen ebenfalls entfernten zweiten Pass zu gaten).
 
 `has_vocals` (steuert den „kein Vokal erkannt"-Zweig unten) kommt jetzt direkt aus diesem einen `small`-Durchlauf (`no_speech_prob` und Wortanzahl) — ohne separate Probe.
 
@@ -229,13 +231,13 @@ Davor steht die Methoden-Info mit sechs Teilen:
 
 Beispiele:
 ```
-09:28:20  Artist/Album/01 Song.flac  2/4: lrclib, genius │ [small] de Whisper 265W 62%  ✓
+09:28:20  Artist/Album/01 Song.flac  2/4: lrclib, genius │ [small] de Whisper 265W idf-jacc=0.312  ✓
 09:28:20  Artist/Album/02 Song.flac  3/4: lrclib, netease, genius │ Konsens 92%  ✓
 09:28:20  Artist/Album/03 Song.flac  2/4: netease, genius │ Konsens 87% (kein Vokal)  ✓
-09:28:20  Artist/Album/04 Song.flac  2/4: lrclib, genius │ [small] de Whisper 48W unter Schwelle 12%  =
+09:28:20  Artist/Album/04 Song.flac  2/4: lrclib, genius │ [small] de Whisper 48W unter Schwelle idf-jacc=0.041  =
 09:28:20  Artist/Album/05 Song.flac  0/4: — │ kein Provider  =
 09:28:20  Artist/Album/06 Song.flac  2/4: netease, genius │ [small] de Whisper 0W kein Vokal  =
-09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [small] de Whisper 12W unter Schwelle 8%  –
+09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [small] de Whisper 12W unter Schwelle idf-jacc=0.023  –
 09:28:20  Artist/Album/08 Song.flac  0/0: │ Genre=Instrumental  –
 09:28:20  Artist/Album/09 Song.flac  0/0: │ Genre=Instrumental  =
 ```
@@ -249,7 +251,8 @@ Mit `--no-whisper`:
 
 - **Modell**: `[small]` — einziges Whisper-Modell (seit v1.7.0, `base` entfernt)
 - **Sprache**: z.B. `de`, `en` — von `langdetect` erkannt, als Hint an Whisper übergeben
-- **Wörter**: von Whisper transkribierte Wörter (Qualitätsindikator: 5W 62% ist unsicherer als 280W 62%)
+- **Wörter**: von Whisper transkribierte Wörter (Qualitätsindikator: 5W idf-jacc=0.31 ist unsicherer als 280W idf-jacc=0.31)
+- **idf-jacc**: IDF-gewichteter Jaccard-Score (0,0–1,0, meist deutlich unter 0,5 — kleine Zahlen sind normal, siehe Schritt 5). Absichtlich mit 3 statt 0 Nachkommastellen ausgegeben, da die Schwelle bei 0,065 liegt.
 - **Konsens**: kein Whisper nötig, Provider einig — bei `(kein Vokal)` hat `has_vocals` (aus dem Whisper-Pass) ausgelöst, bei `(2P)` lief mit `--no-whisper` der abgesenkte 2-Provider-Konsens
 
 ---
@@ -259,6 +262,8 @@ Mit `--no-whisper`:
 **Cache** (`.fetch_songtext.json` pro Ordner): Ein Eintrag pro Track — beim nächsten Lauf wird der Track übersprungen. `--force` ignoriert den Cache komplett.
 
 **Parallele Instanzen:** `fetch_songtext.py -r` kann bewusst mehrfach gleichzeitig über dieselbe Bibliothek gestartet werden. Jede Instanz sperrt sich beim Betreten eines Ordners exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
+
+**IDF-Tabelle** (`.fetch_songtext_idf.json`, neben dem Skript, nicht in der Bibliothek): Dokumentfrequenz je Wort über alle `.lrc`-Dateien der Bibliothek — Basis für die Whisper-Matching-Metrik in Schritt 5. Wird nicht automatisch aktualisiert; bei größeren Bibliotheks-Änderungen einmalig `--rebuild-idf <bibliothekspfad>` laufen lassen. Fehlt die Datei, bricht das Skript beim ersten Whisper-Verifikations-Schritt mit einer klaren Fehlermeldung ab (kein stiller Fallback).
 
 **Felder je Eintrag:**
 
@@ -271,7 +276,7 @@ Mit `--no-whisper`:
 | `provider_names` | `["lrclib", "genius"]` | Namen der liefernden Provider |
 | `method` | `"whisper-small"` / `"konsens"` / `"heuristik"` / `null` | Entscheidungsweg (`"whisper-base"` gab es bis v1.6.x, seit v1.7.0 nur noch `"whisper-small"`) |
 | `no_vocal` | `true` / `false` | Whisper-Pass hat keinen Gesang erkannt (bei `method=konsens`: Konsens trotzdem möglich) |
-| `score` | `0.0`–`1.0` / `null` | Whisper-Containment oder Jaccard-Konsens |
+| `score` | `0.0`–`1.0` / `null` | Whisper-IDF-Jaccard (seit v1.7.7, davor Containment) oder Jaccard-Konsens |
 | `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"dauer-abweichung"` / `"genre"` | Grund bei `r=nf` oder `r=skip` (`dauer-abweichung` nur bei `--no-whisper`) |
 | `words` | `0`–`n` / `null` | Von Whisper transkribierte Wörter |
 | `language` | `"de"` / `"en"` / … / `null` | Erkannte Sprache (Hint an Whisper) |

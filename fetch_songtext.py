@@ -2,6 +2,7 @@
 import errno
 import fcntl
 import hashlib
+import math
 import re
 import os
 import json
@@ -16,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-__version__ = "1.7.6"
+__version__ = "1.7.7"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -28,13 +29,19 @@ _AUDIO_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"}
 # nur über eine generische Exception, Genius und lrclib geben laut Quellcode
 # GAR KEIN Signal — dort greift nur der proaktive Mindestabstand.
 _RATE_LIMIT_FLOOR_SEC = 1.5  # proaktiver Mindestabstand zwischen Anfragen pro Provider
-_RATE_LIMIT_BASE_SEC = 10.0  # reaktive Basis-Strafe bei 402/generischem Fehler — verankert an
+_RATE_LIMIT_BASE_SEC = (
+    10.0  # reaktive Basis-Strafe bei 402/generischem Fehler — verankert an
+)
 # syncedlyrics' eigenem time.sleep(10) beim Musixmatch-Token-Refresh nach 401
-_RATE_LIMIT_CAPTCHA_SEC = 30.0  # längerer Cooldown bei 401/Captcha (Anti-Bot, kurzer Retry hilft nicht)
+_RATE_LIMIT_CAPTCHA_SEC = (
+    30.0  # längerer Cooldown bei 401/Captcha (Anti-Bot, kurzer Retry hilft nicht)
+)
 _RATE_LIMIT_MAX_SEC = 60.0  # Eskalations-Obergrenze bei wiederholten Treffern
 
 _rate_limit_lock = threading.Lock()
-_rate_limit_state: dict[str, dict] = {}  # provider -> {"next_allowed": float, "consecutive_hits": int}
+_rate_limit_state: dict[
+    str, dict
+] = {}  # provider -> {"next_allowed": float, "consecutive_hits": int}
 
 # LRC-Timestamps enden oft vor dem Track-Ende (Instrumental-Outro → kein Text).
 # Asymmetrische Toleranz: zu kurz ist normal, zu lang bedeutet falscher Song.
@@ -43,9 +50,21 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 
 # Whisper: einstufige Verifikation mit small. base wurde entfernt (v1.7.0) —
 # unzuverlässig bei nicht-englischen Songs (falsch-negative "kein Vokal").
-_WHISPER_MIN_OVERLAP = 0.40  # Schwellwert: ab hier wird eine LRC akzeptiert
+# v1.7.7: Containment (Anteil Transkript-Wörter in LRC) durch IDF-gewichtetes
+# Jaccard ersetzt (_idf_jaccard) — Containment akzeptierte zu oft falsche Songs,
+# wenn wenige generische Wörter (Stopwords) zufällig übereinstimmten. IDF-Jaccard
+# gewichtet seltene (inhaltstragende) Wörter stark, häufige kaum. Schwelle 0,065
+# an 20 gelabelten Songs (5 Sprachen) validiert: niedrigster korrekter Wert 0,089,
+# höchster falscher Wert 0,053 — Reserve nach beiden Seiten (siehe metric_bakeoff).
+_WHISPER_MIN_OVERLAP = 0.065  # Schwellwert: ab hier wird eine LRC akzeptiert
 _WHISPER_MODEL = "small"
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
+
+# IDF-Tabelle für _idf_jaccard: liegt neben dem Code (nicht in der Musikbibliothek),
+# damit auch lokale Läufe ohne Netzwerk-Mount eine Tabelle haben. Wird per
+# --rebuild-idf <bibliothekspfad> neu gebaut (siehe _build_idf).
+_IDF_CACHE_PATH = Path(__file__).parent / ".fetch_songtext_idf.json"
+_idf_cache: tuple[int, dict] | None = None  # module-level Cache: (n_docs, df)
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
 _CONSENSUS_MIN_PROVIDERS = (
@@ -65,9 +84,7 @@ _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluz
 
 _CACHE_FILENAME = ".fetch_songtext.json"
 _CACHE_LOCKFILE = ".fetch_songtext.lock"  # schützt _save_cache + Ordner-Claim (siehe _try_claim_folder) vor parallel laufenden Instanzen
-_CACHE_MIN_VERSION = (
-    "1.7.1"  # v1.7.1: Abbruch-Check bei fehlendem Whisper-Modell — alle Einträge neu prüfen
-)
+_CACHE_MIN_VERSION = "1.7.1"  # v1.7.1: Abbruch-Check bei fehlendem Whisper-Modell — alle Einträge neu prüfen
 
 # Genres die keinen Songtext haben — Substring-Matching (Kleinschreibung)
 _SKIP_GENRE_KEYWORDS = {
@@ -235,14 +252,22 @@ def _rate_limit_report(provider: str, stderr: str) -> None:
     unten, auch bei sauberem Erfolg — das ist der proaktive Floor).
     """
     with _rate_limit_lock:
-        state = _rate_limit_state.setdefault(provider, {"next_allowed": 0.0, "consecutive_hits": 0})
+        state = _rate_limit_state.setdefault(
+            provider, {"next_allowed": 0.0, "consecutive_hits": 0}
+        )
         if re.search(r"[Gg]ot status code 401", stderr) or "captcha" in stderr.lower():
-            delay = min(_RATE_LIMIT_CAPTCHA_SEC * (2**state["consecutive_hits"]), _RATE_LIMIT_MAX_SEC)
+            delay = min(
+                _RATE_LIMIT_CAPTCHA_SEC * (2 ** state["consecutive_hits"]),
+                _RATE_LIMIT_MAX_SEC,
+            )
             state["consecutive_hits"] += 1
         elif re.search(r"[Gg]ot status code 402", stderr) or (
             "An error occurred while searching for an LRC on" in stderr
         ):
-            delay = min(_RATE_LIMIT_BASE_SEC * (2**state["consecutive_hits"]), _RATE_LIMIT_MAX_SEC)
+            delay = min(
+                _RATE_LIMIT_BASE_SEC * (2 ** state["consecutive_hits"]),
+                _RATE_LIMIT_MAX_SEC,
+            )
             state["consecutive_hits"] += 1
         else:
             state["consecutive_hits"] = 0
@@ -325,7 +350,9 @@ def _extract_lrc_words(content: str) -> list[str]:
         if re.match(r"\[[a-z]+:", line.lower()):
             continue  # Metadaten-Tags überspringen
         text = re.sub(r"\[\d+:\d+\.\d+\]", "", line)  # LRC-Timestamps entfernen
-        text = re.sub(r"\[[^\]]*\]", "", text).strip()  # C1: Sektion-Labels wie [Chorus], [Verse 1]
+        text = re.sub(
+            r"\[[^\]]*\]", "", text
+        ).strip()  # C1: Sektion-Labels wie [Chorus], [Verse 1]
         if text:
             words.extend(re.findall(r"[^\W\d_]+", text.lower()))
     return words
@@ -380,17 +407,81 @@ def _word_overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _containment(transcript: list[str], lrc: list[str]) -> float:
-    """Anteil der Whisper-Wörter die in der LRC vorkommen (Containment).
+def _load_idf() -> tuple[int, dict]:
+    """Lädt die IDF-Tabelle (n_docs, df) aus _IDF_CACHE_PATH — einmalig pro Prozess.
 
-    Asymmetrisch: Nenner ist nur das Transkript, nicht die Vereinigung.
-    Dadurch spielt die LRC-Länge keine Rolle — nur ob das Gehörte passt.
+    Bricht mit einer klaren Fehlermeldung ab statt still auf ein degeneriertes
+    Verhalten zurückzufallen (z.B. Containment oder df=leer), wenn die Tabelle
+    fehlt — ohne sie ist _idf_jaccard nicht sinnvoll auswertbar.
     """
-    if not transcript or not lrc:
+    global _idf_cache
+    if _idf_cache is not None:
+        return _idf_cache
+    if not _IDF_CACHE_PATH.exists():
+        print(
+            f"FEHLER: IDF-Tabelle fehlt ({_IDF_CACHE_PATH}).\n"
+            f"Einmalig aufbauen mit: fetch_songtext.py --rebuild-idf <bibliothekspfad>"
+        )
+        sys.exit(1)
+    data = json.loads(_IDF_CACHE_PATH.read_text(encoding="utf-8"))
+    _idf_cache = (data["n_docs"], data["df"])
+    return _idf_cache
+
+
+def _idf(word: str, n_docs: int, df: dict) -> float:
+    """Inverse Dokumentfrequenz mit Laplace-Glättung (unbekannte Wörter → hohe, aber endliche IDF)."""
+    return math.log((n_docs + 1) / (df.get(word, 0) + 1))
+
+
+def _idf_jaccard(transcript_words: set, lrc_words: set, n_docs: int, df: dict) -> float:
+    """IDF-gewichtetes Jaccard zwischen Transkript- und LRC-Wortmenge.
+
+    Ersetzt die frühere Containment-Metrik (v1.7.7): seltene, inhaltstragende
+    Wörter zählen stark, häufige Stopwords kaum — verhindert Fehlmatches durch
+    zufällig übereinstimmende generische Wörter. Siehe _WHISPER_MIN_OVERLAP-
+    Kommentar für die Validierung.
+    """
+    if not transcript_words or not lrc_words:
         return 0.0
-    st = set(transcript)
-    sl = set(lrc)
-    return len(st & sl) / len(st)
+    inter = transcript_words & lrc_words
+    union = transcript_words | lrc_words
+    denom = sum(_idf(w, n_docs, df) for w in union)
+    if not denom:
+        return 0.0
+    return sum(_idf(w, n_docs, df) for w in inter) / denom
+
+
+def _build_idf(root: Path) -> None:
+    """Baut die IDF-Tabelle aus allen *.lrc-Dateien unter `root` neu und schreibt _IDF_CACHE_PATH.
+
+    Ein Zählschritt (Dokumentfrequenz) pro Song, nicht pro Wortvorkommen.
+    """
+    from collections import Counter
+
+    df: Counter = Counter()
+    n_docs = 0
+    errors = 0
+    paths = list(root.rglob("*.lrc"))
+    for i, p in enumerate(paths):
+        try:
+            content = p.read_text(encoding="utf-8")
+        except Exception:
+            errors += 1
+            continue
+        words = set(_extract_lrc_words(content))
+        if not words:
+            continue
+        n_docs += 1
+        df.update(words)
+        if (i + 1) % 2000 == 0:
+            print(f"  ...{i + 1}/{len(paths)} verarbeitet", flush=True)
+
+    out = {"n_docs": n_docs, "df": dict(df)}
+    _IDF_CACHE_PATH.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    print(
+        f"IDF-Tabelle gebaut: {n_docs} Dokumente, {len(df)} distinkte Wörter, "
+        f"{errors} Lesefehler. Gespeichert: {_IDF_CACHE_PATH}"
+    )
 
 
 def _is_hallucination(words: list[str]) -> bool:
@@ -498,8 +589,10 @@ def _provider_consensus(
         n = len(pw)
         pair_scores = [
             len(pw[i][1] & pw[j][1]) / len(pw[i][1] | pw[j][1])
-            if pw[i][1] | pw[j][1] else 0.0
-            for i in range(n) for j in range(i + 1, n)
+            if pw[i][1] | pw[j][1]
+            else 0.0
+            for i in range(n)
+            for j in range(i + 1, n)
         ]
         avg = sum(pair_scores) / len(pair_scores)
         if avg < _CONSENSUS_MIN_JACCARD:
@@ -525,10 +618,14 @@ def _provider_consensus(
         n = len(path_words)
         avg_to_others = [
             sum(
-                len(path_words[i][1] & path_words[j][1]) / len(path_words[i][1] | path_words[j][1])
-                if path_words[i][1] | path_words[j][1] else 0.0
-                for j in range(n) if j != i
-            ) / (n - 1)
+                len(path_words[i][1] & path_words[j][1])
+                / len(path_words[i][1] | path_words[j][1])
+                if path_words[i][1] | path_words[j][1]
+                else 0.0
+                for j in range(n)
+                if j != i
+            )
+            / (n - 1)
             for i in range(n)
         ]
         worst = avg_to_others.index(min(avg_to_others))
@@ -543,13 +640,16 @@ def _provider_consensus(
 def _whisper_best(
     flac_path: Path, candidates: list[Path], expected_dur: float = 0.0
 ) -> tuple[Path | None, float, bool, int, str, str | None]:
-    """Verifikation via small: bester Kandidat nach Containment-Score.
+    """Verifikation via small: bester Kandidat nach IDF-Jaccard-Score (_idf_jaccard).
 
     Gibt (bester Kandidat, score, has_vocals, words, model_used, language) zurück.
     """
     if _get_whisper_model(_WHISPER_MODEL) is None:
         return (None, 0.0, False, 0, "", None)
 
+    n_docs, df = (
+        _load_idf()
+    )  # einmal pro Lauf geladen (module-level Cache), nicht pro Track
     ctx = _whisper_context_sec(expected_dur)
 
     # Start-Offset pro Kandidat bestimmen
@@ -574,7 +674,9 @@ def _whisper_best(
         key = round(start / 3)
         if key not in cache:
             done += 1
-            _print_status(f"  {flac_path.name}  Whisper transkribiert ({done}/{distinct})...")
+            _print_status(
+                f"  {flac_path.name}  Whisper transkribiert ({done}/{distinct})..."
+            )
             words, no_speech, logprob = _transcribe(
                 flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
             )
@@ -597,8 +699,11 @@ def _whisper_best(
         if not words:
             continue
         try:
-            score = _containment(
-                words, _extract_lrc_words(p.read_text(encoding="utf-8"))
+            score = _idf_jaccard(
+                set(words),
+                set(_extract_lrc_words(p.read_text(encoding="utf-8"))),
+                n_docs,
+                df,
             )
         except Exception:
             score = 0.0
@@ -658,16 +763,20 @@ def fetch_lrc(
         for p in candidates:
             p.unlink(missing_ok=True)
         info_str = f"0/{len(_ALL_PROVIDERS)}: — │ kein Provider"
-        return False, info_str, {
-            "providers": 0,
-            "provider_names": [],
-            "method": None,
-            "no_vocal": False,
-            "score": None,
-            "reason": "kein-provider",
-            "words": None,
-            "language": None,
-        }
+        return (
+            False,
+            info_str,
+            {
+                "providers": 0,
+                "provider_names": [],
+                "method": None,
+                "no_vocal": False,
+                "score": None,
+                "reason": "kein-provider",
+                "words": None,
+                "language": None,
+            },
+        )
 
     hit_str = ", ".join(provider_hits) if provider_hits else "—"
     prov_str = f"{len(candidates)}/{len(_ALL_PROVIDERS)}: {hit_str}"
@@ -744,11 +853,15 @@ def fetch_lrc(
         model_str = f"[{model_used}]" if model_used else ""
         lang_str = lrc_lang or ""
         words_str = f"{whisper_words}W"
-        whisper_head = " ".join(p for p in [model_str, lang_str, "Whisper", words_str] if p)
+        whisper_head = " ".join(
+            p for p in [model_str, lang_str, "Whisper", words_str] if p
+        )
 
         if not has_vocals:
             # kein Vokal: Prüfe ob ≥ 2 Provider inhaltlich übereinstimmen.
-            novocal_rep, novocal_jaccard = _provider_consensus(candidates, min_providers=2)
+            novocal_rep, novocal_jaccard = _provider_consensus(
+                candidates, min_providers=2
+            )
             if novocal_rep is not None:
                 best_content = novocal_rep.read_bytes()
                 info_str = f"{prov_str} │ Konsens {novocal_jaccard:.0%} (kein Vokal)"
@@ -776,7 +889,7 @@ def fetch_lrc(
                 }
         elif best_score >= _WHISPER_MIN_OVERLAP:
             best_content = best_path.read_bytes() if best_path else None
-            info_str = f"{prov_str} │ {whisper_head} {best_score:.0%}"
+            info_str = f"{prov_str} │ {whisper_head} idf-jacc={best_score:.3f}"
             extras = {
                 "providers": len(candidates),
                 "provider_names": provider_hits,
@@ -788,7 +901,9 @@ def fetch_lrc(
             }
         else:
             best_content = None
-            info_str = f"{prov_str} │ {whisper_head} unter Schwelle {best_score:.0%}"
+            info_str = (
+                f"{prov_str} │ {whisper_head} unter Schwelle idf-jacc={best_score:.3f}"
+            )
             extras = {
                 "providers": len(candidates),
                 "provider_names": provider_hits,
@@ -936,7 +1051,9 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
             fcntl.flock(lockfile, fcntl.LOCK_EX)
         disk_cache = _load_cache(folder)
         for key, entry in cache.items():
-            if key not in disk_cache or entry.get("ts", "") >= disk_cache[key].get("ts", ""):
+            if key not in disk_cache or entry.get("ts", "") >= disk_cache[key].get(
+                "ts", ""
+            ):
                 disk_cache[key] = entry
         (folder / _CACHE_FILENAME).write_text(
             json.dumps(disk_cache, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1025,9 +1142,21 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--rebuild-idf",
+        action="store_true",
+        help=(
+            "IDF-Tabelle (für Whisper-Matching, _idf_jaccard) aus allen *.lrc unter "
+            "'path' neu aufbauen und beenden — kein normaler Lauf danach."
+        ),
+    )
+    parser.add_argument(
         "-V", "--version", action="version", version=f"fetch_songtext {__version__}"
     )
     args = parser.parse_args()
+
+    if args.rebuild_idf:
+        _build_idf(Path(args.path).resolve())
+        return
 
     root = Path(args.path).resolve()
     if root.is_file() and root.suffix.lower() in _AUDIO_EXTENSIONS:
@@ -1053,7 +1182,9 @@ def main() -> None:
 
     env = _load_env()
     if not args.no_whisper:
-        if _get_whisper_model(_WHISPER_MODEL) is None:  # vorladen — Meldung vor Track-Liste
+        if (
+            _get_whisper_model(_WHISPER_MODEL) is None
+        ):  # vorladen — Meldung vor Track-Liste
             print(
                 f"FEHLER: faster-whisper nicht verfügbar — Modell '{_WHISPER_MODEL}' konnte "
                 "nicht geladen werden.\n"
@@ -1064,6 +1195,7 @@ def main() -> None:
                 "Whisper-Verifikation fortfahren."
             )
             sys.exit(1)
+        _load_idf()  # vorladen — Meldung vor Track-Liste, nicht erst beim ersten Track
     updated = skipped = not_found = errors = genre_skipped = no_tags = 0
 
     current_parent: Path | None = None
@@ -1101,10 +1233,14 @@ def main() -> None:
             entry = dir_cache.get(cache_key)
             if entry and _cache_entry_valid(entry):
                 # --no-whisper: frühere Whisper-Ablehnungen automatisch neu prüfen
-                whisper_reject_rerun = args.no_whisper and entry.get("r") == "nf" and entry.get(
-                    "reason"
-                ) in ("kein-vokal", "unter-schwelle")
-                if not whisper_reject_rerun and (entry.get("r") != "ok" or lrc_path.exists()):
+                whisper_reject_rerun = (
+                    args.no_whisper
+                    and entry.get("r") == "nf"
+                    and entry.get("reason") in ("kein-vokal", "unter-schwelle")
+                )
+                if not whisper_reject_rerun and (
+                    entry.get("r") != "ok" or lrc_path.exists()
+                ):
                     skipped += 1
                     continue
 

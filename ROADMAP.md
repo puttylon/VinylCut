@@ -1,5 +1,33 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.7.7 — Whisper-Matching: Containment durch IDF-Jaccard ersetzt (Bug 2)
+
+Bug 2 (Provider-Fehlmatch): Die Whisper-Verifikation akzeptierte gelegentlich
+den falschen Songtext, weil das Ähnlichkeitsmaß **Containment**
+(`|Whisper ∩ LRC| ÷ |Whisper|`, Schwelle 40 %) jedes Wort gleich gewichtete —
+ein paar zufällig übereinstimmende Stopwords (the/a/and/…) reichten, um über
+die Schwelle zu kommen, auch wenn der eigentliche Songtext nicht passte.
+
+Fix: Umstellung auf **IDF-gewichtetes Jaccard** (`_idf_jaccard`). Seltene,
+inhaltstragende Wörter zählen stark, häufige Wörter kaum — Fehlmatches durch
+zufällige Stopword-Überschneidungen werden dadurch verhindert. Die IDF-Werte
+(Dokumentfrequenz je Wort über die ganze Bibliothek) liegen in
+`.fetch_songtext_idf.json` neben dem Skript (nicht im Bibliotheks-Wurzelordner,
+damit auch lokale Läufe ohne Netzwerk-Mount eine Tabelle haben) und werden per
+neuem Flag `--rebuild-idf <bibliothekspfad>` aufgebaut.
+
+Die neue Schwelle **0,065** wurde an 20 gelabelten Songs über 5 Sprachen
+validiert (11 aus einer ersten, 9 aus einer zweiten Stichprobe): niedrigster
+korrekter IDF-Jaccard-Wert 0,089, höchster falscher Wert 0,053 — Reserve nach
+beiden Seiten. Die Produktionsfunktion `_idf_jaccard` trennt damit alle 20
+Fälle korrekt (20/20).
+
+`_containment` wurde entfernt (nur an dieser einen Stelle verwendet). Die
+Log-Ausgabe zeigt den Score jetzt als `idf-jacc=0.XXX` (3 Nachkommastellen)
+statt als Prozentwert — bei einer Schwelle von 0,065 wäre `0%`/`1%` kaum
+unterscheidbar gewesen. Provider-Konsens (`_word_overlap`, unverändert)
+bleibt weiterhin als Prozentwert dargestellt.
+
 ## ✓ fetch_songtext.py v1.7.6 — Klammer-Zusätze aus Suchtitel entfernt
 
 Live beobachtet (Deep Purple – "Made In Japan [Deluxe Edition 2014 Remix]"):
@@ -89,10 +117,10 @@ Problem, sondern dass sich ein einzelnes schlechtes Segment über
 `condition_on_previous_text=True` auf alle folgenden Segmente fortpflanzt
 und so den Hänger über den gesamten Kontext hinweg verstärkt.
 
-Nebenbefund beim Testen (separates, unabhängiges Problem, nicht behoben):
-Bei besagtem Jimmy-Somerville-Track fand Musixmatch den falschen Song
-("You Make Me Feel Mighty Real" von Sylvester statt der echten Medley-
-Lyrics) — der Containment-Score lag trotzdem knapp über der Akzeptanz-
+Nebenbefund beim Testen (separates, unabhängiges Problem — als Bug 2 in
+v1.7.7 oben behoben): Bei besagtem Jimmy-Somerville-Track fand Musixmatch den
+falschen Song ("You Make Me Feel Mighty Real" von Sylvester statt der echten
+Medley-Lyrics) — der Containment-Score lag trotzdem knapp über der Akzeptanz-
 schwelle (41,7%), nur durch geteiltes generisches Pop-Vokabular ("love",
 "you", "feel"). Whisper selbst transkribierte den echten Song-Inhalt
 ("Johnny remember me" etc.) korrekt — das Whisper-Ergebnis war nicht die

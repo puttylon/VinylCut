@@ -13,7 +13,6 @@ import pytest
 import fetch_songtext
 from fetch_songtext import (
     _CONSENSUS_MIN_JACCARD,
-    _CONSENSUS_MIN_PROVIDERS,
     _FOLDER_BUSY,
     _HALLUCINATION_MAX_UNIQUE_RATIO,
     _HALLUCINATION_MIN_WORDS,
@@ -21,13 +20,18 @@ from fetch_songtext import (
     _RATE_LIMIT_FLOOR_SEC,
     _RATE_LIMIT_MAX_SEC,
     _VOCALS_MIN_WORDS,
+    _WHISPER_MIN_OVERLAP,
+    _build_idf,
     _clean_query_title,
     _extract_lrc_words,
     _first_timestamp,
     _heuristic_best,
+    _idf,
+    _idf_jaccard,
     _is_hallucination,
     _last_timestamp,
     _load_cache,
+    _load_idf,
     _provider_consensus,
     _rate_limit_report,
     _rate_limit_wait,
@@ -51,13 +55,19 @@ class TestCleanQueryTitle:
         assert _clean_query_title(title) == "Highway Star"
 
     def test_eckige_klammer_entfernt(self):
-        assert _clean_query_title("Made In Japan [Deluxe Edition 2014 Remix]") == "Made In Japan"
+        assert (
+            _clean_query_title("Made In Japan [Deluxe Edition 2014 Remix]")
+            == "Made In Japan"
+        )
 
     def test_nur_klammer_faellt_auf_original_zurueck(self):
         assert _clean_query_title("(Live)") == "(Live)"
 
     def test_klammer_mitten_im_titel(self):
-        assert _clean_query_title("I Want You (She's So Heavy) Reprise") == "I Want You Reprise"
+        assert (
+            _clean_query_title("I Want You (She's So Heavy) Reprise")
+            == "I Want You Reprise"
+        )
 
 
 class TestIsHallucination:
@@ -115,7 +125,10 @@ class TestVocalsMinWords:
     def test_sonder_token(self):
         # "(upbeat music)" → 2 Wörter → unter Schwelle
         words = ["upbeat", "music"]
-        assert sum(len(w) > 0 for w in [words]) < _VOCALS_MIN_WORDS or len(words) < _VOCALS_MIN_WORDS
+        assert (
+            sum(len(w) > 0 for w in [words]) < _VOCALS_MIN_WORDS
+            or len(words) < _VOCALS_MIN_WORDS
+        )
 
     def test_echte_vokale(self):
         # Echter Liedtext → deutlich über Schwelle
@@ -203,7 +216,9 @@ class TestTimestamps:
 
 def _make_lrc(text: str) -> Path:
     """Hilfsfunktion: LRC-Inhalt in eine Temp-Datei schreiben."""
-    f = tempfile.NamedTemporaryFile(suffix=".lrc", delete=False, mode="w", encoding="utf-8")
+    f = tempfile.NamedTemporaryFile(
+        suffix=".lrc", delete=False, mode="w", encoding="utf-8"
+    )
     f.write(text)
     f.close()
     return Path(f.name)
@@ -213,7 +228,9 @@ class TestProviderConsensus:
     LRC_A = "[00:10.00]Girl you know it's true I love you\n[00:15.00]I'm in love with you girl\n"
     LRC_B = "[00:10.00]Girl you know it's true yes I love you\n[00:15.00]I'm in love girl cause you're on my mind\n"
     LRC_C = "[00:10.00]You know it's true I love you girl oh\n[00:15.00]In love with you girl cause you're my mind\n"
-    LRC_WRONG = "[00:10.00]Opa Opa tanzen alle Leute\n[00:15.00]Opa Opa heute und auch morgen\n"
+    LRC_WRONG = (
+        "[00:10.00]Opa Opa tanzen alle Leute\n[00:15.00]Opa Opa heute und auch morgen\n"
+    )
 
     def _paths(self, *texts):
         return [_make_lrc(t) for t in texts]
@@ -223,14 +240,16 @@ class TestProviderConsensus:
         rep, score = _provider_consensus(paths)
         assert rep is None
         assert score == 0.0
-        for p in paths: p.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
     def test_konsens_erreicht(self):
         paths = self._paths(self.LRC_A, self.LRC_B, self.LRC_C)
         rep, score = _provider_consensus(paths)
         assert rep is not None
         assert score >= _CONSENSUS_MIN_JACCARD
-        for p in paths: p.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
     def test_ausreisser_c3_gerettet(self):
         # C3: 2 ähnliche + 1 komplett falscher LRC → avg unter Schwelle,
@@ -241,13 +260,15 @@ class TestProviderConsensus:
         assert score >= _CONSENSUS_MIN_JACCARD
         content = rep.read_text(encoding="utf-8")
         assert "Opa" not in content
-        for p in paths: p.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
     def test_leere_lrc_zählt_nicht(self):
         paths = self._paths(self.LRC_A, self.LRC_B, "")
         rep, score = _provider_consensus(paths)
         assert rep is None  # leere LRC hat keine Wörter → unter MIN_PROVIDERS
-        for p in paths: p.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
     def test_min_providers_2_reicht_fuer_no_whisper_fallback(self):
         # --no-whisper: 2 übereinstimmende Provider reichen (min_providers=2)
@@ -255,13 +276,15 @@ class TestProviderConsensus:
         rep, score = _provider_consensus(paths, min_providers=2)
         assert rep is not None
         assert score >= _CONSENSUS_MIN_JACCARD
-        for p in paths: p.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
     def test_min_providers_2_bei_uneinigkeit_kein_konsens(self):
         paths = self._paths(self.LRC_A, self.LRC_WRONG)
         rep, score = _provider_consensus(paths, min_providers=2)
         assert rep is None
-        for p in paths: p.unlink(missing_ok=True)
+        for p in paths:
+            p.unlink(missing_ok=True)
 
 
 class TestHeuristicBest:
@@ -284,7 +307,9 @@ class TestHeuristicBest:
 
     def test_wählt_besten_von_mehreren_kandidaten(self):
         good = _make_lrc(self.LRC)  # passt zu expected_dur
-        bad = _make_lrc("[00:10.00]Kurz\n")  # kürzer, weniger Zeilen — schlechterer Score
+        bad = _make_lrc(
+            "[00:10.00]Kurz\n"
+        )  # kürzer, weniger Zeilen — schlechterer Score
         content, score = _heuristic_best([bad, good], expected_dur=200.0)
         assert content == good.read_bytes()
         good.unlink(missing_ok=True)
@@ -363,7 +388,9 @@ class TestLoadCache:
     Cache-Lookup vorhandene Einträge und legt Duplikate an."""
 
     NFC = unicodedata.normalize("NFC", "Mücken.flac")  # ue als 1 Zeichen (U+00FC)
-    NFD = unicodedata.normalize("NFD", "Mücken.flac")  # u + Kombinierender Akzent (2 Zeichen)
+    NFD = unicodedata.normalize(
+        "NFD", "Mücken.flac"
+    )  # u + Kombinierender Akzent (2 Zeichen)
 
     def test_normal_load_no_duplicates(self, tmp_path):
         (tmp_path / ".fetch_songtext.json").write_text(
@@ -381,13 +408,17 @@ class TestLoadCache:
         assert _load_cache(tmp_path) == {}
 
     def test_nfc_nfd_duplicate_merged_keeps_newer(self, tmp_path):
-        assert self.NFC != self.NFD  # sicherstellen, dass die Testdaten wirklich unterschiedliche Bytes sind
+        assert (
+            self.NFC != self.NFD
+        )  # sicherstellen, dass die Testdaten wirklich unterschiedliche Bytes sind
         assert unicodedata.normalize("NFC", self.NFD) == self.NFC
         raw = {
             self.NFC: {"r": "ok", "ts": "2026-07-11T07:31:35"},
             self.NFD: {"r": "nf", "ts": "2026-07-12T10:48:14"},
         }
-        (tmp_path / ".fetch_songtext.json").write_text(json.dumps(raw), encoding="utf-8")
+        (tmp_path / ".fetch_songtext.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
         cache = _load_cache(tmp_path)
         assert len(cache) == 1
         assert cache[self.NFC]["r"] == "nf"  # der neuere (per ts) Eintrag gewinnt
@@ -399,7 +430,9 @@ class TestLoadCache:
             self.NFD: {"r": "nf", "ts": "2026-07-11T07:31:35"},
             self.NFC: {"r": "ok", "ts": "2026-07-12T10:48:14"},
         }
-        (tmp_path / ".fetch_songtext.json").write_text(json.dumps(raw), encoding="utf-8")
+        (tmp_path / ".fetch_songtext.json").write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
         cache = _load_cache(tmp_path)
         assert len(cache) == 1
         assert cache[self.NFC]["r"] == "ok"
@@ -414,7 +447,9 @@ class TestSaveCache:
 
     def test_normal_save_roundtrips(self, tmp_path):
         _save_cache(tmp_path, {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}})
-        assert _load_cache(tmp_path) == {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}}
+        assert _load_cache(tmp_path) == {
+            "a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}
+        }
 
     def test_concurrent_write_does_not_lose_other_processes_entry(self, tmp_path):
         # Prozess A lädt den (leeren) Ordner.
@@ -469,7 +504,9 @@ class TestFolderClaim:
     def test_save_cache_reuses_held_lock_without_deadlock(self, tmp_path):
         lock = _try_claim_folder(tmp_path)
         _save_cache(
-            tmp_path, {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}}, lockfile=lock
+            tmp_path,
+            {"a.flac": {"r": "ok", "ts": "2026-01-01T00:00:00"}},
+            lockfile=lock,
         )
         _release_folder(lock)
         assert _load_cache(tmp_path) == {
@@ -498,7 +535,9 @@ class TestLoadRelease:
     def test_title_lookup_matches_across_normalization_forms(self, tmp_path):
         release = {
             "artist": "Testartist",
-            "tracks": [{"title": unicodedata.normalize("NFC", "Mücken"), "dur_s": 123.0}],
+            "tracks": [
+                {"title": unicodedata.normalize("NFC", "Mücken"), "dur_s": 123.0}
+            ],
         }
         (tmp_path / "release.json").write_text(json.dumps(release), encoding="utf-8")
         artist, tracks_by_title = fetch_songtext._load_release(tmp_path)
@@ -545,23 +584,30 @@ class TestRateLimit:
     def test_status_401_captcha_triggers_longer_backoff_than_402(self):
         _rate_limit_report("musixmatch", "[Musixmatch] Got status code 401 for foo")
         remaining_401 = (
-            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"] - time.monotonic()
+            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"]
+            - time.monotonic()
         )
         fetch_songtext._rate_limit_state.clear()
         _rate_limit_report("musixmatch", "[Musixmatch] Got status code 402 for foo")
         remaining_402 = (
-            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"] - time.monotonic()
+            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"]
+            - time.monotonic()
         )
         assert remaining_401 > remaining_402
 
     def test_netease_generic_error_treated_like_402(self):
-        _rate_limit_report("netease", "An error occurred while searching for an LRC on NetEase")
+        _rate_limit_report(
+            "netease", "An error occurred while searching for an LRC on NetEase"
+        )
         assert fetch_songtext._rate_limit_state["netease"]["consecutive_hits"] == 1
 
     def test_repeated_hits_escalate_up_to_cap(self):
         for _ in range(10):
             _rate_limit_report("musixmatch", "Got status code 402 for foo")
-        remaining = fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"] - time.monotonic()
+        remaining = (
+            fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"]
+            - time.monotonic()
+        )
         assert remaining <= _RATE_LIMIT_MAX_SEC
 
     def test_clean_success_after_hits_resets_consecutive_count(self):
@@ -574,7 +620,10 @@ class TestRateLimit:
         # Genius/lrclib melden laut syncedlyrics-Quellcode nie ein Rate-Limit-
         # Signal im stderr, auch nicht bei HTTP 429 — stderr bleibt leer.
         _rate_limit_report("genius", "")
-        remaining = fetch_songtext._rate_limit_state["genius"]["next_allowed"] - time.monotonic()
+        remaining = (
+            fetch_songtext._rate_limit_state["genius"]["next_allowed"]
+            - time.monotonic()
+        )
         assert remaining <= _RATE_LIMIT_FLOOR_SEC
 
     def test_wait_returns_immediately_without_prior_lock(self):
@@ -590,3 +639,135 @@ class TestRateLimit:
         start = time.monotonic()
         _rate_limit_wait("lrclib")
         assert time.monotonic() - start >= 0.09
+
+
+class TestIdf:
+    # Synthetisches Korpus: n_docs=100, "the"/"a" fast überall (niedrige IDF),
+    # "love" mittelhäufig, "xylophone" extrem selten (hohe IDF).
+    N_DOCS = 100
+    DF = {"the": 99, "a": 99, "love": 50, "xylophone": 1}
+
+    def test_haeufiges_wort_hat_niedrige_idf(self):
+        import math
+
+        expected = math.log((self.N_DOCS + 1) / (self.DF["the"] + 1))
+        assert abs(_idf("the", self.N_DOCS, self.DF) - expected) < 1e-9
+
+    def test_seltenes_wort_hat_hohe_idf(self):
+        assert _idf("xylophone", self.N_DOCS, self.DF) > _idf(
+            "the", self.N_DOCS, self.DF
+        )
+
+    def test_unbekanntes_wort_laplace_geglaettet(self):
+        import math
+
+        # Wort nicht im Korpus (df=0) -> log((N+1)/(0+1)), endlich, nicht unendlich
+        expected = math.log((self.N_DOCS + 1) / 1)
+        assert abs(_idf("quixotic", self.N_DOCS, self.DF) - expected) < 1e-9
+
+    def test_idf_monoton_fallend_in_df(self):
+        assert _idf("love", self.N_DOCS, self.DF) > _idf("the", self.N_DOCS, self.DF)
+
+
+class TestIdfJaccard:
+    N_DOCS = 100
+    DF = {"the": 99, "a": 99, "and": 99, "love": 50, "xylophone": 1, "quixotic": 1}
+
+    def test_leer(self):
+        assert _idf_jaccard(set(), {"a"}, self.N_DOCS, self.DF) == 0.0
+        assert _idf_jaccard({"a"}, set(), self.N_DOCS, self.DF) == 0.0
+
+    def test_identische_mengen_ergeben_eins(self):
+        s = {"the", "xylophone"}
+        assert abs(_idf_jaccard(s, s, self.N_DOCS, self.DF) - 1.0) < 1e-9
+
+    def test_disjunkte_mengen_ergeben_null(self):
+        assert _idf_jaccard({"the"}, {"a"}, self.N_DOCS, self.DF) == 0.0
+
+    def test_seltenes_gemeinsames_wort_dominiert_score(self):
+        # Überschneidung ist nur "xylophone" (sehr selten -> hohe IDF), Rest
+        # unterscheidet sich nur in häufigen Wörtern (niedrige IDF) -> Score nahe 1.
+        transcript = {"xylophone", "the"}
+        lrc = {"xylophone", "and"}
+        score = _idf_jaccard(transcript, lrc, self.N_DOCS, self.DF)
+        assert score > 0.9
+
+    def test_nur_haeufige_woerter_gemeinsam_ergibt_niedrigen_score(self):
+        # Überschneidung nur aus häufigen (uninformativen) Wörtern, dazu viele
+        # unbekannte (nicht überlappende) Wörter -> Score bleibt klein.
+        transcript = {"the", "a", "and", "foo"}
+        lrc = {"the", "a", "and", "bar", "baz"}
+        score = _idf_jaccard(transcript, lrc, self.N_DOCS, self.DF)
+        assert score < _WHISPER_MIN_OVERLAP
+
+    def test_fremder_text_unter_schwelle_passender_text_darueber(self):
+        # Realistischeres Mini-Szenario: "passender" Transkript-/LRC-Ausschnitt
+        # teilt inhaltstragende (seltene) Wörter -> über Schwelle. Ein fremder/
+        # generischer Transkript-Ausschnitt teilt nur Stopwords -> unter Schwelle.
+        lrc_words = {"the", "a", "love", "xylophone", "quixotic"}
+
+        fremder_transcript = {"the", "a", "and", "yeah", "oh"}
+        passender_transcript = {"the", "love", "xylophone", "quixotic"}
+
+        fremder_score = _idf_jaccard(
+            fremder_transcript, lrc_words, self.N_DOCS, self.DF
+        )
+        passender_score = _idf_jaccard(
+            passender_transcript, lrc_words, self.N_DOCS, self.DF
+        )
+
+        assert fremder_score < _WHISPER_MIN_OVERLAP
+        assert passender_score >= _WHISPER_MIN_OVERLAP
+
+
+class TestLoadIdf:
+    def test_fehlende_datei_bricht_mit_klarer_meldung_ab(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            fetch_songtext, "_IDF_CACHE_PATH", tmp_path / "missing.json"
+        )
+        monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
+        with pytest.raises(SystemExit):
+            _load_idf()
+        out = capsys.readouterr().out
+        assert "--rebuild-idf" in out
+
+    def test_laedt_und_cached_module_level(self, tmp_path, monkeypatch):
+        cache_path = tmp_path / "idf.json"
+        cache_path.write_text(
+            json.dumps({"n_docs": 5, "df": {"a": 1}}), encoding="utf-8"
+        )
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", cache_path)
+        monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
+
+        n_docs, df = _load_idf()
+        assert (n_docs, df) == (5, {"a": 1})
+
+        # Datei danach ändern — zweiter Aufruf muss den module-level Cache
+        # zurückgeben, nicht neu von Platte lesen.
+        cache_path.write_text(json.dumps({"n_docs": 999, "df": {}}), encoding="utf-8")
+        n_docs2, df2 = _load_idf()
+        assert (n_docs2, df2) == (5, {"a": 1})
+
+
+class TestBuildIdf:
+    def test_baut_dokumentfrequenz_ueber_lrc_dateien(self, tmp_path, monkeypatch):
+        out_path = tmp_path / "out.json"
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
+
+        lib = tmp_path / "lib"
+        (lib / "A").mkdir(parents=True)
+        (lib / "A" / "a.lrc").write_text("[00:01.00]hello world\n", encoding="utf-8")
+        (lib / "A" / "b.lrc").write_text("[00:01.00]hello there\n", encoding="utf-8")
+        # Leere LRC (kein Text) darf nicht als Dokument zählen
+        (lib / "A" / "empty.lrc").write_text("[00:01.00]\n", encoding="utf-8")
+
+        _build_idf(lib)
+
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["n_docs"] == 2
+        assert data["df"]["hello"] == 2
+        assert data["df"]["world"] == 1
+        assert data["df"]["there"] == 1
+        assert "" not in data["df"]

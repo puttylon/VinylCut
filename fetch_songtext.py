@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-__version__ = "1.7.8"
+__version__ = "1.7.9"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -63,7 +63,7 @@ _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
 # IDF-Tabelle für _idf_jaccard: liegt neben dem Code (nicht in der Musikbibliothek),
 # damit auch lokale Läufe ohne Netzwerk-Mount eine Tabelle haben. Wird per
 # --rebuild-idf <bibliothekspfad> neu gebaut (siehe _build_idf).
-_IDF_CACHE_PATH = Path(__file__).parent / ".fetch_songtext_idf.json"
+_IDF_CACHE_PATH = Path(__file__).parent / "fetch_songtext_idf.json"
 _idf_cache: tuple[int, dict] | None = None  # module-level Cache: (n_docs, df)
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.

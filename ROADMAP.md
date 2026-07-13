@@ -1,5 +1,13 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.7.9 — IDF-Tabelle sichtbar benannt
+
+`.fetch_songtext_idf.json` (versteckt) → `fetch_songtext_idf.json` (sichtbar,
+führender Punkt entfernt). Grund: Nutzer will die 3,5-MB-Tabelle im
+Projektordner sehen können, ohne versteckte Dateien einzublenden.
+`_IDF_CACHE_PATH` sowie alle Erwähnungen in `.gitignore`, README.md und
+ROADMAP.md entsprechend angepasst.
+
 ## ✓ fetch_songtext.py v1.7.7 — Whisper-Matching: Containment durch IDF-Jaccard ersetzt (Bug 2)
 
 Bug 2 (Provider-Fehlmatch): Die Whisper-Verifikation akzeptierte gelegentlich
@@ -12,9 +20,10 @@ Fix: Umstellung auf **IDF-gewichtetes Jaccard** (`_idf_jaccard`). Seltene,
 inhaltstragende Wörter zählen stark, häufige Wörter kaum — Fehlmatches durch
 zufällige Stopword-Überschneidungen werden dadurch verhindert. Die IDF-Werte
 (Dokumentfrequenz je Wort über die ganze Bibliothek) liegen in
-`.fetch_songtext_idf.json` neben dem Skript (nicht im Bibliotheks-Wurzelordner,
-damit auch lokale Läufe ohne Netzwerk-Mount eine Tabelle haben) und werden per
-neuem Flag `--rebuild-idf <bibliothekspfad>` aufgebaut.
+`.fetch_songtext_idf.json` (seit v1.7.9 sichtbar: `fetch_songtext_idf.json`)
+neben dem Skript (nicht im Bibliotheks-Wurzelordner, damit auch lokale Läufe
+ohne Netzwerk-Mount eine Tabelle haben) und werden per neuem Flag
+`--rebuild-idf <bibliothekspfad>` aufgebaut.
 
 Die neue Schwelle **0,065** wurde an 20 gelabelten Songs über 5 Sprachen
 validiert (11 aus einer ersten, 9 aus einer zweiten Stichprobe): niedrigster

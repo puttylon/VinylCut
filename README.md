@@ -191,7 +191,7 @@ Aus dem Text der Provider-LRCs wird die Sprache erkannt (z. B. `de`, `en`, `fr`)
 
 **Schritt 5 — Whisper-Verifikation (small)**
 
-Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `small`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **IDF-gewichtetes Jaccard** (seit v1.7.7, ersetzt die frühere Containment-Metrik): `Σ idf(w) für w in (Whisper ∩ LRC) ÷ Σ idf(w) für w in (Whisper ∪ LRC)`. Seltene, inhaltstragende Wörter zählen dabei stark, häufige Stopwords kaum — das verhindert Fehlmatches, bei denen zufällig ein paar generische Wörter übereinstimmen, obwohl der Song nicht passt. Die IDF-Werte (Dokumentfrequenz je Wort über die gesamte Bibliothek) stammen aus `.fetch_songtext_idf.json` neben dem Skript, aufgebaut per `--rebuild-idf`.
+Whisper transkribiert den gesamten Track (maximal 8 Minuten) mit dem `small`-Modell. Der Text wird mit jeder Provider-LRC verglichen. Das Ähnlichkeitsmaß ist **IDF-gewichtetes Jaccard** (seit v1.7.7, ersetzt die frühere Containment-Metrik): `Σ idf(w) für w in (Whisper ∩ LRC) ÷ Σ idf(w) für w in (Whisper ∪ LRC)`. Seltene, inhaltstragende Wörter zählen dabei stark, häufige Stopwords kaum — das verhindert Fehlmatches, bei denen zufällig ein paar generische Wörter übereinstimmen, obwohl der Song nicht passt. Die IDF-Werte (Dokumentfrequenz je Wort über die gesamte Bibliothek) stammen aus `fetch_songtext_idf.json` neben dem Skript, aufgebaut per `--rebuild-idf`.
 
 Vor dem Vergleich: Wiederholungsschleifen (Whisper-Halluzinationen wie „lets go lets go lets go") werden erkannt und verworfen — die Einzigartigkeit der Wörter muss hoch genug sein *und* kein einzelnes Wort darf dominieren.
 
@@ -263,7 +263,7 @@ Mit `--no-whisper`:
 
 **Parallele Instanzen:** `fetch_songtext.py -r` kann bewusst mehrfach gleichzeitig über dieselbe Bibliothek gestartet werden. Jede Instanz sperrt sich beim Betreten eines Ordners exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
 
-**IDF-Tabelle** (`.fetch_songtext_idf.json`, neben dem Skript, nicht in der Bibliothek): Dokumentfrequenz je Wort über alle `.lrc`-Dateien der Bibliothek — Basis für die Whisper-Matching-Metrik in Schritt 5. Wird nicht automatisch aktualisiert; bei größeren Bibliotheks-Änderungen einmalig `--rebuild-idf <bibliothekspfad>` laufen lassen. Fehlt die Datei, bricht das Skript beim ersten Whisper-Verifikations-Schritt mit einer klaren Fehlermeldung ab (kein stiller Fallback).
+**IDF-Tabelle** (`fetch_songtext_idf.json`, neben dem Skript, nicht in der Bibliothek): Dokumentfrequenz je Wort über alle `.lrc`-Dateien der Bibliothek — Basis für die Whisper-Matching-Metrik in Schritt 5. Wird nicht automatisch aktualisiert; bei größeren Bibliotheks-Änderungen einmalig `--rebuild-idf <bibliothekspfad>` laufen lassen. Fehlt die Datei, bricht das Skript beim ersten Whisper-Verifikations-Schritt mit einer klaren Fehlermeldung ab (kein stiller Fallback).
 
 **Felder je Eintrag:**
 

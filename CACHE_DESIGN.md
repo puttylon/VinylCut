@@ -83,6 +83,12 @@ Ein einmaliger Befehl liest **alle vorhandenen `.lrc`** der Bibliothek als Quell
 
 `künstler_key`/`titel_key` werden **exakt so** gebildet wie bei der echten Live-Abfrage: `unicodedata.normalize("NFC", …)`, klein geschrieben, gleiche Titel-Bereinigung (`_clean_query_title`). Sonst findet der Cache Treffer nicht wieder (vgl. früherer NFC/NFD-Bug).
 
+## Mögliche Folge-Erweiterung: IDF-Tabelle als Abfallprodukt
+
+Die IDF-Tabelle (`fetch_songtext_idf.json`) ist eine Wort-Häufigkeit über alle akzeptierten LRCs der Bibliothek. Sind die lokalen LRCs erst im Cache (Quelle `lokal`), lässt sich die IDF **direkt daraus** neu bauen — statt die `.lrc`-Dateien separat zu scannen. `--rebuild-idf` würde dann aus dem Cache lesen (eine Quelle der Wahrheit für Liedtext).
+
+**Wichtige Feinheit:** Die Dokument-Häufigkeit muss **pro Song** gezählt werden — also über die `lokal`-Zeilen in `quelle` (eine je Song), NICHT über die deduplizierten `texte`-Blobs (das würde Doubletten unterzählen). Korpus = `lokal`-Einträge, damit die validierte 0,065-Schwelle erhalten bleibt (nicht plötzlich alle Provider-Texte mit reinnehmen). Reine Konsolidierung/DRY, kein Funktionsgewinn — daher **eigener Folge-Schritt nach dem Cache**, nicht Teil des ersten Baus.
+
 ## Grenzen (ehrlich)
 
 - **Der allererste Durchlauf** wird nicht schneller — der Cache ist noch leer.

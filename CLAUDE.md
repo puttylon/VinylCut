@@ -40,3 +40,9 @@ Dieses Dokument dient als Leitfaden für die KI-Unterstützung in diesem Reposit
 - **Typisierung:** Verwende Type-Hints, um die Lesbarkeit und Wartbarkeit zu verbessern, aber erzwinge sie nicht dogmatisch bei trivialen Skripten.
 - **Dokumentation:** Schreibe Docstrings und Kommentare nur für komplexe, nicht selbsterklärende Logik. Keine Zeit mit dem Dokumentieren von Offensichtlichkeiten verschwenden.
 - **Fehlerbehandlung:** Fehler abfangen und sinnvoll loggen oder ins Terminal ausgeben. Keine leeren `except: pass`-Blöcke, es sei denn, es ist explizit begründet.
+
+## 5. Dokumentations-Struktur
+- **README.md** — Bedienung (Flags, Befehle, Abhängigkeiten).
+- **ROADMAP.md** — Feature-Status + geplante Features; verlinkt die Design-Dokumente.
+- **`*_DESIGN.md`** — Spezifikationen einzelner Module (z. B. `CACHE_DESIGN.md`).
+- **CLAUDE.md** — Arbeitsregeln (dieses Dokument).

@@ -906,6 +906,14 @@ Neuer Fallback: Whisper erkennt keine Sprache, aber ≥ 2 Provider und ≥ 10 Ly
 trotzdem gespeichert (Vokalsong mit ungewöhnlichem Vokalstil, z. B. Falco "Vienna Calling").
 Artist/Titel-Abfrage nutzt FLAC-Metadaten (seit v1.2.7) statt Dateinamen.
 
+## v1.9.2: Cache-Bugfixes + Schema-Normalisierung (erledigt)
+
+Zwei reale Fehler behoben, die den Cache seit v1.9.0 unbrauchbar machten:
+- **`check_same_thread=False`** (v1.9.1): Provider-Abfragen laufen in Worker-Threads, die Verbindung wird im Hauptthread geöffnet — jeder Cache-Zugriff warf bislang eine sqlite3-Exception, die von der bewusst großzügigen `except Exception`-Absicherung stillschweigend verschluckt wurde. Der Cache hat dadurch NIE etwas geschrieben, trotz laufender Scans.
+- **Fehlschläge wurden gar nicht festgehalten** — nur stillschweigend übersprungen, dadurch fehlten bei gedrosselten Providern (v.a. Musixmatch) ganze Zeilen. Jetzt: `status="fehlschlag"` mit `fehlergrund` (`rate_limit`/`captcha`/`timeout`) wird IMMER gespeichert, zählt aber nie als gültiger Cache-Treffer.
+- **`--force` umging den neuen Provider-Cache nicht** (nur den alten Track-Speicher) — jetzt erzwingen `--force` UND `--refresh-cache` beide eine frische Live-Abfrage.
+- **Schema normalisiert**: zentrale `songs`-Tabelle (ein Künstler/Titel = eine Zeile) statt Künstler/Titel in jeder Provider-Zeile zu duplizieren; `ergebnisse` (vormals `quelle`) verweist per `song_id` darauf; `transkripte` (vormals `gehoert`) unverändert in der Funktion.
+
 ## v1.9.0: Cache-Modul (erledigt)
 
 Siehe `CACHE_DESIGN.md` — intelligenter SQLite-Cache (Anbieter-Antworten + Whisper-Transkripte), damit Neuaufbauten nach Code-Änderungen ohne erneute Provider-Abfragen/Whisper laufen. Grundprinzip: läuft immer auch mit leerer/fehlender DB.

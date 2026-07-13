@@ -4,6 +4,18 @@ Der Cache ist nur ein Beschleuniger, kein Fundament (siehe CACHE_DESIGN.md):
 fehlt die Datenbank oder ist sie leer, liefern alle get_*-Funktionen None und
 das Programm fragt live nach. Dieses Modul kennt nur die Speicherschicht,
 keine Anbieter- oder Whisper-Logik.
+
+Schema (normalisiert):
+    songs       — eine Zeile pro Künstler/Titel (+ optional Genre)
+    ergebnisse  — eine Zeile pro (Song, Provider): Treffer/Nichts/Fehlschlag,
+                  bei Fehlschlag mit Grund; verweist bei Treffer auf `texte`
+    texte       — jeder Liedtext-Inhalt genau einmal (SHA-256-Fingerabdruck)
+    transkripte — Whisper-Ergebnisse je Audiodatei+Modell+Parameter
+
+Ein Fehlschlag (Timeout/Rate-Limit/Captcha) wird IMMER festgehalten (Status
+"fehlschlag" + Grund) — nie stillschweigend verworfen. Er zählt aber nie als
+gültiger Cache-Treffer: get_provider() liefert für "fehlschlag" immer None,
+damit der Aufrufer beim nächsten Lauf erneut live fragt.
 """
 
 from __future__ import annotations
@@ -18,22 +30,31 @@ from pathlib import Path
 DEFAULT_TTL_DAYS = 30
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS songs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist_key TEXT NOT NULL,
+    titel_key TEXT NOT NULL,
+    genre TEXT,
+    UNIQUE (artist_key, titel_key)
+);
+
 CREATE TABLE IF NOT EXISTS texte (
     fingerabdruck TEXT PRIMARY KEY,
     inhalt TEXT
 );
 
-CREATE TABLE IF NOT EXISTS quelle (
-    quelle TEXT,
-    kuenstler_key TEXT,
-    titel_key TEXT,
-    status TEXT,
-    fingerabdruck TEXT,
-    datum TEXT,
-    PRIMARY KEY (quelle, kuenstler_key, titel_key)
+CREATE TABLE IF NOT EXISTS ergebnisse (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    song_id INTEGER NOT NULL REFERENCES songs(id),
+    quelle TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('treffer', 'nichts', 'fehlschlag')),
+    fehlergrund TEXT,
+    fingerabdruck TEXT REFERENCES texte(fingerabdruck),
+    datum TEXT NOT NULL,
+    UNIQUE (song_id, quelle)
 );
 
-CREATE TABLE IF NOT EXISTS gehoert (
+CREATE TABLE IF NOT EXISTS transkripte (
     datei_kennung TEXT,
     modell TEXT,
     parameter_key TEXT,
@@ -57,13 +78,12 @@ def open_cache(db_path: Path) -> sqlite3.Connection:
     Hauptthread geöffnet wird. fetch_songtext._cache_lock serialisiert alle
     Zugriffe bereits vollständig — ohne dieses Flag lehnt sqlite3 jeden Zugriff
     aus einem anderen Thread mit "SQLite objects created in a thread can only
-    be used in that same thread" ab (wurde von der bewusst großzügigen
-    except-Exception-Absicherung um jeden Cache-Aufruf bislang stillschweigend
-    verschluckt — der Cache blieb dadurch trotz laufender Läufe leer).
+    be used in that same thread" ab.
     """
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
@@ -82,6 +102,27 @@ def _fingerprint(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _get_or_create_song(
+    conn: sqlite3.Connection, artist_key: str, titel_key: str, genre: str | None = None
+) -> int:
+    """Liefert die song_id für (artist_key, titel_key); legt die Zeile bei Bedarf an.
+
+    Ein mitgegebenes genre wird nur beim erstmaligen Anlegen gesetzt bzw. bei
+    einer bestehenden Zeile ergänzt, wenn dort noch kein Genre steht.
+    """
+    conn.execute(
+        "INSERT INTO songs (artist_key, titel_key, genre) VALUES (?, ?, ?) "
+        "ON CONFLICT(artist_key, titel_key) DO UPDATE SET "
+        "genre=COALESCE(songs.genre, excluded.genre)",
+        (artist_key, titel_key, genre),
+    )
+    row = conn.execute(
+        "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+        (artist_key, titel_key),
+    ).fetchone()
+    return row[0]
+
+
 def get_provider(
     conn: sqlite3.Connection,
     provider: str,
@@ -89,20 +130,25 @@ def get_provider(
     title_key: str,
     ttl_days: int = DEFAULT_TTL_DAYS,
 ) -> dict | None:
-    """Liefert einen gecachten Anbieter-Eintrag, falls vorhanden und nicht abgelaufen.
+    """Liefert einen gecachten Anbieter-Eintrag, falls vorhanden, gültig und kein Fehlschlag.
 
-    Gibt {"status": "treffer"|"nichts", "content": str|None} zurück,
-    oder None, wenn kein (gültiger) Eintrag existiert.
+    Gibt {"status": "treffer"|"nichts", "content": str|None} zurück, oder None
+    wenn kein Eintrag existiert, der Eintrag abgelaufen ist, oder der letzte
+    Versuch ein Fehlschlag war (dann soll der Aufrufer immer live neu fragen).
     """
     row = conn.execute(
-        "SELECT status, fingerabdruck, datum FROM quelle "
-        "WHERE quelle=? AND kuenstler_key=? AND titel_key=?",
+        "SELECT e.status, e.fingerabdruck, e.datum "
+        "FROM ergebnisse e JOIN songs s ON s.id = e.song_id "
+        "WHERE e.quelle=? AND s.artist_key=? AND s.titel_key=?",
         (provider, artist_key, title_key),
     ).fetchone()
     if row is None:
         return None
 
     status, fingerabdruck, datum = row
+    if status == "fehlschlag":
+        return None  # nie als Cache-Treffer werten — immer erneut live fragen
+
     try:
         eintrag_datum = datetime.fromisoformat(datum)
     except ValueError:
@@ -129,12 +175,22 @@ def put_provider(
     title_key: str,
     status: str,
     content: str | None,
+    fehlergrund: str | None = None,
+    genre: str | None = None,
 ) -> None:
-    """Speichert (Upsert) das Ergebnis einer Anbieter-Abfrage.
+    """Speichert (Upsert) das Ergebnis einer Anbieter-Abfrage — IMMER, auch bei Fehlschlag.
 
-    Bei status="treffer" wird content über seinen SHA-256-Fingerabdruck in
-    `texte` dedupliziert; bei status="nichts" bleibt content None/leer.
+    status ∈ {"treffer", "nichts", "fehlschlag"}. Bei "treffer" wird content
+    über seinen SHA-256-Fingerabdruck in `texte` dedupliziert. Bei "fehlschlag"
+    sollte `fehlergrund` gesetzt sein (z.B. "rate_limit", "timeout", "captcha").
+    Jeder Provider-Versuch für einen Song hinterlässt eine Zeile — ein
+    Fehlschlag wird nie stillschweigend übersprungen.
     """
+    if status not in ("treffer", "nichts", "fehlschlag"):
+        raise ValueError(f"Ungültiger status: {status!r}")
+
+    song_id = _get_or_create_song(conn, artist_key, title_key, genre)
+
     fingerabdruck = None
     if status == "treffer" and content is not None:
         fingerabdruck = _fingerprint(content)
@@ -145,11 +201,12 @@ def put_provider(
         )
 
     conn.execute(
-        "INSERT INTO quelle (quelle, kuenstler_key, titel_key, status, fingerabdruck, datum) "
+        "INSERT INTO ergebnisse (song_id, quelle, status, fehlergrund, fingerabdruck, datum) "
         "VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(quelle, kuenstler_key, titel_key) DO UPDATE SET "
-        "status=excluded.status, fingerabdruck=excluded.fingerabdruck, datum=excluded.datum",
-        (provider, artist_key, title_key, status, fingerabdruck, _now_iso()),
+        "ON CONFLICT(song_id, quelle) DO UPDATE SET "
+        "status=excluded.status, fehlergrund=excluded.fehlergrund, "
+        "fingerabdruck=excluded.fingerabdruck, datum=excluded.datum",
+        (song_id, provider, status, fehlergrund, fingerabdruck, _now_iso()),
     )
     conn.commit()
 
@@ -159,7 +216,7 @@ def get_transcript(
 ) -> dict | None:
     """Liefert ein gecachtes Whisper-Transkript oder None."""
     row = conn.execute(
-        "SELECT transkript, no_speech_prob, avg_logprob FROM gehoert "
+        "SELECT transkript, no_speech_prob, avg_logprob FROM transkripte "
         "WHERE datei_kennung=? AND modell=? AND parameter_key=?",
         (audio_key, model, params_key),
     ).fetchone()
@@ -184,7 +241,7 @@ def put_transcript(
 ) -> None:
     """Speichert (Upsert) ein Whisper-Transkript mitsamt Kennzahlen."""
     conn.execute(
-        "INSERT INTO gehoert "
+        "INSERT INTO transkripte "
         "(datei_kennung, modell, parameter_key, transkript, no_speech_prob, avg_logprob, datum) "
         "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(datei_kennung, modell, parameter_key) DO UPDATE SET "

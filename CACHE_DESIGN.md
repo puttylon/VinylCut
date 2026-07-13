@@ -1,6 +1,6 @@
 # Cache-Modul — Design
 
-> **Status:** geplant, noch nicht implementiert. Dieses Dokument ist der abgestimmte Entwurf.
+> **Status:** implementiert (v1.9.0, Schema normalisiert seit v1.9.2). Dieses Dokument beschreibt den aktuellen Stand.
 
 ## Grundprinzip (das Wichtigste zuerst)
 
@@ -22,58 +22,65 @@ Anbieter-Antworten **und** das von Whisper Gehörte werden gespeichert, damit di
 Eine einzige **SQLite-Datei** neben dem Code: `fetch_songtext_cache.db` (gitignored, wie die IDF-Tabelle).
 SQLite statt JSON, weil die parallelen `--fast`-Läufe **gleichzeitig** schreiben — SQLite (WAL-Modus, `busy_timeout`) verträgt das sicher, JSON würde sich gegenseitig überschreiben. Nachschlagen bei 20.000 × 4 Anbietern ist so ebenfalls schnell.
 
-## Aufbau: drei Tabellen
+## Aufbau: vier normalisierte Tabellen
 
-### 1. `texte` — jeder Liedtext genau EINMAL
-Jeder Text wird unter dem **Fingerabdruck** (Prüfsumme, z. B. SHA-256 des normalisierten Inhalts) gespeichert.
-→ Liefert ein Anbieter denselben Text wie die lokale Datei, haben beide **denselben Fingerabdruck** → der Text liegt **nur einmal** da (De-Duplizierung). Man sieht sogar, *dass* Quellen identisch sind.
+### 1. `songs` — die zentrale Entität: ein Song = eine Zeile
+Jeder Künstler/Titel bekommt **genau eine** Zeile, unabhängig davon, wie viele Provider ihn kennen.
 
 | Spalte | Bedeutung |
 |---|---|
-| `fingerabdruck` | Primärschlüssel (Hash des Inhalts) |
+| `id` | Primärschlüssel (Autoincrement) |
+| `artist_key`, `titel_key` | normalisiert (siehe *Normalisierung*), `UNIQUE(artist_key, titel_key)` |
+| `genre` | optional, wird beim ersten Bekanntwerden gesetzt |
+
+### 2. `ergebnisse` — ein Versuch pro (Song, Provider), IMMER festgehalten
+Pro Song bis zu **vier** Zeilen (`lrclib`/`musixmatch`/`netease`/`genius`), plus ggf. `lokal`. Jeder Versuch — auch ein Fehlschlag — hinterlässt eine Zeile; nichts bleibt spurlos.
+
+| Spalte | Bedeutung |
+|---|---|
+| `song_id` | → `songs.id` |
+| `quelle` | `lrclib` / `musixmatch` / `netease` / `genius` / **`lokal`** |
+| `status` | `treffer` / `nichts` / **`fehlschlag`** |
+| `fehlergrund` | bei `fehlschlag`: `"rate_limit"`, `"captcha"`, `"timeout"` |
+| `fingerabdruck` | → Tabelle `texte` (nur bei `treffer`) |
+| `datum` | Zeitpunkt des letzten Versuchs |
+
+`UNIQUE(song_id, quelle)` — ein neuer Versuch überschreibt (Upsert) den alten Stand für diesen Provider; die Datenbank zeigt immer den **letzten** Versuch, nicht die volle Historie.
+
+### 3. `texte` — jeder Liedtext genau EINMAL
+Jeder Text wird unter dem **Fingerabdruck** (SHA-256 des Inhalts) gespeichert. Liefert ein Provider denselben Text wie die lokale Datei, haben beide **denselben Fingerabdruck** → der Text liegt nur einmal da (De-Duplizierung), verlinkt von beliebig vielen `ergebnisse`-Zeilen.
+
+| Spalte | Bedeutung |
+|---|---|
+| `fingerabdruck` | Primärschlüssel |
 | `inhalt` | der LRC-Text |
 
-### 2. `quelle` — wer hatte was (Anbieter UND lokal)
-Eine Zeile pro Abfrage; zeigt nur auf den Fingerabdruck, nicht auf den ganzen Text.
-
-| Spalte | Bedeutung |
-|---|---|
-| `quelle` | `lrclib` / `musixmatch` / `netease` / `genius` / **`lokal`** |
-| `künstler_key`, `titel_key` | normalisiert (siehe *Normalisierung*) |
-| `status` | `treffer` oder `nichts` |
-| `fingerabdruck` | → Tabelle `texte` (leer bei `nichts`) |
-| `datum` | Zeitpunkt des Holens |
-
-Primärschlüssel: (`quelle`, `künstler_key`, `titel_key`).
-**„Lokal" ist einfach eine weitere Quelle.** Vorhandene `.lrc` werden als Quelle `lokal` eingelesen; der Inhalt landet über den Fingerabdruck automatisch mit den Anbietern zusammen.
-
-### 3. `gehört` — Whisper-Transkript MIT Parametern
+### 4. `transkripte` — Whisper-Ergebnis MIT Parametern
 | Spalte | Bedeutung |
 |---|---|
 | `datei_kennung` | Pfad + Größe + Änderungsdatum (ändert sich die Datei → neu anhören) |
 | `modell` | z. B. `small` |
-| `parameter_key` | kanonischer Schlüssel aller ergebnisrelevanten Einstellungen (Fenster-Start, Fenster-Länge, Sprache, `beam_size`, `condition_on_previous_text`, VAD an/aus, …) |
-| `transkript`, `no_speech_prob`, `avg_logprob` | das Gehörte + die Kennzahlen |
+| `parameter_key` | kanonischer Schlüssel aller ergebnisrelevanten Einstellungen (Fenster-Start, -Länge, Sprache, `beam_size`, `condition_on_previous_text`, …) |
+| `transkript`, `no_speech_prob`, `avg_logprob` | das Gehörte + Kennzahlen |
 | `datum` | Zeitpunkt |
 
-Primärschlüssel: (`datei_kennung`, `modell`, `parameter_key`).
-**Wiederverwendung nur, wenn Datei UND Modell UND Parameter passen.** Jede Einstellungs- oder Datei-Änderung macht den Eintrag automatisch ungültig → es wird neu angehört. Damit sind Ergebnisse sauber vergleichbar (auch A/B-Tests: gleiche Datei, andere Parameter = zwei getrennte Einträge).
+Primärschlüssel: (`datei_kennung`, `modell`, `parameter_key`). **Wiederverwendung nur, wenn Datei UND Modell UND Parameter passen** — jede Änderung macht den Eintrag automatisch ungültig.
 
 ## Die drei Ausgänge einer Anbieter-Abfrage
 
-| Ausgang | Wird gecacht? |
+| Ausgang | Wird festgehalten? |
 |---|---|
-| **Treffer** (Text bekommen) | ja, mit Datum |
-| **Wirklich nichts** (Anbieter antwortet, hat den Song nicht) | ja, als `nichts`, mit Datum |
-| **Timeout / Rate-Limit / Captcha / Netzfehler** | **NEIN** — keine Antwort, nächstes Mal neu fragen |
+| **Treffer** (Text bekommen) | ja, `status="treffer"`, mit Datum |
+| **Wirklich nichts** (Anbieter antwortet, hat den Song nicht) | ja, `status="nichts"`, mit Datum |
+| **Timeout / Rate-Limit / Captcha / Netzfehler** | ja, `status="fehlschlag"` **mit Grund** — aber **nie als gültiger Cache-Treffer** |
 
-Kritisch: Ein transienter Fehlschlag darf **nicht** als „nichts" gespeichert werden — sonst würden während eines großen (gedrosselten) Laufs tausende Songs 30 Tage lang fälschlich als „hat keinen Text" abgestempelt. Die Drosselungs-/Captcha-Signale erkennt das Programm bereits (seit v1.7.3), die Unterscheidung ist machbar.
+**Kein Ausgang bleibt unsichtbar.** Ein transienter Fehlschlag wird **festgehalten** (Grund: `rate_limit`/`captcha`/`timeout`), zählt aber beim Nachschlagen (`get_provider`) **nie** als brauchbares Ergebnis — der Aufrufer fragt beim nächsten Lauf automatisch wieder live. Damit ist sowohl sichtbar, *dass* und *warum* ein Versuch gescheitert ist, als auch sichergestellt, dass ein „geht gerade nicht" nie 30 Tage lang als „hat keinen Text" verwechselt wird.
 
 ## Auffrischung (TTL)
 
-- Cache-Eintrag **jünger als 30 Tage** → wird genutzt.
-- **Älter** → gilt als nicht vorhanden → live neu holen (= automatischer „Verbesser-Rhythmus").
-- Schalter: `--refresh-cache` (frisch erzwingen), `--cache-ttl <tage>` (Wert einstellbar), `--no-cache` (Cache komplett ignorieren — belegt zugleich das Grundprinzip).
+- Cache-Eintrag **jünger als 30 Tage** UND `status` ≠ `fehlschlag` → wird genutzt.
+- **Älter, oder Fehlschlag** → gilt als nicht vorhanden → live neu holen (= automatischer „Verbesser-Rhythmus").
+- Schalter: `--refresh-cache` UND `--force` erzwingen beide eine frische Live-Abfrage (umgehen den Provider-Cache vollständig — `--force` bedeutet „wirklich alles neu", nicht nur den alten Track-Speicher). `--cache-ttl <tage>` stellt die Gültigkeitsdauer ein. `--no-cache` ignoriert den Cache komplett (belegt zugleich das Grundprinzip).
 
 ## Lokale LRCs einlesen
 

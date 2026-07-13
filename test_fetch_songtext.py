@@ -990,7 +990,9 @@ class TestProviderCache:
         cached = cache_store.get_provider(conn, "lrclib", "a", "b")
         assert cached == {"status": "nichts", "content": None}
 
-    def test_transient_error_is_not_cached(self, tmp_path, monkeypatch):
+    def test_transient_error_ist_kein_cache_treffer_aber_wird_festgehalten(
+        self, tmp_path, monkeypatch
+    ):
         conn = self._open(tmp_path)
 
         class _Result:
@@ -1001,9 +1003,20 @@ class TestProviderCache:
 
         monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
         fetch_songtext._query_provider("a b", "musixmatch", {}, artist="a", title="b")
+        # Kein gültiger Cache-Treffer beim nächsten Aufruf ...
         assert cache_store.get_provider(conn, "musixmatch", "a", "b") is None
+        # ... aber der Fehlschlag steht mit Grund in der Datenbank, nicht spurlos.
+        row = conn.execute(
+            "SELECT status, fehlergrund FROM ergebnisse e "
+            "JOIN songs s ON s.id = e.song_id "
+            "WHERE e.quelle=? AND s.artist_key=? AND s.titel_key=?",
+            ("musixmatch", "a", "b"),
+        ).fetchone()
+        assert row == ("fehlschlag", "rate_limit")
 
-    def test_timeout_is_not_cached(self, tmp_path, monkeypatch):
+    def test_timeout_ist_kein_cache_treffer_aber_wird_festgehalten(
+        self, tmp_path, monkeypatch
+    ):
         conn = self._open(tmp_path)
 
         def _fake_run(*a, **k):
@@ -1012,6 +1025,39 @@ class TestProviderCache:
         monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
         fetch_songtext._query_provider("a b", "netease", {}, artist="a", title="b")
         assert cache_store.get_provider(conn, "netease", "a", "b") is None
+        row = conn.execute(
+            "SELECT status, fehlergrund FROM ergebnisse e "
+            "JOIN songs s ON s.id = e.song_id "
+            "WHERE e.quelle=? AND s.artist_key=? AND s.titel_key=?",
+            ("netease", "a", "b"),
+        ).fetchone()
+        assert row == ("fehlschlag", "timeout")
+
+    def test_force_umgeht_auch_den_provider_cache(self, tmp_path, monkeypatch):
+        """--force (main() setzt dafuer _cache_refresh) muss den Provider-Cache
+        genauso umgehen wie --refresh-cache — sonst liefert --force veraltete
+        Cache-Treffer statt frisch zu fragen."""
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "a", "b", "treffer", "alter text")
+
+        fetch_songtext._cache_refresh = True  # simuliert --force bzw. --refresh-cache
+        try:
+            called = []
+
+            class _Result:
+                stderr = ""
+
+            def _fake_run(*a, **k):
+                called.append(1)
+                return _Result()
+
+            monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+            fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
+            assert called, (
+                "--force/--refresh-cache muss live abfragen, nicht aus dem Cache bedienen"
+            )
+        finally:
+            fetch_songtext._cache_refresh = False
 
     def test_no_cache_conn_falls_back_to_live(self, monkeypatch):
         fetch_songtext._cache_conn = None  # simuliert --no-cache / fehlende DB

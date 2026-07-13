@@ -22,7 +22,7 @@ try:
 except ImportError:
     cache_store = None
 
-__version__ = "1.9.0"
+__version__ = "1.9.2"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -252,7 +252,7 @@ def _rate_limit_wait(provider: str) -> None:
         time.sleep(wait)
 
 
-def _rate_limit_report(provider: str, stderr: str) -> bool:
+def _rate_limit_report(provider: str, stderr: str) -> str | None:
     """Wertet stderr auf Rate-Limit-Signale aus und setzt ggf. eine Sperre.
 
     Musixmatch meldet Rate-Limits über einen im JSON eingebetteten status_code
@@ -265,9 +265,10 @@ def _rate_limit_report(provider: str, stderr: str) -> bool:
     Dort greift ausschließlich der proaktive Mindestabstand (Fallback-Zweig
     unten, auch bei sauberem Erfolg — das ist der proaktive Floor).
 
-    Gibt True zurück, wenn ein transientes Rate-Limit/Captcha/Fehler-Signal
-    erkannt wurde (für den Cache: solche Ergebnisse dürfen nicht als "nichts"
-    gespeichert werden — siehe CACHE_DESIGN.md).
+    Gibt bei einem transienten Rate-Limit/Captcha/Fehler-Signal den erkannten
+    Grund zurück ("captcha" oder "rate_limit"), sonst None. Der Cache hält
+    einen transienten Fehlschlag IMMER unter status="fehlschlag" fest (siehe
+    CACHE_DESIGN.md) — er zählt aber nie als gültiger Cache-Treffer.
     """
     with _rate_limit_lock:
         state = _rate_limit_state.setdefault(
@@ -279,7 +280,7 @@ def _rate_limit_report(provider: str, stderr: str) -> bool:
                 _RATE_LIMIT_MAX_SEC,
             )
             state["consecutive_hits"] += 1
-            hit = True
+            grund = "captcha"
         elif re.search(r"[Gg]ot status code 402", stderr) or (
             "An error occurred while searching for an LRC on" in stderr
         ):
@@ -288,13 +289,13 @@ def _rate_limit_report(provider: str, stderr: str) -> bool:
                 _RATE_LIMIT_MAX_SEC,
             )
             state["consecutive_hits"] += 1
-            hit = True
+            grund = "rate_limit"
         else:
             state["consecutive_hits"] = 0
             delay = _RATE_LIMIT_FLOOR_SEC
-            hit = False
+            grund = None
         state["next_allowed"] = time.monotonic() + delay
-        return hit
+        return grund
 
 
 def _query_provider(
@@ -307,10 +308,14 @@ def _query_provider(
 
     Cache (siehe CACHE_DESIGN.md), nur aktiv wenn cache_store importiert werden
     konnte UND _cache_conn offen ist: vor der Live-Abfrage wird `get_provider`
-    geprüft (außer bei --refresh-cache), danach wird das Ergebnis klassifiziert
-    — Treffer/"nichts" werden gecacht, transiente Fehler (Timeout/Rate-Limit/
-    Captcha) NIE, sonst würden gedrosselte Läufe Songs fälschlich 30 Tage lang
-    als "hat keinen Text" abstempeln.
+    geprüft (übersprungen bei --refresh-cache ODER --force — beide erzwingen
+    eine frische Live-Abfrage). Jedes Ergebnis wird danach IMMER festgehalten:
+    Treffer, "wirklich nichts" UND transiente Fehler (Timeout/Rate-Limit/
+    Captcha) — Fehlschläge mit Grund (status="fehlschlag", fehlergrund), damit
+    kein Versuch stillschweigend spurlos bleibt. Ein Fehlschlag zählt aber nie
+    als gültiger Cache-Treffer (get_provider gibt dafür immer None zurück) —
+    sonst würden gedrosselte Läufe Songs fälschlich 30 Tage lang als "hat
+    keinen Text" abstempeln.
     """
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = title_key = None
@@ -352,20 +357,46 @@ def _query_provider(
             env=env,
             timeout=_PROVIDER_TIMEOUT,
         )
-        transient = _rate_limit_report(provider, result.stderr)
+        fehlergrund = _rate_limit_report(provider, result.stderr)
     except subprocess.TimeoutExpired:
         tmp_path.unlink(missing_ok=True)
-        return provider, None  # Timeout ist transient — nie cachen
+        if use_cache:
+            try:
+                with _cache_lock:
+                    cache_store.put_provider(
+                        _cache_conn,
+                        provider,
+                        artist_key,
+                        title_key,
+                        "fehlschlag",
+                        None,
+                        fehlergrund="timeout",
+                    )
+            except Exception:
+                pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+        return provider, None
 
     found_path = tmp_path if tmp_path.exists() else None
-    if use_cache and not transient:
+    if use_cache:
         try:
-            content = found_path.read_text(encoding="utf-8") if found_path else None
-            status = "treffer" if content else "nichts"
-            with _cache_lock:
-                cache_store.put_provider(
-                    _cache_conn, provider, artist_key, title_key, status, content
-                )
+            if fehlergrund is not None:
+                with _cache_lock:
+                    cache_store.put_provider(
+                        _cache_conn,
+                        provider,
+                        artist_key,
+                        title_key,
+                        "fehlschlag",
+                        None,
+                        fehlergrund=fehlergrund,
+                    )
+            else:
+                content = found_path.read_text(encoding="utf-8") if found_path else None
+                status = "treffer" if content else "nichts"
+                with _cache_lock:
+                    cache_store.put_provider(
+                        _cache_conn, provider, artist_key, title_key, status, content
+                    )
         except Exception:
             pass  # Cache-Schreibfehler dürfen den Lauf nie stören
 
@@ -1399,7 +1430,10 @@ def main() -> None:
 
     global _cache_conn, _cache_ttl_days, _cache_refresh
     _cache_ttl_days = args.cache_ttl
-    _cache_refresh = args.refresh_cache
+    # --force soll wirklich alles frisch abfragen (nicht nur den alten
+    # Track-Speicher umgehen) — sonst würde --force stillschweigend
+    # veraltete Provider-Cache-Treffer zurückgeben statt live zu fragen.
+    _cache_refresh = args.refresh_cache or args.force
     _cache_conn = None
     if cache_store is not None and not args.no_cache:
         try:

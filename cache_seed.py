@@ -3,7 +3,11 @@
 fetch_songtext-Cache ein (siehe CACHE_DESIGN.md, Abschnitt "Lokale LRCs
 einlesen"). Einmaliger Befehl, damit schon der erste Neuaufbau der Bibliothek
 vom Cache profitiert — Dubletten zu Anbieter-Texten werden von cache_store
-automatisch über den Fingerabdruck erkannt.
+automatisch über den Fingerabdruck erkannt. Eingelesen wird nur, wenn GENAU
+DIESER Track (per Audiodateiname als Schlüssel) in der .fetch_songtext.json
+des Ordners verzeichnet ist UND dort als `"r": "ok"` (Text gefunden und
+akzeptiert) markiert wurde — nicht schon, wenn irgendeine .fetch_songtext.json
+im Ordner liegt.
 
 Verwendung:
     python3 cache_seed.py /Musik/
@@ -11,9 +15,10 @@ Verwendung:
 """
 
 import argparse
+import unicodedata
 from pathlib import Path
 
-from fetch_songtext import _clean_query_title, _read_audio_tags
+from fetch_songtext import _clean_query_title, _load_cache, _read_audio_tags
 
 _AUDIO_EXTENSIONS = (".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav")
 
@@ -67,6 +72,14 @@ def seed(root: Path, db_path: Path) -> tuple[int, int]:
     """Liest alle *.lrc unter `root` (rekursiv) als Quelle "lokal" in den
     Cache ein. Gibt (eingelesen, übersprungen) zurück. Eine kaputte/leere
     Datei bricht den Lauf nicht ab, sie wird nur mitgezählt und übersprungen.
+    Qualitätsfilter: pro Track geprüft, nicht pro Ordner — eine .lrc wird nur
+    eingelesen, wenn GENAU DIESER Track (Schlüssel = Audiodateiname) in der
+    .fetch_songtext.json des Ordners verzeichnet ist UND dort `"r" == "ok"`
+    trägt (Text gefunden und akzeptiert). Ohne zugehörige Audiodatei fehlt
+    die verlässliche Track-Identität für diesen Abgleich — dann wird
+    übersprungen. Nur Tracks, die nachweislich durch fetch_songtext liefen
+    und dort als verifiziert gelten, sind eine vertrauenswürdige
+    "lokal"-Quelle.
     """
     if cache_store is None:
         raise RuntimeError(
@@ -79,6 +92,18 @@ def seed(root: Path, db_path: Path) -> tuple[int, int]:
     uebersprungen = 0
 
     for lrc_path in sorted(root.rglob("*.lrc")):
+        audio = _find_sibling_audio(lrc_path)
+        if audio is None:
+            uebersprungen += 1
+            continue
+
+        cache = _load_cache(lrc_path.parent)
+        cache_key = unicodedata.normalize("NFC", audio.name)
+        entry = cache.get(cache_key)
+        if entry is None or entry.get("r") != "ok":
+            uebersprungen += 1
+            continue
+
         try:
             content = lrc_path.read_text(encoding="utf-8")
         except Exception:

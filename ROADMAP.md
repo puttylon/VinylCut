@@ -1,5 +1,65 @@
 # VinylCut Roadmap
 
+## ✓ cache_seed.py v1.9.9 — Qualitätsfilter pro Track statt pro Ordner
+
+Bisher prüfte `cache_seed.py` nur, ob IRGENDEINE `.fetch_songtext.json` im
+selben Ordner wie die `.lrc` lag — zu grob, das sagt nichts über den
+konkreten Track aus. Jetzt wird pro Track geprüft: `_load_cache()` (aus
+`fetch_songtext.py` importiert statt neu gebaut) lädt die `.fetch_songtext.json`
+des Ordners, und eine `.lrc` wird nur eingelesen, wenn der Schlüssel
+`unicodedata.normalize("NFC", audio.name)` darin existiert UND der Eintrag
+`"r": "ok"` trägt. Ohne gleichnamige Audiodatei fehlt die verlässliche
+Track-Identität — dann wird übersprungen. Die bisherige eigene
+`_APP_CACHE_FILENAME`-Konstante entfällt (überflüssig, `_load_cache()` kennt
+den Dateinamen selbst und liefert `{}` bei Fehlen).
+
+## ✓ fetch_songtext.py v1.9.8 — Genre-Skip-Löschung invalidiert "lokal"-Cache
+
+Letzte verbliebene Lücke der v1.9.7-Invalidierung geschlossen: Löscht `main()`
+eine vorher vorhandene `.lrc`, weil das Genre keinen Songtext erwarten lässt
+(`_is_skip_genre`, z. B. Instrumental/Hörbuch), wurde `"lokal"` bisher NICHT
+auf `status="nichts"` gesetzt — reiner Reihenfolge-Bug: `query_artist`/
+`clean_title` wurden erst NACH dem Genre-Check berechnet. Fix: Berechnung vor
+den Genre-Check verschoben (steht jetzt in beiden Zweigen zur Verfügung, im
+Normalfall keine Neuberechnung mehr nötig — `query`-String unverändert), im
+Genre-Skip-Zweig bei `had_lrc=True` zusätzlich `_invalidate_lokal_cache`
+aufgerufen. Der `no_tags`-Fall bleibt bewusst unangetastet — keine verlässliche
+Song-Identität, daher kein Cache-Schlüssel.
+
+## ✓ fetch_songtext.py v1.9.7 — Löschung invalidiert "lokal"-Cache
+
+Zwei Lücken in der v1.9.6-Rückkopplung geschlossen (`main()`, `use_compare`-Zweig):
+Wird eine vorher vorhandene `.lrc` jetzt als "nicht gefunden" gelöscht
+(`had_lrc=True`), setzt `main()` den `"lokal"`-Cache-Eintrag zusätzlich auf
+`status="nichts"` (`_invalidate_lokal_cache`) — sonst würde ein künftiger Lauf
+den soeben widerlegten Text über den `"lokal"`-Kandidaten in `fetch_lrc()`
+wieder ins Spiel bringen. Der "unverändert"-Fall (gefundener Text ist
+byte-identisch zur bestehenden `.lrc`) rief `_feedback_lokal_cache` bereits
+vorher korrekt mit auf (steht im Code nach dem `if/else`, gilt für beide
+Zweige) — keine Änderung nötig, nur als Regressionstest abgesichert.
+
+## ✓ fetch_songtext.py v1.9.6 — "lokal" als fünfter Kandidat in `fetch_lrc()`
+
+Die Cache-Quelle `"lokal"` (per `cache_seed.py` eingelesen oder automatisch
+gepflegt) ist jetzt ein vollwertiger fünfter Kandidat in `fetch_lrc()`, statt
+nur beim Provider-Cache mitzulaufen. Wird wie die 4 echten Provider auf
+inhaltliche Duplikate geprüft (`_dedupe_by_content`), aber mit niedrigster
+Priorität — hat ein echter Provider identischen Inhalt, gewinnt dieser und
+`"lokal"` wird verworfen, nicht doppelt gezählt. Zählt NICHT zum
+3-von-4-Konsens (`_provider_consensus`) — nur die 4 echten Provider zählen
+dafür, `"lokal"` ist nur eine Erinnerung an einen früher akzeptierten Text,
+keine unabhängige Bestätigung. Überlebt `"lokal"` den Dedup, landet es
+zusätzlich in der Whisper-Vergleichsliste (`all_candidates`), genau wie die
+vorhandene `.lrc` auf der Platte. Kein Freifahrtschein: Liefert nur `"lokal"`
+etwas (kein Provider antwortet), läuft der Song trotzdem ganz normal durch
+Whisper und kann bei Nichtübereinstimmung verworfen werden.
+
+Zusätzlich: jeder akzeptierte Song (Konsens oder Whisper-Treffer) wird in
+`main()` automatisch als neuer `"lokal"`-Stand zurückgeschrieben
+(`put_provider(..., "lokal", ...)`) — hält die Quelle dauerhaft aktuell statt
+nur ein einmaliger `cache_seed.py`-Snapshot zu bleiben, analog zum
+Whisper-Transkript-Cache (Song-Identität statt Datei-Pfad).
+
 ## ✓ fetch_songtext.py v1.9.4 — Dauerhaft blockierten Provider überspringen statt jedes Mal neu zu warten
 
 Beleg aus der Cache-Datenbank: Musixmatch schlug bei praktisch jedem Song mit
@@ -951,4 +1011,6 @@ Siehe `CACHE_DESIGN.md` — intelligenter SQLite-Cache (Anbieter-Antworten + Whi
 
 - `cache_store.py` — Speicherschicht (SQLite, WAL): `texte` (Liedtexte, per SHA-256-Fingerabdruck dedupliziert), `quelle` (Provider-/`"lokal"`-Treffer inkl. TTL), `gehoert` (Whisper-Transkripte, geschlüsselt über Datei+Modell+Parameter).
 - `cache_seed.py <bibliothekspfad>` — liest alle vorhandenen `.lrc` als Quelle `"lokal"` in den Cache ein.
+- v1.9.5: `cache_seed.py` liest eine `.lrc` nur ein, wenn im selben Ordner auch eine `.fetch_songtext.json` liegt — sonst übersprungen (mitgezählt). Qualitätsfilter: nur Tracks, die nachweislich durch `fetch_songtext.py` liefen, gelten als vertrauenswürdige `"lokal"`-Quelle.
+- v1.9.9: Qualitätsfilter verschärft — pro Track statt pro Ordner geprüft. Eine `.lrc` wird nur eingelesen, wenn der Track (Schlüssel = Audiodateiname) in der `.fetch_songtext.json` des Ordners mit `"r": "ok"` verzeichnet ist (`_load_cache()` aus `fetch_songtext.py` wiederverwendet).
 - `fetch_songtext.py`: neue Flags `--no-cache`, `--refresh-cache`, `--cache-ttl TAGE` (Default 30). Provider-Abfragen (`_query_provider`) und Whisper-Transkription (`_cached_transcribe`) cachen transparent — geschützter Import (`cache_store` fehlt → Verhalten exakt wie vorher). Drei Ausgänge sauber getrennt: Treffer und „wirklich nichts" werden gecacht, transiente Fehler (Timeout/Rate-Limit/Captcha) nie.

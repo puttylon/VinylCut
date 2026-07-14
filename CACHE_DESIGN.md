@@ -1,6 +1,6 @@
 # Cache-Modul — Design
 
-> **Status:** implementiert (v1.9.0, Schema normalisiert seit v1.9.2, `transkripte` auf Song-Identität umgestellt seit v1.9.3). Dieses Dokument beschreibt den aktuellen Stand.
+> **Status:** implementiert (v1.9.0, Schema normalisiert seit v1.9.2, `transkripte` auf Song-Identität umgestellt seit v1.9.3, `"lokal"` als fünfter Kandidat in `fetch_lrc()` seit v1.9.6, Löschung invalidiert `"lokal"` seit v1.9.7, Genre-Skip-Löschung invalidiert `"lokal"` ebenfalls seit v1.9.8, `cache_seed.py`-Qualitätsfilter auf pro-Track-Prüfung verschärft seit v1.9.9). Dieses Dokument beschreibt den aktuellen Stand.
 
 ## Grundprinzip (das Wichtigste zuerst)
 
@@ -90,6 +90,23 @@ In `_whisper_best` wird VOR der Fenster-Schleife geprüft, ob für den Song bere
 ## Lokale LRCs einlesen
 
 Ein einmaliger Befehl liest **alle vorhandenen `.lrc`** der Bibliothek als Quelle `lokal` in den Cache ein (Inhalt via Fingerabdruck dedupliziert), damit schon der erste Neuaufbau profitiert.
+
+**Qualitätsfilter (pro Track, nicht pro Ordner — seit v1.9.9):** Eine `.lrc` wird nur eingelesen, wenn erstens neben ihr eine gleichnamige Audiodatei liegt (sonst fehlt die verlässliche Track-Identität) und zweitens GENAU DIESER Track (Schlüssel = Audiodateiname, NFC-normalisiert) in der `.fetch_songtext.json` desselben Ordners verzeichnet ist UND dort `"r": "ok"` trägt (Text gefunden und akzeptiert). Das bloße Vorhandensein irgendeiner `.fetch_songtext.json` im Ordner reicht nicht mehr — verzeichnet die Datei den Track gar nicht, oder mit `"r": "nf"`/`"r": "skip"`, wird übersprungen (mitgezählt, nicht verworfen). Nur Tracks, die nachweislich durch `fetch_songtext.py` liefen und dort als verifiziert gelten, sollen als vertrauenswürdige `"lokal"`-Quelle in den Cache. Das Laden der `.fetch_songtext.json` (inkl. NFC-Normalisierung/Kollisions-Handling) übernimmt die aus `fetch_songtext.py` importierte `_load_cache()` — keine eigene Implementierung.
+
+## "lokal" als fünfter Kandidat in `fetch_lrc()` (seit v1.9.6)
+
+Die Quelle `"lokal"` (per `cache_seed.py` eingelesen oder automatisch gepflegt, siehe unten) ist ein vollwertiger fünfter Kandidat in `fetch_lrc()` — aber **kein unabhängiger Provider**:
+
+- Wird wie die 4 echten Provider auf inhaltliche Duplikate geprüft (`_dedupe_by_content`), aber mit **niedrigster Priorität**: wird `"lokal"` hinter die 4 echten Provider gehängt, gewinnt bei identischem Inhalt immer der echte Provider — `"lokal"` wird dann als Duplikat verworfen, nicht doppelt gezählt.
+- Zählt **nicht** zum 3-von-4-Konsens (`_provider_consensus`) — nur die 4 echten Provider zählen dafür. `"lokal"` ist nur eine Erinnerung an einen früher akzeptierten Text, keine unabhängige Bestätigung.
+- Überlebt `"lokal"` den Dedup (kein echter Provider hatte identischen Inhalt), landet es trotzdem zusätzlich in der Whisper-Vergleichsliste (`all_candidates`) — genau wie die vorhandene `.lrc` auf der Platte (`existing_lrc`).
+- **Kein Freifahrtschein:** Liefert NUR `"lokal"` etwas (kein Provider antwortet), läuft der Song trotzdem ganz normal durch Whisper — `"lokal"` ist dann einziger Kandidat und kann bei Nichtübereinstimmung ganz normal verworfen werden.
+
+**Automatische Rückkopplung:** Jedes Mal, wenn ein Song erfolgreich geschrieben/akzeptiert wird (Konsens oder Whisper-Treffer), schreibt `main()` den akzeptierten Inhalt zusätzlich als `"lokal"`-Treffer zurück in den Cache (`put_provider(..., "lokal", ...)`). So bleibt `"lokal"` dauerhaft aktuell, statt nur ein einmaliger `cache_seed.py`-Snapshot zu sein — nach Song-Identität (Künstler+Titel), bleibt also über Umbenennungen/Neuaufbauten hinweg gültig, analog zum Whisper-Transkript-Cache.
+
+**Löschung invalidiert den Cache-Eintrag (seit v1.9.7):** Wird eine vorher vorhandene `.lrc` von `main()` gelöscht, weil der Song jetzt als "nicht gefunden" gilt, setzt `main()` den `"lokal"`-Eintrag zusätzlich auf `status="nichts"` (`put_provider(..., "lokal", ..., "nichts", None)`). Sonst würde ein soeben widerlegter Text über den `"lokal"`-Kandidaten in einem künftigen Lauf wieder auftauchen.
+
+**Auch der Genre-Skip-Löschfall invalidiert (seit v1.9.8):** Wird eine vorher vorhandene `.lrc` gelöscht, weil das Genre keinen Songtext erwarten lässt (`_is_skip_genre`), gilt dieselbe Logik — `"lokal"` wird ebenfalls auf `status="nichts"` gesetzt. Ausgenommen bleibt bewusst der `no_tags`-Fall (fehlende Artist/Title-Tags): dort gibt es keine verlässliche Song-Identität für einen Cache-Schlüssel, daher kein Cache-Aufruf.
 
 ## Normalisierung (Fallstrick vermeiden)
 

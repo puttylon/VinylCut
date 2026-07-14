@@ -1282,3 +1282,546 @@ class TestCacheCliFlags:
         assert "--no-cache" in out
         assert "--refresh-cache" in out
         assert "--cache-ttl" in out
+
+
+class TestLokalCandidate:
+    """Fünfter Kandidat "lokal" in fetch_lrc() (siehe CACHE_DESIGN.md,
+    Abschnitt "lokal" als fünfter Kandidat): zählt NICHT zum
+    _provider_consensus-Schwellwert (nur die 4 echten Provider zählen), wird
+    aber wie ein echter Kandidat auf inhaltliche Duplikate geprüft und landet
+    bei Überleben zusätzlich in der Whisper-Vergleichsliste."""
+
+    LRC_A = TestProviderConsensus.LRC_A
+    LRC_B = TestProviderConsensus.LRC_B
+    LRC_C = TestProviderConsensus.LRC_C
+
+    def _open(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        return conn
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+
+    def test_nur_lokal_laeuft_trotzdem_durch_whisper(self, tmp_path, monkeypatch):
+        # Kein echter Provider liefert etwas, nur "lokal" hat einen Treffer.
+        # Kein Freifahrtschein: der Song muss trotzdem ganz normal zu Whisper
+        # durchlaufen (kein Sonderfall "kein-provider").
+        self._open(tmp_path)
+        cache_store.put_provider(
+            fetch_songtext._cache_conn,
+            "lokal",
+            "the artist",
+            "the title",
+            "treffer",
+            "[00:01.00]Hallo Welt aus dem Cache\n",
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+
+        captured: dict = {}
+
+        def _fake_whisper_best(
+            flac_path, candidates, expected_dur=0.0, artist="", title=""
+        ):
+            # Inhalt SOFORT lesen — fetch_lrc() räumt die Temp-Kandidaten am
+            # Ende auf, danach wäre die Datei bereits gelöscht.
+            captured["contents"] = [p.read_text(encoding="utf-8") for p in candidates]
+            return None, 0.0, False, 0, "", None  # kein Vokal, kein Konsens danach
+
+        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"x")
+        lrc_path = tmp_path / "out.lrc"
+
+        found, info, extras = fetch_lrc(
+            "the artist the title",
+            lrc_path,
+            env={},
+            flac_path=flac_path,
+            artist="the artist",
+            title="the title",
+        )
+
+        assert extras.get("reason") != "kein-provider"
+        assert "contents" in captured, "_whisper_best wurde nicht aufgerufen"
+        assert len(captured["contents"]) == 1
+        assert "Hallo Welt aus dem Cache" in captured["contents"][0]
+        assert (
+            extras["providers"] == 0
+        )  # "lokal" zählt nicht als echter Provider-Treffer
+
+    def test_lokal_identisch_mit_echtem_provider_zaehlt_nicht_doppelt(
+        self, tmp_path, monkeypatch
+    ):
+        # "lokal" liefert inhaltlich denselben Text wie lrclib -> nach Dedup
+        # zählen nur die 3 echten (unterschiedlichen) Provider für den
+        # Konsens, "lokal" wird als Duplikat verworfen, NICHT als 4. Provider
+        # mitgezählt.
+        self._open(tmp_path)
+        cache_store.put_provider(
+            fetch_songtext._cache_conn,
+            "lokal",
+            "the artist",
+            "the title",
+            "treffer",
+            self.LRC_A,  # identisch zu lrclib
+        )
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider(
+                {"lrclib": self.LRC_A, "genius": self.LRC_B, "netease": self.LRC_C}
+            ),
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("Whisper darf bei erreichtem 3P-Konsens nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_called)
+
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc(
+            "the artist the title",
+            lrc_path,
+            env={},
+            artist="the artist",
+            title="the title",
+        )
+
+        assert found is True
+        assert extras["method"] == "konsens"
+        assert extras["providers"] == 3  # nur die 3 echten, "lokal" nicht mitgezählt
+        assert "lokal" not in extras["provider_names"]
+        assert sorted(extras["provider_names"]) == ["genius", "lrclib", "netease"]
+
+    def test_lokal_ueberlebt_dedup_zaehlt_aber_nicht_zum_konsens(
+        self, tmp_path, monkeypatch
+    ):
+        # "lokal" liefert einen anderen Text als alle echten Provider (die
+        # zudem für sich allein keinen Konsens erreichen) -> "lokal" überlebt
+        # den Dedup und landet in der Whisper-Vergleichsliste, zählt aber
+        # nicht zum Konsens-Schwellwert.
+        self._open(tmp_path)
+        cache_store.put_provider(
+            fetch_songtext._cache_conn,
+            "lokal",
+            "the artist",
+            "the title",
+            "treffer",
+            "[00:01.00]Ganz anderer Text nur im lokalen Cache\n",
+        )
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.LRC_A, "genius": self.LRC_B}),
+        )
+
+        captured: dict = {}
+
+        def _fake_whisper_best(
+            flac_path, candidates, expected_dur=0.0, artist="", title=""
+        ):
+            # Inhalt SOFORT lesen — fetch_lrc() räumt die Temp-Kandidaten am
+            # Ende auf, danach wären die Dateien bereits gelöscht.
+            captured["count"] = len(candidates)
+            captured["contents"] = [p.read_text(encoding="utf-8") for p in candidates]
+            return None, 0.0, False, 0, "", None
+
+        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"x")
+        lrc_path = tmp_path / "out.lrc"
+
+        found, info, extras = fetch_lrc(
+            "the artist the title",
+            lrc_path,
+            env={},
+            flac_path=flac_path,
+            artist="the artist",
+            title="the title",
+        )
+
+        # Nur 2 echte Provider -> kein 3P-Konsens -> Whisper lief tatsächlich.
+        assert extras["providers"] == 2  # "lokal" zählt nicht mit
+        assert "lokal" not in extras["provider_names"]
+        assert captured["count"] == 3  # 2 echte + "lokal"
+        combined_text = "".join(captured["contents"])
+        assert "Ganz anderer Text nur im lokalen Cache" in combined_text
+
+    def test_lokal_temp_dateien_werden_aufgeraeumt(self, tmp_path, monkeypatch):
+        # Kein Speicherleck: weder doppelt gelöscht (Duplikat-Fall) noch
+        # vergessen (Survivor-Fall) — hier der Survivor-Fall, direkt nach
+        # fetch_lrc() dürfen keine Temp-Dateien mehr im tmp_path liegen
+        # außer der geschriebenen Ziel-.lrc.
+        self._open(tmp_path)
+        cache_store.put_provider(
+            fetch_songtext._cache_conn,
+            "lokal",
+            "the artist",
+            "the title",
+            "treffer",
+            "[00:01.00]Einzigartiger lokaler Inhalt\n",
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+
+        import tempfile as _tempfile
+
+        tmp_dir = Path(_tempfile.gettempdir())
+        before = set(tmp_dir.glob("*.lrc"))
+
+        def _fake_whisper_best(
+            flac_path, candidates, expected_dur=0.0, artist="", title=""
+        ):
+            return None, 0.0, False, 0, "", None
+
+        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"x")
+        lrc_path = tmp_path / "out.lrc"
+
+        fetch_lrc(
+            "the artist the title",
+            lrc_path,
+            env={},
+            flac_path=flac_path,
+            artist="the artist",
+            title="the title",
+        )
+
+        after = set(tmp_dir.glob("*.lrc"))
+        assert after == before, "lokal-Temp-Datei wurde nicht aufgeräumt (Leck)"
+
+
+class TestLokalFeedbackMain:
+    """Schreib-Rückkopplung (main()): jeder akzeptierte Song wird zusätzlich
+    als "lokal"-Kandidat in den Provider-Cache zurückgeschrieben (siehe
+    CACHE_DESIGN.md) — hält "lokal" dauerhaft aktuell statt nur ein
+    einmaliger cache_seed.py-Snapshot zu bleiben."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+
+    def test_akzeptierter_song_schreibt_lokal_zurueck(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_read_audio_tags",
+            lambda p: ("The Artist", "The Song", ""),
+        )
+        # 3 übereinstimmende Provider -> Konsens, kein Whisper nötig.
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider(
+                {
+                    "lrclib": TestProviderConsensus.LRC_A,
+                    "genius": TestProviderConsensus.LRC_B,
+                    "netease": TestProviderConsensus.LRC_C,
+                }
+            ),
+        )
+
+        db_path = tmp_path / "cache.db"
+        _real_open_cache = cache_store.open_cache  # vor dem Patchen sichern
+        monkeypatch.setattr(
+            fetch_songtext.cache_store,
+            "open_cache",
+            lambda _p: _real_open_cache(db_path),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", str(album), "--no-whisper"]
+        )
+        fetch_songtext.main()
+
+        assert lrc_path.exists()
+        written = lrc_path.read_text(encoding="utf-8")
+
+        conn = _real_open_cache(db_path)
+        cached = cache_store.get_provider(
+            conn,
+            "lokal",
+            cache_store.normalize_key("The Artist"),
+            cache_store.normalize_key("The Song"),
+            ttl_days=30,
+        )
+        assert cached is not None
+        assert cached["status"] == "treffer"
+        assert cached["content"] == written
+
+    def test_kein_cache_kein_absturz(self, tmp_path, monkeypatch):
+        # --no-cache: keine Rückkopplung, aber auch kein Fehler.
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_read_audio_tags",
+            lambda p: ("The Artist", "The Song", ""),
+        )
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider(
+                {
+                    "lrclib": TestProviderConsensus.LRC_A,
+                    "genius": TestProviderConsensus.LRC_B,
+                    "netease": TestProviderConsensus.LRC_C,
+                }
+            ),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fetch_songtext.py", str(album), "--no-whisper", "--no-cache"],
+        )
+        fetch_songtext.main()  # darf nicht crashen ohne aktiven Cache
+
+        assert audio.with_suffix(".lrc").exists()
+
+    def test_geloeschter_song_invalidiert_lokal_cache(self, tmp_path, monkeypatch):
+        # War vorher lokal vorhanden (had_lrc=True), wird jetzt aber als "nicht
+        # gefunden" verworfen -> der "lokal"-Cache-Eintrag muss auf "nichts"
+        # gesetzt werden, sonst würde ein künftiger Lauf den widerlegten Text
+        # über den "lokal"-Kandidaten wieder ins Spiel bringen.
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+        lrc_path.write_text(
+            "[00:01.00]Alter, jetzt widerlegter Text\n", encoding="utf-8"
+        )
+        # release.json mit stark abweichender Solldauer -> die alte .lrc (die
+        # ohne echte Provider sonst als eigener Heuristik-Kandidat überleben
+        # würde, siehe _heuristic_best()/all_candidates) wird per
+        # Dauer-Toleranz verworfen -> echtes found=False, kein Selbstbestätigen.
+        (album / "release.json").write_text(
+            json.dumps(
+                {
+                    "artist": "The Artist",
+                    "tracks": [{"title": "The Song", "dur_s": 300.0}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_read_audio_tags",
+            lambda p: ("The Artist", "The Song", ""),
+        )
+        # Kein Provider liefert etwas -> "nicht gefunden".
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+
+        db_path = tmp_path / "cache.db"
+        _real_open_cache = cache_store.open_cache
+        monkeypatch.setattr(
+            fetch_songtext.cache_store,
+            "open_cache",
+            lambda _p: _real_open_cache(db_path),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", str(album), "--no-whisper"]
+        )
+        fetch_songtext.main()
+
+        assert not lrc_path.exists()  # gelöscht
+
+        conn = _real_open_cache(db_path)
+        cached = cache_store.get_provider(
+            conn,
+            "lokal",
+            cache_store.normalize_key("The Artist"),
+            cache_store.normalize_key("The Song"),
+            ttl_days=30,
+        )
+        assert cached is not None
+        assert cached["status"] == "nichts"
+        assert cached["content"] is None
+
+    def test_nie_gefundener_song_ruft_keinen_lokal_cache_auf(
+        self, tmp_path, monkeypatch
+    ):
+        # Es gab vorher gar keine lokale .lrc (had_lrc=False) -> kein
+        # unnötiger "lokal"-Cache-Eintrag. --recursive erzwingt use_compare,
+        # damit derselbe not-found-Zweig durchlaufen wird wie im Test oben.
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_read_audio_tags",
+            lambda p: ("The Artist", "The Song", ""),
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+
+        db_path = tmp_path / "cache.db"
+        _real_open_cache = cache_store.open_cache
+        monkeypatch.setattr(
+            fetch_songtext.cache_store,
+            "open_cache",
+            lambda _p: _real_open_cache(db_path),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fetch_songtext.py", str(album), "--no-whisper", "--recursive"],
+        )
+        fetch_songtext.main()
+
+        assert not audio.with_suffix(".lrc").exists()
+
+        conn = _real_open_cache(db_path)
+        cached = cache_store.get_provider(
+            conn,
+            "lokal",
+            cache_store.normalize_key("The Artist"),
+            cache_store.normalize_key("The Song"),
+            ttl_days=30,
+        )
+        assert cached is None  # kein Cache-Eintrag ohne vorherige lokale Datei
+
+    def test_genre_skip_loeschung_invalidiert_lokal_cache(self, tmp_path, monkeypatch):
+        # War vorher lokal vorhanden (had_lrc=True), wird jetzt aber wegen
+        # Genre="Instrumental" gelöscht (kein Songtext erwartet) -> auch
+        # dieser Löschfall muss den "lokal"-Cache-Eintrag auf "nichts" setzen,
+        # analog zum Reject-Fall (test_geloeschter_song_invalidiert_lokal_cache).
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+        lrc_path.write_text(
+            "[00:01.00]Alter, jetzt widerlegter Text\n", encoding="utf-8"
+        )
+
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_read_audio_tags",
+            lambda p: ("The Artist", "The Song", "Instrumental"),
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+
+        db_path = tmp_path / "cache.db"
+        _real_open_cache = cache_store.open_cache
+        monkeypatch.setattr(
+            fetch_songtext.cache_store,
+            "open_cache",
+            lambda _p: _real_open_cache(db_path),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", str(album), "--no-whisper"]
+        )
+        fetch_songtext.main()
+
+        assert not lrc_path.exists()  # gelöscht
+
+        conn = _real_open_cache(db_path)
+        cached = cache_store.get_provider(
+            conn,
+            "lokal",
+            cache_store.normalize_key("The Artist"),
+            cache_store.normalize_key("The Song"),
+            ttl_days=30,
+        )
+        assert cached is not None
+        assert cached["status"] == "nichts"
+        assert cached["content"] is None
+
+    def test_unveraenderter_song_schreibt_ebenfalls_lokal_zurueck(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # Regressionsbeleg: _feedback_lokal_cache() steht im Code NACH dem
+        # if/else von old_content == new_content, auf gleicher Einrücktiefe
+        # wie die beiden Zweige selbst -> gilt für BEIDE Fälle (write UND
+        # unverändert), nicht nur für "write". Dieser Test belegt den
+        # "unverändert"-Fall, ohne dass dafür Code geändert werden musste.
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+
+        fake_provider = _fake_query_provider(
+            {
+                "lrclib": TestProviderConsensus.LRC_A,
+                "genius": TestProviderConsensus.LRC_B,
+                "netease": TestProviderConsensus.LRC_C,
+            }
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", fake_provider)
+
+        # Konsens-Ergebnis vorab "sondieren" statt zu raten, welcher der 3
+        # Kandidaten als Repräsentant gewählt wird -> alter Dateiinhalt wird
+        # exakt auf den Text gesetzt, den fetch_lrc() auch frisch liefern
+        # würde, damit old_content == new_content garantiert zutrifft.
+        probe_dest = tmp_path / "probe.lrc"
+        probe_found, _probe_info, _probe_extras = fetch_songtext.fetch_lrc(
+            "The Artist The Song",
+            probe_dest,
+            env={},
+            no_whisper=True,
+            artist="The Artist",
+            title="The Song",
+        )
+        assert probe_found
+        lrc_path.write_bytes(probe_dest.read_bytes())
+        probe_dest.unlink(missing_ok=True)
+
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_read_audio_tags",
+            lambda p: ("The Artist", "The Song", ""),
+        )
+
+        db_path = tmp_path / "cache.db"
+        _real_open_cache = cache_store.open_cache
+        monkeypatch.setattr(
+            fetch_songtext.cache_store,
+            "open_cache",
+            lambda _p: _real_open_cache(db_path),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", str(album), "--no-whisper"]
+        )
+        fetch_songtext.main()
+
+        assert lrc_path.exists()
+        out = capsys.readouterr().out
+        # "1 übersprungen" bestätigt den "unverändert"-Zweig (skipped += 1),
+        # nicht den "write"-Zweig (der stattdessen "geladen" hochzählen würde).
+        assert "0 geladen, 1 übersprungen" in out
+
+        conn = _real_open_cache(db_path)
+        cached = cache_store.get_provider(
+            conn,
+            "lokal",
+            cache_store.normalize_key("The Artist"),
+            cache_store.normalize_key("The Song"),
+            ttl_days=30,
+        )
+        assert cached is not None
+        assert cached["status"] == "treffer"
+        assert cached["content"] == lrc_path.read_text(encoding="utf-8")

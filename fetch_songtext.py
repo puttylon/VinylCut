@@ -22,7 +22,7 @@ try:
 except ImportError:
     cache_store = None
 
-__version__ = "1.9.4"
+__version__ = "1.9.9"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -52,6 +52,9 @@ _RATE_LIMIT_STUCK_THRESHOLD = (
     5  # so viele Treffer IN FOLGE lösen die lange Ruhephase aus
 )
 _RATE_LIMIT_LONG_PAUSE_SEC = 900.0  # 15 Minuten Ruhephase, danach EIN frischer Versuch
+# v1.9.5: cache_seed.py liest eine .lrc nur noch ein, wenn im selben Ordner
+# auch eine .fetch_songtext.json liegt (Qualitätsfilter — nur Tracks, die
+# nachweislich durch dieses Tool liefen, gelten als "lokal"-Quelle im Cache).
 
 _rate_limit_lock = threading.Lock()
 _rate_limit_state: dict[
@@ -1055,9 +1058,65 @@ def fetch_lrc(
     # Duplikate entfernen: gespiegelte Provider liefern oft identischen Inhalt.
     candidates, provider_hits = _dedupe_by_content(candidates, provider_hits)
 
+    # "lokal" (Cache-Erinnerung an einen früher akzeptierten Text, siehe
+    # CACHE_DESIGN.md): fünfter Kandidat, aber KEIN unabhängiger Provider —
+    # zählt nie zum _provider_consensus-Schwellwert. Wird trotzdem wie ein
+    # echter Kandidat auf inhaltliche Duplikate mit den 4 echten Providern
+    # geprüft (niedrigste Priorität in _dedupe_by_content: hinten anhängen —
+    # hat ein echter Provider identischen Inhalt, gewinnt dieser und "lokal"
+    # wird als Duplikat verworfen). Überlebt "lokal" den Dedup, landet es
+    # zusätzlich in der Whisper-Vergleichsliste (all_candidates), zählt aber
+    # weiterhin nicht zum Konsens.
+    lokal_survivor: Path | None = None
+    use_lokal_cache = cache_store is not None and _cache_conn is not None
+    if use_lokal_cache:
+        try:
+            lokal_artist_key = cache_store.normalize_key(artist)
+            lokal_title_key = cache_store.normalize_key(title)
+            with _cache_lock:
+                cached_lokal = cache_store.get_provider(
+                    _cache_conn,
+                    "lokal",
+                    lokal_artist_key,
+                    lokal_title_key,
+                    ttl_days=_cache_ttl_days,
+                )
+        except Exception:
+            cached_lokal = None  # Cache-Fehler dürfen den Lauf nie stören
+        if (
+            cached_lokal is not None
+            and cached_lokal["status"] == "treffer"
+            and cached_lokal["content"]
+        ):
+            lokal_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".lrc", delete=False, mode="w", encoding="utf-8"
+                ) as tmp:
+                    tmp.write(cached_lokal["content"])
+                    lokal_path = Path(tmp.name)
+                combined, combined_hits = _dedupe_by_content(
+                    candidates + [lokal_path], provider_hits + ["lokal"]
+                )
+                if "lokal" in combined_hits:
+                    idx = combined_hits.index("lokal")
+                    lokal_survivor = combined[idx]
+                    candidates = combined[:idx] + combined[idx + 1 :]
+                    provider_hits = combined_hits[:idx] + combined_hits[idx + 1 :]
+                else:
+                    candidates, provider_hits = combined, combined_hits
+            except Exception:
+                # Cache-Fehler dürfen den Lauf nie stören — aber den eigenen
+                # Temp-Kandidaten sauber aufräumen, falls der Dedup-Aufruf
+                # selbst scheitert, bevor er ihn verarbeitet hat.
+                if lokal_path is not None:
+                    lokal_path.unlink(missing_ok=True)
+
     # Vorhandene LRC als Kandidat einbeziehen (wird nicht gelöscht)
-    all_candidates = candidates + (
-        [existing_lrc] if existing_lrc and existing_lrc.exists() else []
+    all_candidates = (
+        candidates
+        + ([existing_lrc] if existing_lrc and existing_lrc.exists() else [])
+        + ([lokal_survivor] if lokal_survivor else [])
     )
 
     if not all_candidates:
@@ -1252,6 +1311,8 @@ def fetch_lrc(
 
     for p in candidates:  # nur temp-Dateien löschen, nie existing_lrc
         p.unlink(missing_ok=True)
+    if lokal_survivor is not None:  # separat von candidates, sonst hier vergessen
+        lokal_survivor.unlink(missing_ok=True)
 
     if best_content is None:
         return False, info_str, extras
@@ -1453,6 +1514,56 @@ def _iter_audio_dfs(root: Path) -> "Iterator[Path]":
     yield from _recurse(root)
 
 
+def _feedback_lokal_cache(
+    lrc_content_path: Path, query_artist: str, clean_title: str
+) -> None:
+    """Schreibt den akzeptierten Songtext als "lokal"-Kandidat in den Provider-
+    Cache zurück (siehe CACHE_DESIGN.md) — hält "lokal" dauerhaft aktuell statt
+    nur ein einmaliger cache_seed.py-Snapshot zu bleiben. Wird bei jedem
+    akzeptierten Song aufgerufen (Konsens ODER Whisper-Treffer), unabhängig
+    davon ob die .lrc dabei tatsächlich neu geschrieben wurde oder unverändert
+    blieb. Cache-Fehler dürfen den Lauf nie stören.
+    """
+    if cache_store is None or _cache_conn is None:
+        return
+    try:
+        text = lrc_content_path.read_text(encoding="utf-8")
+        with _cache_lock:
+            cache_store.put_provider(
+                _cache_conn,
+                "lokal",
+                cache_store.normalize_key(query_artist),
+                cache_store.normalize_key(clean_title),
+                "treffer",
+                text,
+            )
+    except Exception:
+        pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+
+
+def _invalidate_lokal_cache(query_artist: str, clean_title: str) -> None:
+    """Markiert den "lokal"-Kandidaten als widerlegt, wenn eine vorher
+    existierende .lrc jetzt als "nicht gefunden" gelöscht wird (siehe
+    CACHE_DESIGN.md) — sonst würde ein künftiger Lauf den gerade verworfenen
+    Text über "lokal" als 5. Kandidat (fetch_lrc()) wieder ins Spiel bringen.
+    Cache-Fehler dürfen den Lauf nie stören.
+    """
+    if cache_store is None or _cache_conn is None:
+        return
+    try:
+        with _cache_lock:
+            cache_store.put_provider(
+                _cache_conn,
+                "lokal",
+                cache_store.normalize_key(query_artist),
+                cache_store.normalize_key(clean_title),
+                "nichts",
+                None,
+            )
+    except Exception:
+        pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+
+
 def main() -> None:
     import argparse
 
@@ -1645,6 +1756,12 @@ def main() -> None:
             no_tags += 1
             continue
 
+        title = meta_title or (
+            audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem
+        )
+        query_artist = meta_artist or artist
+        clean_title = _clean_query_title(title)
+
         # Genre-Check: kein Songtext erwartet → überspringen
         if _is_skip_genre(meta_genre):
             had_lrc = lrc_path.exists()
@@ -1654,6 +1771,8 @@ def main() -> None:
             genre_label = meta_genre.strip() if meta_genre else "Instrumental"
             _tprint(f"{_ts()}  {rel}  0/0: │ Genre={genre_label}  {symbol}")
             genre_skipped += 1
+            if had_lrc:
+                _invalidate_lokal_cache(query_artist, clean_title)
             dir_cache[cache_key] = {
                 "v": __version__,
                 "r": "skip",
@@ -1671,11 +1790,6 @@ def main() -> None:
             _save_cache(audio.parent, dir_cache, lockfile=folder_lock)
             continue
 
-        title = meta_title or (
-            audio.stem.split(" - ", 1)[-1] if " - " in audio.stem else audio.stem
-        )
-        query_artist = meta_artist or artist
-        clean_title = _clean_query_title(title)
         query = f"{query_artist} {clean_title}".strip()
         expected_dur = tracks_by_title.get(unicodedata.normalize("NFC", title), 0.0)
 
@@ -1727,6 +1841,8 @@ def main() -> None:
                 _tprint(f"{_ts()}  {rel}  {info}  {'–' if had_lrc else '='}")
                 not_found += 1
                 cache_result = "nf"
+                if had_lrc:
+                    _invalidate_lokal_cache(query_artist, clean_title)
             else:
                 try:
                     new_content = dest.read_bytes()
@@ -1742,6 +1858,7 @@ def main() -> None:
                         _tprint(f"{_ts()}  {rel}  {info}  ✓")
                         updated += 1
                     cache_result = "ok"
+                    _feedback_lokal_cache(lrc_path, query_artist, clean_title)
                 except OSError as e:
                     dest.unlink(missing_ok=True)
                     _tprint(f"{_ts()}  {rel}  Schreibfehler: {e} — Abbruch.")
@@ -1752,6 +1869,7 @@ def main() -> None:
                 extras["outcome"] = "write"
                 updated += 1
                 cache_result = "ok"
+                _feedback_lokal_cache(lrc_path, query_artist, clean_title)
             else:
                 extras["outcome"] = "none"
                 not_found += 1

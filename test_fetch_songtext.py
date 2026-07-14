@@ -32,6 +32,7 @@ from fetch_songtext import (
     _heuristic_best,
     _idf,
     _idf_jaccard,
+    _idf_table_for,
     _is_hallucination,
     _last_timestamp,
     _load_cache,
@@ -42,6 +43,7 @@ from fetch_songtext import (
     _release_folder,
     _save_cache,
     _try_claim_folder,
+    _whisper_threshold_for,
     _word_overlap,
     fetch_lrc,
 )
@@ -466,6 +468,53 @@ class TestFetchLrcFast:
         assert existing_lrc.read_bytes() == existing_content
 
 
+class TestFetchLrcSprachspezifischeSchwelle:
+    """Kernbeleg für v1.9.13: derselbe Whisper-Score (0,05) liegt zwischen der
+    deutschen (0,043) und der Default-Schwelle (0,065) — je nach erkannter
+    Sprache muss fetch_lrc() also einmal akzeptieren und einmal ablehnen."""
+
+    LRC_A = TestProviderConsensus.LRC_A
+    LRC_B = TestProviderConsensus.LRC_B
+
+    def _run(self, tmp_path, monkeypatch, lrc_lang):
+        # Nur 2 Provider -> kein 3er-Konsens -> Whisper entscheidet.
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.LRC_A, "genius": self.LRC_B}),
+        )
+        best_candidate = _make_lrc(self.LRC_A)
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_whisper_best",
+            lambda *args, **kwargs: (best_candidate, 0.05, True, 10, "small", lrc_lang),
+        )
+
+        flac_path = tmp_path / "dummy.flac"
+        flac_path.write_bytes(b"")  # nur .exists() zählt
+
+        lrc_path = tmp_path / "out.lrc"
+        found, info, extras = fetch_lrc("query", lrc_path, env={}, flac_path=flac_path)
+        best_candidate.unlink(missing_ok=True)
+        return found, info, extras
+
+    def test_score_0_05_wird_bei_deutsch_akzeptiert(self, tmp_path, monkeypatch):
+        found, info, extras = self._run(tmp_path, monkeypatch, "de")
+        assert found is True
+        assert extras.get("reason") is None
+        assert extras["score"] == 0.05
+
+    def test_score_0_05_wird_ohne_deutsch_abgelehnt(self, tmp_path, monkeypatch):
+        found, info, extras = self._run(tmp_path, monkeypatch, "en")
+        assert found is False
+        assert extras["reason"] == "unter-schwelle"
+
+    def test_score_0_05_wird_ohne_sprache_abgelehnt(self, tmp_path, monkeypatch):
+        found, info, extras = self._run(tmp_path, monkeypatch, None)
+        assert found is False
+        assert extras["reason"] == "unter-schwelle"
+
+
 class TestLoadCache:
     """Dateinamen (ä/ö/ü) können je nach Zugriffsweg (lokal vs. SMB) NFC- oder
     NFD-normalisiert ankommen — ohne Vereinheitlichung beim Laden verpasst der
@@ -887,20 +936,33 @@ class TestLoadIdf:
 
     def test_laedt_und_cached_module_level(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "idf.json"
-        cache_path.write_text(
-            json.dumps({"n_docs": 5, "df": {"a": 1}}), encoding="utf-8"
-        )
+        expected = {"global": {"n_docs": 5, "df": {"a": 1}}, "languages": {}}
+        cache_path.write_text(json.dumps(expected), encoding="utf-8")
         monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", cache_path)
         monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
 
-        n_docs, df = _load_idf()
-        assert (n_docs, df) == (5, {"a": 1})
+        assert _load_idf() == expected
 
         # Datei danach ändern — zweiter Aufruf muss den module-level Cache
         # zurückgeben, nicht neu von Platte lesen.
-        cache_path.write_text(json.dumps({"n_docs": 999, "df": {}}), encoding="utf-8")
-        n_docs2, df2 = _load_idf()
-        assert (n_docs2, df2) == (5, {"a": 1})
+        cache_path.write_text(
+            json.dumps({"global": {"n_docs": 999, "df": {}}, "languages": {}}),
+            encoding="utf-8",
+        )
+        assert _load_idf() == expected
+
+    def test_veraltetes_format_bricht_mit_klarer_meldung_ab(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        cache_path = tmp_path / "idf.json"
+        cache_path.write_text(json.dumps({"n_docs": 5, "df": {}}), encoding="utf-8")
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", cache_path)
+        monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
+
+        with pytest.raises(SystemExit):
+            _load_idf()
+        out = capsys.readouterr().out
+        assert "--rebuild-idf" in out
 
 
 class TestBuildIdf:
@@ -918,11 +980,145 @@ class TestBuildIdf:
         _build_idf(lib)
 
         data = json.loads(out_path.read_text(encoding="utf-8"))
-        assert data["n_docs"] == 2
-        assert data["df"]["hello"] == 2
-        assert data["df"]["world"] == 1
-        assert data["df"]["there"] == 1
-        assert "" not in data["df"]
+        assert data["global"]["n_docs"] == 2
+        assert data["global"]["df"]["hello"] == 2
+        assert data["global"]["df"]["world"] == 1
+        assert data["global"]["df"]["there"] == 1
+        assert "" not in data["global"]["df"]
+
+    def test_sprach_teiltabelle_nur_ab_mindestgroesse(self, tmp_path, monkeypatch):
+        out_path = tmp_path / "out.json"
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
+        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
+
+        lib = tmp_path / "lib"
+        (lib / "A").mkdir(parents=True)
+        deutscher_text = (
+            "[00:01.00]Ich verstehe die Welt nicht mehr und suche einen Weg\n"
+            "[00:05.00]Ich verstehe die Welt nicht mehr und suche einen Weg\n"
+        )
+        englischer_text = (
+            "[00:01.00]I understand the world and search for a way to go home\n"
+        )
+        # Zwei deutsche Songs (>= gemocktem Minimum 2) -> eigene Tabelle.
+        (lib / "A" / "de1.lrc").write_text(deutscher_text, encoding="utf-8")
+        (lib / "A" / "de2.lrc").write_text(deutscher_text, encoding="utf-8")
+        # Nur ein englischer Song (< Minimum) -> kein eigener Eintrag, nur global.
+        (lib / "A" / "en1.lrc").write_text(englischer_text, encoding="utf-8")
+
+        _build_idf(lib)
+
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert "de" in data["languages"]
+        assert data["languages"]["de"]["n_docs"] == 2
+        assert "en" not in data["languages"]
+        # Englische Wörter sind trotzdem im globalen Fallback vorhanden.
+        assert "understand" in data["global"]["df"]
+
+    DEUTSCHE_TEXTE = [
+        "[00:01.00]Ich verstehe die Welt nicht mehr und suche einen Weg\n"
+        "[00:05.00]Die Zeit vergeht und ich warte auf ein Zeichen von dir\n",
+        "[00:01.00]Warum hast du mich damals einfach so verlassen\n"
+        "[00:05.00]Ich frage mich jeden Tag was wohl aus uns geworden waere\n",
+        "[00:01.00]Die Sonne scheint und ich denke an vergangene Tage\n"
+        "[00:05.00]Vielleicht wird alles wieder gut wenn ich nur warte\n",
+        "[00:01.00]Ich singe dieses Lied fuer dich in dunkler Nacht\n"
+        "[00:05.00]Und hoffe dass du irgendwo daran gedacht hast\n",
+    ]
+    ENGLISCHE_TEXTE = [
+        "[00:01.00]I understand the world and search for a way to go home\n",
+        "[00:01.00]Why did you leave me here alone in the dark tonight\n",
+        "[00:01.00]The sun is shining and I think about the good old days\n",
+        "[00:01.00]I sing this song for you deep into the quiet night\n",
+    ]
+
+    def test_wachstums_warnung_bei_starkem_sprachwachstum(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        out_path = tmp_path / "out.json"
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
+        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
+        # kalibriert bei 2 Docs -> Wachstumsfaktor 1.5 -> ab 3 Docs Warnung
+        monkeypatch.setattr(
+            fetch_songtext, "_WHISPER_MIN_OVERLAP_BY_LANG", {"de": (0.043, 2)}
+        )
+
+        lib = tmp_path / "lib"
+        (lib / "A").mkdir(parents=True)
+        for i, text in enumerate(self.DEUTSCHE_TEXTE):
+            (lib / "A" / f"de{i}.lrc").write_text(text, encoding="utf-8")
+
+        _build_idf(lib)
+        out = capsys.readouterr().out
+        assert "WARNUNG" in out
+        assert "de" in out
+
+    def test_kein_alarm_bei_leichtem_wachstum(self, tmp_path, monkeypatch, capsys):
+        out_path = tmp_path / "out.json"
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
+        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
+        # kalibriert bei 2 Docs, exakt 2 Docs vorhanden -> kein Wachstum
+        monkeypatch.setattr(
+            fetch_songtext, "_WHISPER_MIN_OVERLAP_BY_LANG", {"de": (0.043, 2)}
+        )
+
+        lib = tmp_path / "lib"
+        (lib / "A").mkdir(parents=True)
+        for i, text in enumerate(self.DEUTSCHE_TEXTE[:2]):
+            (lib / "A" / f"de{i}.lrc").write_text(text, encoding="utf-8")
+
+        _build_idf(lib)
+        out = capsys.readouterr().out
+        assert "WARNUNG" not in out
+
+    def test_hinweis_bei_unkalibrierter_sprache_mit_eigener_tabelle(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        out_path = tmp_path / "out.json"
+        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
+        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
+        # keine Sprache kalibriert -> Englisch bekommt eigene Tabelle ohne Eintrag
+        monkeypatch.setattr(fetch_songtext, "_WHISPER_MIN_OVERLAP_BY_LANG", {})
+
+        lib = tmp_path / "lib"
+        (lib / "A").mkdir(parents=True)
+        for i, text in enumerate(self.ENGLISCHE_TEXTE):
+            (lib / "A" / f"en{i}.lrc").write_text(text, encoding="utf-8")
+
+        _build_idf(lib)
+        out = capsys.readouterr().out
+        assert "HINWEIS" in out
+        assert "en" in out
+
+
+class TestIdfTableFor:
+    IDF_DATA = {
+        "global": {"n_docs": 100, "df": {"the": 90}},
+        "languages": {"de": {"n_docs": 10, "df": {"und": 8}}},
+    }
+
+    def test_sprache_vorhanden_liefert_sprachtabelle(self):
+        assert _idf_table_for("de", self.IDF_DATA) == (10, {"und": 8})
+
+    def test_keine_sprache_liefert_global(self):
+        assert _idf_table_for(None, self.IDF_DATA) == (100, {"the": 90})
+
+    def test_sprache_nicht_in_tabelle_faellt_auf_global_zurueck(self):
+        assert _idf_table_for("fr", self.IDF_DATA) == (100, {"the": 90})
+
+
+class TestWhisperThresholdFor:
+    def test_kalibrierte_sprache_liefert_eigene_schwelle(self):
+        assert _whisper_threshold_for("de") == 0.043
+
+    def test_englisch_liefert_default(self):
+        assert _whisper_threshold_for("en") == _WHISPER_MIN_OVERLAP
+
+    def test_keine_sprache_liefert_default(self):
+        assert _whisper_threshold_for(None) == _WHISPER_MIN_OVERLAP
+
+    def test_unkalibrierte_sprache_liefert_default(self):
+        assert _whisper_threshold_for("fr") == _WHISPER_MIN_OVERLAP
 
 
 class TestFastFlagMain:
@@ -1260,7 +1456,11 @@ class TestTranscriptCache:
         fetch_songtext._cache_ttl_days = 30
         fetch_songtext._cache_refresh = False
         monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
-        monkeypatch.setattr(fetch_songtext, "_load_idf", lambda: (1, {}))
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_load_idf",
+            lambda: {"global": {"n_docs": 1, "df": {}}, "languages": {}},
+        )
         monkeypatch.setattr(
             fetch_songtext, "_detect_lrc_language", lambda candidates: None
         )

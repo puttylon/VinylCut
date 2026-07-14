@@ -1,5 +1,79 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.9.13 — sprachspezifische Whisper-Schwelle + Rekalibrierung
+
+Problem: v1.9.12 machte die IDF-Tabelle sprachbezogen (eigene, kleinere
+Teiltabelle für Deutsch statt der alten globalen Tabelle), ließ die
+Akzeptanz-Schwelle `_WHISPER_MIN_OVERLAP = 0.065` aber bewusst unangetastet.
+Das hatte einen nicht offensichtlichen Nebeneffekt: JEDER Score (nicht nur
+Fehltreffer, auch echte Treffer) fällt mit einer kleineren Tabelle
+systematisch niedriger aus — reiner Skaleneffekt der Formel
+`idf(w) = ln((n_docs+1)/(df(w)+1))`, kein inhaltlicher Unterschied. Mit der
+unveränderten Schwelle 0,065 hätte das echte deutsche Treffer wie „Warum"
+(Score fiel von 0,082 auf 0,049) fälschlich abgelehnt — eine Regression.
+
+Kalibrierung: An 8 Testfällen (4 sollten akzeptiert werden: Ich Frag Mich,
+Afrika, Warum, Liebeslied — alle Edo Zanki/Jetzt!; 4 sollten abgelehnt
+werden: Die Zeit/lrclib, Die Zeit/genius, Wie es war, Du Bist Nicht Allein —
+alle Jetzt!, absichtlich falsch zugeordnete Provider-Texte) wurde mit
+echten Whisper-Transkriptionen gegen die neue deutsche IDF-Tabelle (2.212
+Dokumente) gemessen: höchster Fehltreffer-Score 0,0373, niedrigster
+korrekter Score 0,0490. Neue Schwelle für Deutsch: **0,043** (mittig
+zwischen beiden, gleiches Prinzip wie die ursprüngliche 0,065-Eichung).
+
+Ein zusätzliches Subsampling-Experiment (dieselben 8 Testfälle gegen
+künstlich verkleinerte deutsche Teilkorpora bei 500/1.000/1.500/2.212
+Dokumenten) zeigte: die Mitte zwischen Fehltreffer-Max und Treffer-Min
+konvergiert schon ab ~1.000 Dokumenten auf ~0,043 (Werte: 0,0461 / 0,0431 /
+0,0439 / 0,0431 — kein sauberer fortlaufender Trend, nur eine anfängliche
+Stabilisierung). Für Englisch (13.074 Dokumente, kaum kleiner als die alte
+globale Tabelle) bestätigte eine Stichprobe (gecachtes Transkript, Frank
+Sinatra „Ol' Man River"): Scores ändern sich kaum (0,577→0,566 korrekt,
+0,0262→0,0236 falsch) — die alte Schwelle 0,065 bleibt für Englisch und alle
+auf `global` zurückfallenden Sprachen weiterhin gültig, unverändert.
+
+Lösung: `_WHISPER_MIN_OVERLAP_BY_LANG` als sprachspezifische Override-Tabelle
+(`{"de": (0.043, 2212)}`), ausgewertet über die neue Funktion
+`_whisper_threshold_for(lang)`. `fetch_lrc()` nutzt sie statt der festen
+`_WHISPER_MIN_OVERLAP`-Konstante.
+
+Entscheidung (mit Nutzer abgestimmt): Kein automatisches Neukalibrieren,
+sondern eine **Warnung** beim nächsten `--rebuild-idf`, falls sich die
+Dokumentenzahl einer kalibrierten Sprache stark ändert (Faktor 1,5 —
+`_WHISPER_THRESHOLD_WARN_GROWTH`), damit die Schwelle bei Bedarf manuell
+nachjustiert werden kann. Grund: das Subsampling-Experiment zeigt Konvergenz
+statt fortlaufendem Trend — eine Formel wäre nicht belastbar, aber ein
+Sicherheitsnetz für starkes Wachstum ist sinnvoll. Zusätzlich weist
+`--rebuild-idf` darauf hin, wenn eine bisher unkalibrierte Sprache erstmals
+eine eigene IDF-Teiltabelle bekommt, aber noch mit der Default-Schwelle
+0,065 läuft.
+
+## ✓ fetch_songtext.py v1.9.12 — sprachbezogene IDF-Tabelle
+
+Problem: Die IDF-Tabelle (`fetch_songtext_idf.json`, Basis für die Whisper-
+Matching-Metrik `_idf_jaccard`) maß die Wortseltenheit bisher über die GESAMTE
+Bibliothek hinweg, unabhängig von der Sprache. Die Bibliothek ist aber ~81 %
+Englisch, ~13 % Deutsch, Rest je ~1 % — dadurch wirkten generische deutsche
+Wörter (z. B. „verstehen", „zeit", „leben") künstlich „selten" (hohe IDF),
+obwohl sie innerhalb deutscher Songtexte ganz gewöhnlich sind. Das führte zu
+einem Beinahe-Fehlmatch: eine falsch zugeordnete LRC erreichte einen Score von
+0,063, knapp unter der Schwelle von 0,065 — einzig weil zufällig geteiltes,
+generisches deutsches Vokabular den Zähler aufblähte, ohne dass wirklich
+Satzinhalte übereinstimmten.
+
+Lösung: Die IDF-Tabelle führt jetzt zusätzlich zur globalen Tabelle
+Teiltabellen je Sprache, mit einer Mindestgröße `_IDF_MIN_LANG_DOCS = 1000`
+Dokumenten — darunter fällt eine Sprache auf die bisherige globale,
+bibliotheksweite Tabelle zurück (unverändertes Verhalten als Fallback). Die
+Sprache wird dabei NICHT aus den JSON-Provider-Caches übernommen (dort nur
+~22 % Abdeckung), sondern direkt aus dem `.lrc`-Inhalt erkannt (über die
+bereits vorhandene `_detect_lrc_language`, wie in Schritt 4 der
+Whisper-Verifikation).
+
+Wichtig: Die Schwelle `_WHISPER_MIN_OVERLAP = 0.065` wurde in diesem Schritt
+NOCH NICHT neu kalibriert — das folgt in einem separaten Schritt, der NICHT
+Teil dieser Änderung ist.
+
 ## ✓ fetch_songtext.py v1.9.11 — `--cache-only` Flag
 
 Neues Flag `--cache-only`: garantiert, dass ein Lauf **keine einzige** Live-Provider-Abfrage
@@ -799,6 +873,69 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 ---
 
 ## Ideen (nicht geplant)
+
+### Sequenz-bewusster Vergleich statt/zusätzlich zu Bag-of-Words (IDF-Jaccard)
+
+**Problem (2026-07-14 erkannt, im Rahmen der sprachbezogenen IDF-Analyse):**
+`_idf_jaccard` (und davor `_word_overlap`/Containment) sind alle drei
+**Bag-of-Words** — sie zählen nur, welche Wörter gemeinsam vorkommen, nie in
+welcher Reihenfolge oder als welche Phrase. Das betrifft nicht nur Deutsch
+(siehe v1.9.12): Englische Popsongs sind voll von thematischem
+"Allerweltsvokabular" ("heart", "night", "baby", "fire", "forever" — nicht
+super häufig, aber auch nicht selten), das zwei völlig unabhängige Songs
+zufällig teilen können, ohne dass ein einziger Satz wirklich übereinstimmt
+(siehe "Die Zeit"-Fall in v1.9.12, dasselbe Muster droht auch auf Englisch,
+~81 % der Bibliothek — dort bislang nicht konkret nachgewiesen, aber
+strukturell genauso möglich).
+
+**Wichtige Erkenntnis (Nutzer, 2026-07-14):** Im Code gibt es ZWEI
+verschiedene Vergleiche, die nicht zwangsläufig denselben Algorithmus
+brauchen:
+1. Provider-Texte untereinander (`_provider_consensus`/`_word_overlap`,
+   Konsens-Pfad in `fetch_lrc`) — reines Jaccard, kein IDF.
+2. Provider-Text gegen Whisper-Transkript (`_whisper_best`/`_idf_jaccard`).
+
+Eine sequenz-bewusste Verbesserung müsste nicht zwingend beide Vergleiche
+gleich behandeln — z. B. könnte Vergleich 2 (der Whisper-Fall, wo es um echte
+Verifikation gegen eine Rauschquelle geht) von mehr Robustheit profitieren,
+während Vergleich 1 (zwei bereits sauberen Texten) evtl. mit einfachem
+Jaccard weiterhin gut genug bedient ist.
+
+**Recherche (2026-07-14) — es gibt etablierte Ansätze für genau dieses
+Problem, nicht neu erfinden:**
+- **WER (Word Error Rate) / Levenshtein-Editierdistanz** ist der
+  Standard-Vergleich in der ASR-Welt für Hypothese-vs-Referenz-Text — von
+  Natur aus sequenzbewusst (Alignment über Editieroperationen: Ersetzen/
+  Einfügen/Löschen). Wird in **SongPrep** (arXiv:2509.17404, "WER-FIX"-Schritt)
+  bereits konkret für Lyrics-Verifikation genutzt: Kandidat wird nur behalten
+  wenn WER < 0,7 gegen das ASR-Transkript, danach Verfeinerung per
+  WER-Scoring. Direktes Vorbild für unseren Use-Case.
+- **Forced-Alignment-Tools** (Gentle, Montreal Forced Aligner — beide
+  Open-Source, Kaldi-basiert) verfolgen einen anderen Architektur-Ansatz:
+  statt zwei Texte zu vergleichen, wird der KANDIDATEN-Text direkt an die
+  Audiospur ausgerichtet; schlägt die Ausrichtung fehl bzw. ist die
+  Konfidenz niedrig, ist das selbst ein Signal für falschen Text. MFA
+  unterstützt mehrere Sprachen (eigene Akustikmodelle nötig), Gentle ist auf
+  Englisch fokussiert.
+- **WEALY** (arXiv:2510.08176, "Leveraging Whisper Embeddings for
+  Audio-based Lyrics Matching", 2025/2026): nutzt Whisper-Decoder-Embeddings
+  + Transformer für semantisches Lyrics-Matching. Deutlich schwergewichtiger
+  (eigenes Trainings-/Embedding-Setup) — vermutlich Overkill für dieses
+  Solo-Projekt, aber Referenz für den aktuellen Stand der Forschung.
+
+**Trade-off, den jede sequenzbewusste Lösung berücksichtigen muss:** Whisper
+verhört sich auf Wortebene ständig (belegt in dieser Session: "verbrannt"→
+"verbracht", "Land"→"laus", "Tarzan"→"tatsam"). Bag-of-Words verliert bei
+so einem Fehler nur das eine Wort; ein N-Gramm/Phrasen-Vergleich verliert bei
+einem falsch erkannten Wort die GANZE Phrase — mehr Trennschärfe gegen
+Zufallstreffer, aber auch mehr Fragilität gegen echte Whisper-Fehler bei
+korrekten Treffern (Risiko: mehr Fehlablehnungen statt weniger). Muss
+genauso empirisch geprüft werden wie die v1.9.12-Kalibrierung, kein
+Selbstläufer.
+
+**Nächster Schritt, falls angegangen:** Eigene Analyse/Kalibrierung wie in
+v1.9.12 (Testfälle mit bekannt richtig/falsch, Score-Verteilung vor/nach
+Umstellung vergleichen) — eigenständiges Vorhaben, nicht nebenbei.
 
 ### Dauer-Vergleich small vs. medium (pro Schritt, nicht nur Modell-Laufzeit)
 Für eine ausgewählte Trackliste die Dauer **jedes einzelnen Schritts** der

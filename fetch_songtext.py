@@ -23,7 +23,7 @@ except ImportError:
     cache_store = None
 
 # Rückbau: lokal-Cache-Feature entfernt, wieder reiner Provider-Cache
-__version__ = "1.9.11"
+__version__ = "1.9.13"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -73,14 +73,38 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 # an 20 gelabelten Songs (5 Sprachen) validiert: niedrigster korrekter Wert 0,089,
 # höchster falscher Wert 0,053 — Reserve nach beiden Seiten (siehe metric_bakeoff).
 _WHISPER_MIN_OVERLAP = 0.065  # Schwellwert: ab hier wird eine LRC akzeptiert
+
+# Sprachspezifische Schwellen: (schwelle, kalibriert_bei_n_docs). Noetig weil
+# eine kleinere Sprach-Teiltabelle (siehe _idf_table_for) JEDEN Score
+# systematisch senkt -- reiner Skaleneffekt der IDF-Formel, kein inhaltlicher
+# Unterschied. Default (_WHISPER_MIN_OVERLAP) gilt fuer alle Sprachen ohne
+# eigenen Eintrag hier (u.a. Englisch: dessen eigene Tabelle ist kaum kleiner
+# als die alte globale, keine Neukalibrierung noetig -- empirisch bestaetigt
+# in v1.9.13, siehe ROADMAP). Kalibriert an 8 Testfaellen (4 akzeptieren/4
+# ablehnen, echte Whisper-Transkriptionen), siehe ROADMAP v1.9.13 fuer Details.
+_WHISPER_MIN_OVERLAP_BY_LANG: dict[str, tuple[float, int]] = {
+    "de": (0.043, 2212),
+}
+# Waechst eine kalibrierte Sprache um mehr als diesen Faktor, warnt
+# --rebuild-idf beim naechsten Lauf (siehe _build_idf) -- kein automatisches
+# Nachjustieren (ein Subsampling-Experiment zeigte Konvergenz statt eines
+# verlaesslichen fortlaufenden Trends, eine Formel waere nicht belastbar).
+_WHISPER_THRESHOLD_WARN_GROWTH = 1.5
 _WHISPER_MODEL = "small"
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
+
+# Mindestanzahl Dokumente für eine sprachspezifische IDF-Teiltabelle. Darunter
+# ist die Stichprobe zu klein — die sprachspezifischen Werte würden mehr Rauschen
+# als Nutzen bringen, dann greift der globale Fallback (siehe _idf_table_for).
+_IDF_MIN_LANG_DOCS = 1000
 
 # IDF-Tabelle für _idf_jaccard: liegt neben dem Code (nicht in der Musikbibliothek),
 # damit auch lokale Läufe ohne Netzwerk-Mount eine Tabelle haben. Wird per
 # --rebuild-idf <bibliothekspfad> neu gebaut (siehe _build_idf).
 _IDF_CACHE_PATH = Path(__file__).parent / "fetch_songtext_idf.json"
-_idf_cache: tuple[int, dict] | None = None  # module-level Cache: (n_docs, df)
+_idf_cache: dict | None = (
+    None  # module-level Cache: {"global": {...}, "languages": {...}}
+)
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
 _CONSENSUS_MIN_PROVIDERS = (
@@ -597,12 +621,14 @@ def _word_overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _load_idf() -> tuple[int, dict]:
-    """Lädt die IDF-Tabelle (n_docs, df) aus _IDF_CACHE_PATH — einmalig pro Prozess.
+def _load_idf() -> dict:
+    """Lädt die IDF-Tabelle aus _IDF_CACHE_PATH — einmalig pro Prozess.
 
+    Format seit v1.9.12: {"global": {"n_docs":.., "df":{..}}, "languages": {"<lang>": {"n_docs":.., "df":{..}}, ..}}.
     Bricht mit einer klaren Fehlermeldung ab statt still auf ein degeneriertes
     Verhalten zurückzufallen (z.B. Containment oder df=leer), wenn die Tabelle
-    fehlt — ohne sie ist _idf_jaccard nicht sinnvoll auswertbar.
+    fehlt oder noch im alten (flachen, vor-sprachbezogenen) Format vorliegt —
+    ohne sie ist _idf_jaccard nicht sinnvoll auswertbar.
     """
     global _idf_cache
     if _idf_cache is not None:
@@ -614,8 +640,32 @@ def _load_idf() -> tuple[int, dict]:
         )
         sys.exit(1)
     data = json.loads(_IDF_CACHE_PATH.read_text(encoding="utf-8"))
-    _idf_cache = (data["n_docs"], data["df"])
+    if "global" not in data or "languages" not in data:
+        print(
+            f"FEHLER: IDF-Tabelle ({_IDF_CACHE_PATH}) hat ein veraltetes Format "
+            f"(vor der sprachbezogenen IDF-Umstellung) — neu aufbauen mit: "
+            f"fetch_songtext.py --rebuild-idf <bibliothekspfad>"
+        )
+        sys.exit(1)
+    _idf_cache = data
     return _idf_cache
+
+
+def _idf_table_for(lang: str | None, idf_data: dict) -> tuple[int, dict]:
+    """Waehlt die Sprach-Teiltabelle falls vorhanden (>= _IDF_MIN_LANG_DOCS Dokumente beim Bau), sonst global."""
+    if lang is not None:
+        entry = idf_data["languages"].get(lang)
+        if entry is not None:
+            return entry["n_docs"], entry["df"]
+    g = idf_data["global"]
+    return g["n_docs"], g["df"]
+
+
+def _whisper_threshold_for(lang: str | None) -> float:
+    """Waehlt die Whisper-Akzeptanzschwelle: sprachspezifisch falls kalibriert, sonst Default."""
+    if lang is not None and lang in _WHISPER_MIN_OVERLAP_BY_LANG:
+        return _WHISPER_MIN_OVERLAP_BY_LANG[lang][0]
+    return _WHISPER_MIN_OVERLAP
 
 
 def _idf(word: str, n_docs: int, df: dict) -> float:
@@ -645,11 +695,23 @@ def _build_idf(root: Path) -> None:
     """Baut die IDF-Tabelle aus allen *.lrc-Dateien unter `root` neu und schreibt _IDF_CACHE_PATH.
 
     Ein Zählschritt (Dokumentfrequenz) pro Song, nicht pro Wortvorkommen.
+    Zusätzlich zur globalen Tabelle (alle Songs, unabhängig von der Sprache)
+    wird pro erkannter Sprache (via _detect_lrc_language) eine Teiltabelle
+    gefuehrt. Nur Sprachen mit >= _IDF_MIN_LANG_DOCS Dokumenten landen im
+    Output — darunter ist die Stichprobe zu klein, die globale Tabelle deckt
+    diese Songs weiterhin als Fallback ab.
+
+    Warnt zusaetzlich (siehe v1.9.13): wenn eine in
+    _WHISPER_MIN_OVERLAP_BY_LANG kalibrierte Sprache stark gewachsen ist
+    (Schwelle koennte veraltet sein), bzw. weist darauf hin, wenn eine
+    Sprache erstmals eine eigene Tabelle bekommt, aber noch mit der
+    unkalibrierten Default-Schwelle laeuft.
     """
     from collections import Counter
 
-    df: Counter = Counter()
-    n_docs = 0
+    global_df: Counter = Counter()
+    global_n = 0
+    lang_counters: dict[str, dict] = {}
     errors = 0
     paths = list(root.rglob("*.lrc"))
     for i, p in enumerate(paths):
@@ -661,17 +723,60 @@ def _build_idf(root: Path) -> None:
         words = set(_extract_lrc_words(content))
         if not words:
             continue
-        n_docs += 1
-        df.update(words)
+        global_n += 1
+        global_df.update(words)
+        lang = _detect_lrc_language([p])
+        if lang is not None:
+            entry = lang_counters.setdefault(lang, {"n": 0, "df": Counter()})
+            entry["n"] += 1
+            entry["df"].update(words)
         if (i + 1) % 2000 == 0:
             print(f"  ...{i + 1}/{len(paths)} verarbeitet", flush=True)
 
-    out = {"n_docs": n_docs, "df": dict(df)}
+    languages_out = {
+        lang: {"n_docs": entry["n"], "df": dict(entry["df"])}
+        for lang, entry in lang_counters.items()
+        if entry["n"] >= _IDF_MIN_LANG_DOCS
+    }
+
+    out = {
+        "global": {"n_docs": global_n, "df": dict(global_df)},
+        "languages": languages_out,
+    }
     _IDF_CACHE_PATH.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+
     print(
-        f"IDF-Tabelle gebaut: {n_docs} Dokumente, {len(df)} distinkte Wörter, "
+        f"IDF-Tabelle gebaut: {global_n} Dokumente, {len(global_df)} distinkte Wörter, "
         f"{errors} Lesefehler. Gespeichert: {_IDF_CACHE_PATH}"
     )
+    print("Erkannte Sprachen (Dokumente):")
+    for lang, entry in sorted(
+        lang_counters.items(), key=lambda kv: kv[1]["n"], reverse=True
+    ):
+        marker = "eigene Tabelle" if entry["n"] >= _IDF_MIN_LANG_DOCS else "→ global"
+        print(f"  {lang}: {entry['n']} ({marker})")
+
+    for lang, entry in lang_counters.items():
+        if entry["n"] < _IDF_MIN_LANG_DOCS:
+            continue
+        calibrated = _WHISPER_MIN_OVERLAP_BY_LANG.get(lang)
+        if calibrated is not None:
+            threshold, calibrated_n = calibrated
+            if entry["n"] >= calibrated_n * _WHISPER_THRESHOLD_WARN_GROWTH:
+                growth_pct = (entry["n"] / calibrated_n - 1) * 100
+                print(
+                    f"WARNUNG: Sprache '{lang}' ist von {calibrated_n} auf {entry['n']} "
+                    f"Dokumente gewachsen (+{growth_pct:.1f}%) -- Schwelle {threshold} "
+                    f"in _WHISPER_MIN_OVERLAP_BY_LANG sollte neu geprueft werden "
+                    f"(siehe ROADMAP v1.9.13 fuer Methodik)."
+                )
+        else:
+            print(
+                f"HINWEIS: Sprache '{lang}' hat jetzt eine eigene IDF-Tabelle "
+                f"({entry['n']} Dokumente), nutzt aber weiterhin die Default-Schwelle "
+                f"{_WHISPER_MIN_OVERLAP} (nicht sprachspezifisch kalibriert) -- ggf. "
+                f"eigene Kalibrierung sinnvoll."
+            )
 
 
 def _is_hallucination(words: list[str]) -> bool:
@@ -852,7 +957,7 @@ def _whisper_best(
     if _get_whisper_model(_WHISPER_MODEL) is None:
         return (None, 0.0, False, 0, "", None)
 
-    n_docs, df = (
+    idf_data = (
         _load_idf()
     )  # einmal pro Lauf geladen (module-level Cache), nicht pro Track
     ctx = _whisper_context_sec(expected_dur)
@@ -868,6 +973,7 @@ def _whisper_best(
         candidate_starts.append((p, start))
 
     lrc_lang = _detect_lrc_language(candidates)
+    n_docs, df = _idf_table_for(lrc_lang, idf_data)
 
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = titel_key = None
@@ -1227,7 +1333,7 @@ def fetch_lrc(
                     "words": 0,
                     "language": lrc_lang,
                 }
-        elif best_score >= _WHISPER_MIN_OVERLAP:
+        elif best_score >= _whisper_threshold_for(lrc_lang):
             best_content = best_path.read_bytes() if best_path else None
             info_str = f"{prov_str} │ {whisper_head} idf-jacc={best_score:.3f}"
             extras = {
@@ -1545,7 +1651,9 @@ def main() -> None:
         action="store_true",
         help=(
             "IDF-Tabelle (für Whisper-Matching, _idf_jaccard) aus allen *.lrc unter "
-            "'path' neu aufbauen und beenden — kein normaler Lauf danach."
+            "'path' neu aufbauen und beenden — kein normaler Lauf danach. Baut "
+            "zusätzlich zur globalen Tabelle Teiltabellen je erkannter Sprache "
+            "(ab _IDF_MIN_LANG_DOCS Dokumenten)."
         ),
     )
     parser.add_argument(

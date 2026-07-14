@@ -1,5 +1,19 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.9.10 — lokal-Cache-Feature zurückgebaut
+
+Die "lokal"-Erweiterung (fünfter Kandidat in `fetch_lrc()`, automatische
+Rückkopplung/Invalidierung, `cache_seed.py`) wurde komplett entfernt — Cache
+ist wieder ein reiner Provider-Cache (nur `lrclib`/`musixmatch`/`netease`/
+`genius`). Begründung: In den meisten Fällen ohnehin redundant zu bereits
+gecachten Provider-Treffern oder zum immer schon vorhandenen
+`existing_lrc`-Mechanismus (aktuelle Datei wird sowieso live verglichen); der
+schmale Zusatznutzen (Text nach Provider-TTL-Ablauf retten) rechtfertigte die
+Komplexität/Fehleranfälligkeit nicht — zwei echte Konsistenz-Bugs wurden
+bereits gefunden und geflickt, bevor diese Entscheidung fiel. In der echten
+Bibliothek standen zum Rückbau-Zeitpunkt 0 `"lokal"`-Einträge (nie gegen die
+echte Bibliothek befüllt) — nichts zu migrieren.
+
 ## ✓ cache_seed.py v1.9.9 — Qualitätsfilter pro Track statt pro Ordner
 
 Bisher prüfte `cache_seed.py` nur, ob IRGENDEINE `.fetch_songtext.json` im

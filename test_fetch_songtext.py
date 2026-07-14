@@ -993,11 +993,13 @@ class TestProviderCache:
         fetch_songtext._cache_conn = conn
         fetch_songtext._cache_ttl_days = 30
         fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
         return conn
 
     def teardown_method(self):
         fetch_songtext._cache_conn = None
         fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
 
     def test_cache_hit_skips_live_query(self, tmp_path, monkeypatch):
         conn = self._open(tmp_path)
@@ -1162,6 +1164,84 @@ class TestProviderCache:
         fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
         assert called, "Ohne offene Cache-Verbindung muss live abgefragt werden"
 
+    def test_cache_only_mit_treffer_liefert_cache_inhalt(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(
+            conn, "lrclib", "the artist", "the title", "treffer", "[00:01.00]Hallo Welt"
+        )
+        fetch_songtext._cache_only = True
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("Live-Abfrage darf bei Cache-Treffer nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        provider, path = fetch_songtext._query_provider(
+            "the artist the title", "lrclib", {}, artist="the artist", title="the title"
+        )
+        assert path is not None
+        assert "Hallo Welt" in path.read_text(encoding="utf-8")
+
+    def test_cache_only_ohne_eintrag_liefert_none_ohne_live_abfrage_und_ohne_cache_schreiben(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        fetch_songtext._cache_only = True
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("--cache-only darf niemals live abfragen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        provider, path = fetch_songtext._query_provider(
+            "a b", "lrclib", {}, artist="a", title="b"
+        )
+        assert (provider, path) == ("lrclib", None)
+        assert cache_store.get_provider(conn, "lrclib", "a", "b") is None
+
+    def test_cache_only_bei_gecachtem_fehlschlag_fragt_nicht_live_nach(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(
+            conn, "musixmatch", "a", "b", "fehlschlag", None, fehlergrund="rate_limit"
+        )
+        row_before = conn.execute(
+            "SELECT status, fehlergrund, datum FROM ergebnisse e "
+            "JOIN songs s ON s.id = e.song_id "
+            "WHERE e.quelle=? AND s.artist_key=? AND s.titel_key=?",
+            ("musixmatch", "a", "b"),
+        ).fetchone()
+
+        fetch_songtext._cache_only = True
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("--cache-only darf gecachte Fehlschläge nicht live nachfragen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        provider, path = fetch_songtext._query_provider(
+            "a b", "musixmatch", {}, artist="a", title="b"
+        )
+        assert (provider, path) == ("musixmatch", None)
+        row_after = conn.execute(
+            "SELECT status, fehlergrund, datum FROM ergebnisse e "
+            "JOIN songs s ON s.id = e.song_id "
+            "WHERE e.quelle=? AND s.artist_key=? AND s.titel_key=?",
+            ("musixmatch", "a", "b"),
+        ).fetchone()
+        assert row_after == row_before
+
+    def test_cache_only_ohne_cache_conn_fragt_trotzdem_nicht_live(self, monkeypatch):
+        fetch_songtext._cache_conn = None  # simuliert --no-cache / fehlende DB
+        fetch_songtext._cache_only = True
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("--cache-only muss auch ohne offene Cache-Verbindung greifen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        provider, path = fetch_songtext._query_provider(
+            "a b", "lrclib", {}, artist="a", title="b"
+        )
+        assert (provider, path) == ("lrclib", None)
+
 
 class TestTranscriptCache:
     """_whisper_best mit echtem cache_store: Song-Identität (Künstler+Titel)
@@ -1282,3 +1362,34 @@ class TestCacheCliFlags:
         assert "--no-cache" in out
         assert "--refresh-cache" in out
         assert "--cache-ttl" in out
+        assert "--cache-only" in out
+
+    def test_cache_only_und_no_cache_schliessen_sich_aus(self):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--cache-only", "--no-cache", "x"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--cache-only" in result.stderr
+
+    def test_cache_only_und_force_schliessen_sich_aus(self):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--cache-only", "--force", "x"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--cache-only" in result.stderr
+
+    def test_cache_only_und_refresh_cache_schliessen_sich_aus(self):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--cache-only", "--refresh-cache", "x"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--cache-only" in result.stderr

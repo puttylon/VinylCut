@@ -87,7 +87,7 @@ In `_whisper_best` wird VOR der Fenster-Schleife geprüft, ob für den Song bere
 
 - Cache-Eintrag **jünger als 30 Tage** UND `status` ≠ `fehlschlag` → wird genutzt.
 - **Älter, oder Fehlschlag** → gilt als nicht vorhanden → live neu holen (= automatischer „Verbesser-Rhythmus").
-- Schalter: `--refresh-cache` UND `--force` erzwingen beide eine frische Live-Abfrage (umgehen den Provider-Cache vollständig — `--force` bedeutet „wirklich alles neu", nicht nur den alten Track-Speicher). `--cache-ttl <tage>` stellt die Gültigkeitsdauer ein. `--no-cache` ignoriert den Cache komplett (belegt zugleich das Grundprinzip).
+- Schalter: `--refresh-cache` UND `--force` erzwingen beide eine frische Live-Abfrage (umgehen den Provider-Cache vollständig — `--force` bedeutet „wirklich alles neu", nicht nur den alten Track-Speicher). `--cache-ttl <tage>` stellt die Gültigkeitsdauer ein. `--no-cache` ignoriert den Cache komplett (belegt zugleich das Grundprinzip). `--cache-only` ist das Gegenstück zu `--refresh-cache`/`--force`: statt eine frische Live-Abfrage zu erzwingen, verhindert es JEDE Live-Abfrage — auch für Provider, deren letzter Versuch als `status="fehlschlag"` im Cache steht (die sonst, s.o., nie als Treffer zählen und deshalb normalerweise sofort einen erneuten Live-Versuch auslösen).
 
 ## Normalisierung (Fallstrick vermeiden)
 

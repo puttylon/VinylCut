@@ -23,7 +23,7 @@ except ImportError:
     cache_store = None
 
 # Rückbau: lokal-Cache-Feature entfernt, wieder reiner Provider-Cache
-__version__ = "1.9.10"
+__version__ = "1.9.11"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -145,9 +145,13 @@ _whisper_models: dict = {}  # name → WhisperModel
 # gesetzt (None = Cache inaktiv: cache_store fehlt, --no-cache, oder DB-Open
 # fehlgeschlagen). _cache_lock schützt die eine Connection gegen gleichzeitigen
 # Zugriff aus den Provider-Worker-Threads (_query_provider läuft im ThreadPoolExecutor).
+# _cache_only (--cache-only) verbietet JEDE Live-Provider-Abfrage, auch für
+# Provider ohne gültigen Cache-Treffer (kein Eintrag, abgelaufen, oder
+# status="fehlschlag") — siehe Guard in _query_provider.
 _cache_conn = None
 _cache_ttl_days = 30
 _cache_refresh = False
+_cache_only = False
 _cache_lock = threading.Lock()
 
 
@@ -370,6 +374,16 @@ def _query_provider(
     übersprungen, kein echter Versuch"). Dieser Fall ruft NIE _rate_limit_report
     auf und verändert `consecutive_hits`/`next_allowed` NICHT — es gab kein
     neues Signal, die laufende Ruhephase läuft unangetastet von selbst ab.
+
+    --cache-only (_cache_only) geht noch einen Schritt weiter als der reguläre
+    Cache-Lookup: der wertet einen gecachten "fehlschlag" bewusst NIE als
+    Treffer (s.o.), sodass ohne diesen Guard direkt im Anschluss live
+    nachgefragt würde. Mit --cache-only wird stattdessen sofort (provider,
+    None) zurückgegeben, ohne subprocess.run, ohne _rate_limit_wait und ohne
+    neuen Cache-Eintrag (es fand ja kein echter Versuch statt — ein
+    "fehlschlag"-Eintrag wäre hier fachlich falsch). Der Guard greift auch
+    ohne offene Cache-Verbindung (use_cache=False), damit --cache-only
+    garantiert nie live fragt, egal ob die Cache-DB verfügbar ist.
     """
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = title_key = None
@@ -398,6 +412,9 @@ def _query_provider(
                         tmp_path = Path(tmp.name)
                     return provider, tmp_path
                 return provider, None  # "nichts" gecacht
+
+    if _cache_only:
+        return provider, None
 
     if _rate_limit_wait(provider):
         if use_cache:
@@ -1514,6 +1531,16 @@ def main() -> None:
         help="Cache-Gültigkeit in Tagen für Provider-Treffer (Default 30)",
     )
     parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help=(
+            "Keine Live-Provider-Abfragen — nur Cache-Treffer verwenden. Auch "
+            "Provider mit gecachtem Fehlschlag (Timeout/Rate-Limit/Captcha/"
+            "gesperrt) werden NICHT live nachgefragt. Schließt sich mit "
+            "--force/--refresh-cache/--no-cache aus."
+        ),
+    )
+    parser.add_argument(
         "--rebuild-idf",
         action="store_true",
         help=(
@@ -1525,6 +1552,15 @@ def main() -> None:
         "-V", "--version", action="version", version=f"fetch_songtext {__version__}"
     )
     args = parser.parse_args()
+
+    if args.cache_only and args.no_cache:
+        parser.error(
+            "--cache-only und --no-cache schließen sich aus (ohne Cache gäbe es nichts zurückzugeben)."
+        )
+    if args.cache_only and (args.force or args.refresh_cache):
+        parser.error(
+            "--cache-only und --force/--refresh-cache schließen sich aus (die erzwingen frische Live-Abfragen)."
+        )
 
     if args.rebuild_idf:
         _build_idf(Path(args.path).resolve())
@@ -1552,12 +1588,13 @@ def main() -> None:
     else:
         print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
 
-    global _cache_conn, _cache_ttl_days, _cache_refresh
+    global _cache_conn, _cache_ttl_days, _cache_refresh, _cache_only
     _cache_ttl_days = args.cache_ttl
     # --force soll wirklich alles frisch abfragen (nicht nur den alten
     # Track-Speicher umgehen) — sonst würde --force stillschweigend
     # veraltete Provider-Cache-Treffer zurückgeben statt live zu fragen.
     _cache_refresh = args.refresh_cache or args.force
+    _cache_only = args.cache_only
     _cache_conn = None
     if cache_store is not None and not args.no_cache:
         try:

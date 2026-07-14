@@ -1,5 +1,22 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.9.11 — `--cache-only` Flag
+
+Neues Flag `--cache-only`: garantiert, dass ein Lauf **keine einzige** Live-Provider-Abfrage
+auslöst — nur was bereits im Provider-Cache (`fetch_songtext_cache.db`) steht, wird verwendet.
+Der eigentliche Kern des Features: das gilt auch für Provider, deren letzter Versuch als
+`status="fehlschlag"` (Timeout/Rate-Limit/Captcha/„gesperrt") im Cache steht — normalerweise
+zählt ein Fehlschlag bewusst **nie** als Cache-Treffer (`get_provider` gibt dafür `None`
+zurück, siehe `CACHE_DESIGN.md`) und `_query_provider` fragt danach live nach. Mit
+`--cache-only` wird dieser automatische Live-Nachschlag unterdrückt: ein neuer Guard direkt
+nach dem Cache-Lookup liefert `(provider, None)` zurück, ohne `subprocess.run`, ohne
+`_rate_limit_wait` und ohne neuen Cache-Eintrag (kein echter Versuch fand statt). Motivation:
+Zwei-Phasen-Workflow — Phase 1 `--fast` (Whisper-Fälle aufgeschoben, ungecacht), Phase 2 soll
+nur noch diese Whisper-Lücken füllen, ohne dass Provider, die in Phase 1 z. B. an einem
+Rate-Limit hingen, jetzt nochmal live angefragt werden. `--cache-only` schließt sich mit
+`--force`/`--refresh-cache` (erzwingen frische Live-Abfragen) und `--no-cache` (kein Cache
+vorhanden) aus — argparse bricht dann mit Exit-Code 2 ab.
+
 ## ✓ fetch_songtext.py v1.9.10 — lokal-Cache-Feature zurückgebaut
 
 Die "lokal"-Erweiterung (fünfter Kandidat in `fetch_lrc()`, automatische

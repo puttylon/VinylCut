@@ -22,7 +22,7 @@ try:
 except ImportError:
     cache_store = None
 
-__version__ = "1.9.3"
+__version__ = "1.9.4"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -42,6 +42,16 @@ _RATE_LIMIT_CAPTCHA_SEC = (
     30.0  # längerer Cooldown bei 401/Captcha (Anti-Bot, kurzer Retry hilft nicht)
 )
 _RATE_LIMIT_MAX_SEC = 60.0  # Eskalations-Obergrenze bei wiederholten Treffern
+# v1.9.4: Musixmatch blockiert in der Praxis oft dauerhaft (captcha bei JEDEM
+# Song) — die Eskalation allein (gedeckelt bei _RATE_LIMIT_MAX_SEC) wartet dann
+# bei JEDEM folgenden Song erneut ~60s, ohne je zum Ziel zu kommen. Ab
+# _RATE_LIMIT_STUCK_THRESHOLD Treffern IN FOLGE wechselt der Provider in eine
+# lange Ruhephase (_RATE_LIMIT_LONG_PAUSE_SEC), in der JEDER Versuch instant
+# (ohne sleep, ohne Live-Abfrage) als Fehlschlag gilt — siehe _rate_limit_wait.
+_RATE_LIMIT_STUCK_THRESHOLD = (
+    5  # so viele Treffer IN FOLGE lösen die lange Ruhephase aus
+)
+_RATE_LIMIT_LONG_PAUSE_SEC = 900.0  # 15 Minuten Ruhephase, danach EIN frischer Versuch
 
 _rate_limit_lock = threading.Lock()
 _rate_limit_state: dict[
@@ -243,13 +253,34 @@ def _heuristic_best(
     return best.read_bytes(), score
 
 
-def _rate_limit_wait(provider: str) -> None:
-    """Wartet, falls für `provider` noch eine proaktive/reaktive Sperre besteht."""
+def _rate_limit_wait(provider: str) -> bool:
+    """Wartet, falls für `provider` noch eine proaktive/reaktive Sperre besteht.
+
+    Gibt True zurück, wenn der Provider GERADE in der langen Ruhephase steckt
+    (>= _RATE_LIMIT_STUCK_THRESHOLD Treffer in Folge, Sperre noch nicht
+    abgelaufen) — der Aufrufer (_query_provider) soll dann den kompletten
+    Live-Versuch überspringen, OHNE zu schlafen. Grund: fetch_lrc() wartet
+    synchron (ThreadPoolExecutor + as_completed) auf alle 4 Provider-Threads,
+    bevor der nächste Track drankommt — ein echter time.sleep() über die volle
+    Ruhephase (15 Min) würde den GESAMTEN Lauf einfrieren, nicht nur diesen
+    einen Provider.
+
+    Gibt False zurück in allen anderen Fällen: keine Sperre aktiv, normale
+    kurze Backoff-Wartezeit (dann wird hier wie bisher via time.sleep(wait)
+    gewartet), oder die lange Ruhephase ist gerade abgelaufen (dann ist kein
+    sleep mehr nötig — ein frischer Live-Versuch ist fällig, dessen Ergebnis
+    _rate_limit_report auswertet)."""
     with _rate_limit_lock:
-        next_allowed = _rate_limit_state.get(provider, {}).get("next_allowed", 0.0)
+        state = _rate_limit_state.get(provider, {})
+        next_allowed = state.get("next_allowed", 0.0)
+        consecutive_hits = state.get("consecutive_hits", 0)
     wait = next_allowed - time.monotonic()
-    if wait > 0:
-        time.sleep(wait)
+    if wait <= 0:
+        return False
+    if consecutive_hits >= _RATE_LIMIT_STUCK_THRESHOLD:
+        return True  # lange Ruhephase aktiv — kein sleep, Aufrufer überspringt
+    time.sleep(wait)
+    return False
 
 
 def _rate_limit_report(provider: str, stderr: str) -> str | None:
@@ -269,26 +300,38 @@ def _rate_limit_report(provider: str, stderr: str) -> str | None:
     Grund zurück ("captcha" oder "rate_limit"), sonst None. Der Cache hält
     einen transienten Fehlschlag IMMER unter status="fehlschlag" fest (siehe
     CACHE_DESIGN.md) — er zählt aber nie als gültiger Cache-Treffer.
+
+    Erreicht consecutive_hits NACH dem Hochzählen _RATE_LIMIT_STUCK_THRESHOLD,
+    wird statt der normalen (bei _RATE_LIMIT_MAX_SEC gedeckelten) Eskalation
+    die lange Ruhephase (_RATE_LIMIT_LONG_PAUSE_SEC) gesetzt — siehe
+    _rate_limit_wait für die Begründung (kein blockierender Lauf-weiter-Sleep).
+    Unterhalb des Schwellwerts bleibt die bisherige Formel unverändert.
     """
     with _rate_limit_lock:
         state = _rate_limit_state.setdefault(
             provider, {"next_allowed": 0.0, "consecutive_hits": 0}
         )
         if re.search(r"[Gg]ot status code 401", stderr) or "captcha" in stderr.lower():
-            delay = min(
-                _RATE_LIMIT_CAPTCHA_SEC * (2 ** state["consecutive_hits"]),
-                _RATE_LIMIT_MAX_SEC,
-            )
+            hits_before = state["consecutive_hits"]
             state["consecutive_hits"] += 1
+            if state["consecutive_hits"] >= _RATE_LIMIT_STUCK_THRESHOLD:
+                delay = _RATE_LIMIT_LONG_PAUSE_SEC
+            else:
+                delay = min(
+                    _RATE_LIMIT_CAPTCHA_SEC * (2**hits_before), _RATE_LIMIT_MAX_SEC
+                )
             grund = "captcha"
         elif re.search(r"[Gg]ot status code 402", stderr) or (
             "An error occurred while searching for an LRC on" in stderr
         ):
-            delay = min(
-                _RATE_LIMIT_BASE_SEC * (2 ** state["consecutive_hits"]),
-                _RATE_LIMIT_MAX_SEC,
-            )
+            hits_before = state["consecutive_hits"]
             state["consecutive_hits"] += 1
+            if state["consecutive_hits"] >= _RATE_LIMIT_STUCK_THRESHOLD:
+                delay = _RATE_LIMIT_LONG_PAUSE_SEC
+            else:
+                delay = min(
+                    _RATE_LIMIT_BASE_SEC * (2**hits_before), _RATE_LIMIT_MAX_SEC
+                )
             grund = "rate_limit"
         else:
             state["consecutive_hits"] = 0
@@ -316,6 +359,16 @@ def _query_provider(
     als gültiger Cache-Treffer (get_provider gibt dafür immer None zurück) —
     sonst würden gedrosselte Läufe Songs fälschlich 30 Tage lang als "hat
     keinen Text" abstempeln.
+
+    Steckt der Provider in der langen Ruhephase (siehe _rate_limit_wait),
+    wird HIER kein Live-Versuch gestartet (kein subprocess.run, kein sleep) —
+    das Ergebnis ist sofort (provider, None). Der Cache hält diesen
+    übersprungenen Fall trotzdem als Fehlschlag fest, mit fehlergrund="gesperrt"
+    (bewusst kein Rückgriff auf den ursprünglichen Grund wie "captcha" —
+    pragmatischer, eigener Wert, der anzeigt: "wurde wegen aktiver Ruhephase
+    übersprungen, kein echter Versuch"). Dieser Fall ruft NIE _rate_limit_report
+    auf und verändert `consecutive_hits`/`next_allowed` NICHT — es gab kein
+    neues Signal, die laufende Ruhephase läuft unangetastet von selbst ab.
     """
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = title_key = None
@@ -345,7 +398,23 @@ def _query_provider(
                     return provider, tmp_path
                 return provider, None  # "nichts" gecacht
 
-    _rate_limit_wait(provider)
+    if _rate_limit_wait(provider):
+        if use_cache:
+            try:
+                with _cache_lock:
+                    cache_store.put_provider(
+                        _cache_conn,
+                        provider,
+                        artist_key,
+                        title_key,
+                        "fehlschlag",
+                        None,
+                        fehlergrund="gesperrt",
+                    )
+            except Exception:
+                pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+        return provider, None
+
     with tempfile.NamedTemporaryFile(suffix=".lrc", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     tmp_path.unlink()

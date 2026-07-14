@@ -20,7 +20,9 @@ from fetch_songtext import (
     _HALLUCINATION_MIN_WORDS,
     _RATE_LIMIT_BASE_SEC,
     _RATE_LIMIT_FLOOR_SEC,
+    _RATE_LIMIT_LONG_PAUSE_SEC,
     _RATE_LIMIT_MAX_SEC,
+    _RATE_LIMIT_STUCK_THRESHOLD,
     _VOCALS_MIN_WORDS,
     _WHISPER_MIN_OVERLAP,
     _build_idf,
@@ -704,14 +706,25 @@ class TestRateLimit:
         )
         assert fetch_songtext._rate_limit_state["netease"]["consecutive_hits"] == 1
 
-    def test_repeated_hits_escalate_up_to_cap(self):
-        for _ in range(10):
+    def test_repeated_hits_escalate_up_to_cap_below_threshold(self):
+        # Bleibt unterhalb von _RATE_LIMIT_STUCK_THRESHOLD — dort gilt weiterhin
+        # die alte, bei _RATE_LIMIT_MAX_SEC gedeckelte Eskalation (siehe unten
+        # für das Verhalten AB dem Schwellwert: lange Ruhephase).
+        for _ in range(_RATE_LIMIT_STUCK_THRESHOLD - 1):
             _rate_limit_report("musixmatch", "Got status code 402 for foo")
         remaining = (
             fetch_songtext._rate_limit_state["musixmatch"]["next_allowed"]
             - time.monotonic()
         )
         assert remaining <= _RATE_LIMIT_MAX_SEC
+
+    def test_hits_reaching_stuck_threshold_trigger_long_pause(self):
+        for _ in range(_RATE_LIMIT_STUCK_THRESHOLD):
+            _rate_limit_report("musixmatch", "[Musixmatch] Got status code 401 for foo")
+        state = fetch_songtext._rate_limit_state["musixmatch"]
+        assert state["consecutive_hits"] == _RATE_LIMIT_STUCK_THRESHOLD
+        remaining = state["next_allowed"] - time.monotonic()
+        assert _RATE_LIMIT_MAX_SEC < remaining <= _RATE_LIMIT_LONG_PAUSE_SEC
 
     def test_clean_success_after_hits_resets_consecutive_count(self):
         _rate_limit_report("musixmatch", "Got status code 402 for foo")
@@ -742,6 +755,42 @@ class TestRateLimit:
         start = time.monotonic()
         _rate_limit_wait("lrclib")
         assert time.monotonic() - start >= 0.09
+
+    def test_wait_below_threshold_still_sleeps_and_returns_false(self, monkeypatch):
+        # 3 von 5 Treffern: unterhalb von _RATE_LIMIT_STUCK_THRESHOLD, altes
+        # Verhalten bleibt unverändert — kurzer sleep, kein Überspringen.
+        fetch_songtext._rate_limit_state["musixmatch"] = {
+            "next_allowed": time.monotonic() + 0.1,
+            "consecutive_hits": _RATE_LIMIT_STUCK_THRESHOLD - 2,
+        }
+        start = time.monotonic()
+        result = _rate_limit_wait("musixmatch")
+        assert time.monotonic() - start >= 0.09
+        assert result is False
+
+    def test_wait_at_stuck_threshold_skips_without_sleeping(self, monkeypatch):
+        def _fail_if_slept(*a, **k):
+            pytest.fail("_rate_limit_wait darf in der langen Ruhephase NICHT schlafen")
+
+        monkeypatch.setattr(fetch_songtext.time, "sleep", _fail_if_slept)
+        fetch_songtext._rate_limit_state["musixmatch"] = {
+            "next_allowed": time.monotonic() + 900.0,
+            "consecutive_hits": _RATE_LIMIT_STUCK_THRESHOLD,
+        }
+        start = time.monotonic()
+        result = _rate_limit_wait("musixmatch")
+        assert result is True
+        assert time.monotonic() - start < 0.05
+
+    def test_wait_after_long_pause_expired_returns_false_fresh_attempt_due(self):
+        # Ruhephase künstlich in die Vergangenheit versetzt: kein Überspringen
+        # mehr, ein frischer Live-Versuch ist wieder fällig.
+        fetch_songtext._rate_limit_state["musixmatch"] = {
+            "next_allowed": time.monotonic() - 1.0,
+            "consecutive_hits": _RATE_LIMIT_STUCK_THRESHOLD,
+        }
+        result = _rate_limit_wait("musixmatch")
+        assert result is False
 
 
 class TestIdf:
@@ -1064,6 +1113,38 @@ class TestProviderCache:
             )
         finally:
             fetch_songtext._cache_refresh = False
+
+    def test_stuck_provider_skips_live_query_without_changing_state(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        fetch_songtext._rate_limit_state["musixmatch"] = {
+            "next_allowed": time.monotonic() + 900.0,
+            "consecutive_hits": _RATE_LIMIT_STUCK_THRESHOLD,
+        }
+        state_before = dict(fetch_songtext._rate_limit_state["musixmatch"])
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("Live-Abfrage darf während der langen Ruhephase nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        try:
+            provider, path = fetch_songtext._query_provider(
+                "a b", "musixmatch", {}, artist="a", title="b"
+            )
+            assert (provider, path) == ("musixmatch", None)
+            row = conn.execute(
+                "SELECT status, fehlergrund FROM ergebnisse e "
+                "JOIN songs s ON s.id = e.song_id "
+                "WHERE e.quelle=? AND s.artist_key=? AND s.titel_key=?",
+                ("musixmatch", "a", "b"),
+            ).fetchone()
+            assert row == ("fehlschlag", "gesperrt")
+            # Kein neuer Versuch fand statt — Ruhephasen-Zustand bleibt exakt
+            # unangetastet, bis sie von selbst abläuft.
+            assert fetch_songtext._rate_limit_state["musixmatch"] == state_before
+        finally:
+            fetch_songtext._rate_limit_state.pop("musixmatch", None)
 
     def test_no_cache_conn_falls_back_to_live(self, monkeypatch):
         fetch_songtext._cache_conn = None  # simuliert --no-cache / fehlende DB

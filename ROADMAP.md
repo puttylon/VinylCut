@@ -1,5 +1,32 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.9.4 — Dauerhaft blockierten Provider überspringen statt jedes Mal neu zu warten
+
+Beleg aus der Cache-Datenbank: Musixmatch schlug bei praktisch jedem Song mit
+`fehlergrund="captcha"` fehl, dutzende Male hintereinander. Die bestehende
+Eskalation (`_rate_limit_report`) ist bei `_RATE_LIMIT_MAX_SEC` (60s) gedeckelt
+— bei einem dauerhaft blockierten Provider verlor dadurch trotzdem **jeder**
+folgende Song erneut ~60s, ohne je zum Ziel zu kommen.
+
+Ein einfaches "warte eben länger" ist keine Option: `fetch_lrc()` wartet über
+`ThreadPoolExecutor`+`as_completed` synchron auf alle 4 Provider-Threads, bevor
+es zum nächsten Track übergeht — ein echter `time.sleep()` über z.B. 15 Minuten
+würde den gesamten Lauf einfrieren.
+
+Lösung: Nach `_RATE_LIMIT_STUCK_THRESHOLD` (5) Treffern IN FOLGE wechselt
+`_rate_limit_report` in eine lange Ruhephase (`_RATE_LIMIT_LONG_PAUSE_SEC`,
+15 Minuten) statt weiter zu eskalieren. `_rate_limit_wait` gibt in dieser Phase
+`True` zurück, OHNE zu schlafen — `_query_provider` überspringt den Live-
+Versuch dann komplett (kein `subprocess.run`, kein sleep) und meldet sofort
+`(provider, None)`. Mit aktivem Cache wird der übersprungene Fall trotzdem als
+Fehlschlag festgehalten (`fehlergrund="gesperrt"` — eigener Wert, der anzeigt
+"wegen aktiver Ruhephase übersprungen", nicht der ursprüngliche Grund wie
+"captcha"), OHNE `consecutive_hits`/`next_allowed` zu verändern — kein neuer
+Versuch fand statt, also kein neues Signal. Läuft die Ruhephase ab, ist wieder
+ein einzelner echter Versuch fällig: gelingt er, geht der Provider zurück in
+den Normalzustand (`consecutive_hits` auf 0 zurückgesetzt durch sauberen
+Erfolg); scheitert er erneut, geht es direkt zurück in die lange Ruhephase.
+
 ## ✓ fetch_songtext.py v1.8.0 — `--fast`: Zwei-Phasen-Workflow
 
 Neues Flag `--fast` für einen schnellen ersten Lauf (Phase 1), der nur die

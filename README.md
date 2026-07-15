@@ -355,6 +355,13 @@ Ausgabe: Trefferquote, verwendete Methoden, Ablehnungsgründe, Score-Verteilung,
 python3 whisper_analyse.py /Musik/
 ```
 
+**`inspect_song.py`** — Diagnose für einen einzelnen Song: schreibt Provider-Texte (Genius, Netease, Lrclib, Musixmatch) und das Whisper-Transkript aus der Cache-Datenbank nebeneinander in eine TXT-Datei:
+
+```bash
+python3 inspect_song.py --artist "Nina Hagen" --title "Naturträne"
+python3 inspect_song.py --artist "Nina Hagen" --title "Naturträne" --output custom_name.txt
+```
+
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 
 ---

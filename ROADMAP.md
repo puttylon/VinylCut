@@ -1,5 +1,26 @@
 # VinylCut Roadmap
 
+## ✓ inspect_song.py — Diagnose-Werkzeug für einzelne Songs
+
+Neues eigenständiges Skript (nach dem Vorbild von `lrc_recheck.py`): fragt die
+Cache-Datenbank (`fetch_songtext_cache.db`) gezielt für einen Künstler/Titel
+ab und schreibt Provider-Texte (Genius, Netease, Lrclib, Musixmatch) sowie
+das Whisper-Transkript nebeneinander in eine lesbare TXT-Datei — genau das,
+was zuvor manuell per `sqlite3`-Kommandozeile gemacht wurde, jetzt als
+wiederverwendbares Werkzeug. Reiner Lesezugriff, ändert nichts am Cache.
+
+```bash
+python3 inspect_song.py --artist "Nina Hagen" --title "Naturträne"
+python3 inspect_song.py --artist "Nina Hagen" --title "Naturträne" --output custom_name.txt
+```
+
+Pro Provider (feste Reihenfolge genius/netease/lrclib/musixmatch) ein
+Abschnitt: Text bei `status="treffer"`, `(kein Treffer)` bei `"nichts"`,
+`(Fehlschlag: <grund>)` bei `"fehlschlag"`, `(nie abgefragt)` ohne
+`ergebnisse`-Zeile. Whisper-Abschnitt analog mit `(kein Transkript
+vorhanden)`. Song nicht in der DB gefunden -> Fehlermeldung auf stderr,
+Exit-Code 1, keine Datei wird geschrieben.
+
 ## ✓ fetch_songtext.py v1.10.1 — Bugfix: --cache-only blockierte Live-Whisper + ein Whisper-Lauf statt bis zu vier
 
 **Bugfix — `--cache-only` blockierte fälschlich Live-Whisper:** `--cache-only`

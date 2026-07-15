@@ -21,6 +21,59 @@ Abschnitt: Text bei `status="treffer"`, `(kein Treffer)` bei `"nichts"`,
 vorhanden)`. Song nicht in der DB gefunden -> Fehlermeldung auf stderr,
 Exit-Code 1, keine Datei wird geschrieben.
 
+## ✓ fetch_songtext.py v1.11.0 — --wer-experiment entfernt, Kontrastive-Marge-Rückgabewert-Refactor
+
+**Problem:** `--wer-experiment` (Provider-Konsens und Whisper-Verifikation
+probeweise über Word Error Rate statt Jaccard/IDF-Jaccard) war ein
+experimentelles Flag, das inhaltlich bereits verworfen wurde: längenempfindlich,
+26 von 38 echten Treffern wurden fälschlich abgelehnt (siehe
+`wer_whisper_uneinigkeit.md`). Trotzdem lag der komplette Code — Flag,
+Schwellen, WER-Berechnung, Vergleichspfade in `_provider_consensus()` und
+`_whisper_best()`, Sicherheitsnetz-Sentinel, CSV-Logging — weiter tot im
+Skript.
+
+**Lösung:** `--wer-experiment` vollständig entfernt: CLI-Flag, `_wer_experiment`,
+`_score_against_wer()`, `_wer()`, `_edit_distance()`, `_wer_symmetric()`
+(beide nur noch für die WER-Berechnung gebraucht, sonst keine Aufrufer mehr),
+`_log_wer_experiment()`, `_WER_CONSENSUS_MAX_THRESHOLD`,
+`_WER_WHISPER_MAX_THRESHOLD`, `_WER_EXPERIMENT_LOG_PATH`,
+`_WER_SKIP_NO_TRANSCRIPT` (inkl. des zugehörigen Sicherheitsnetz-Zweigs in
+`_whisper_best()` und des `elif`-Zweigs in `fetch_lrc()`), sowie der komplette
+WER-Vergleichspfad in `_provider_consensus()` (die Funktion prüft Konsens
+jetzt wieder ausschließlich über Jaccard, wie vor der Einführung des
+Experiments). Zusätzlich das reine Logging von `contrastive_experiment_log.csv`
+entfernt (`_log_contrastive_experiment()` + `_CONTRASTIVE_EXPERIMENT_LOG_PATH`)
+— sein Zweck (Validierung der kontrastiven Marge gegen die alte absolute
+Schwelle) ist erledigt. Die kontrastive Marge selbst
+(`_contrastive_margin_and_decision`, `_contrastive_result_for`,
+`_CONTRASTIVE_MARGIN`, `_CONTRASTIVE_ABSOLUTE_FLOOR` usw.) ist davon nicht
+betroffen — bleibt vollständig erhalten.
+
+**Architektur-Cleanup (keine Verhaltensänderung):** `_whisper_best()` schrieb
+die kontrastive Marge bisher in ein optionales `debug_scores`-Dict, das
+`fetch_lrc()` für die echte Akzeptanz-Entscheidung auswertete — obwohl der
+Parameter wie reines Debug-Logging aussah, war er die einzige Quelle für die
+Marge. Jetzt gibt `_whisper_best()` die Marge direkt als zusätzlichen
+(siebten) Rückgabewert zurück (`(best_path, score, has_vocals, words,
+model_used, language, contrastive_margin)`), `fetch_lrc()` liest sie direkt
+aus dem Rückgabewert. Der `debug_scores`-Parameter entfällt komplett — er
+wurde nur noch von den beiden jetzt entfernten Loggern gebraucht. Die Marge
+wird jetzt unbedingt berechnet (vorher nur wenn `debug_scores is not None`
+übergeben wurde), was `fetch_lrc()` ohnehin immer tat — funktional identisch,
+nur nicht mehr über ein Seiteneffekt-Dict versteckt.
+
+Version: `1.11.0` (Minor — ein CLI-Flag verschwindet komplett, Rückgabewert-
+Signatur von `_whisper_best()` ändert sich, kein reiner Patch).
+
+Tests: alle `--wer-experiment`-bezogenen Testklassen entfernt
+(`TestWerExperimentWhisperSafetyNet`, `TestFetchLrcWerSkip`,
+`TestLogWerExperiment`, WER-Teile aus `TestWerCalculation`/
+`TestProviderConsensusWerExperiment`/`TestWhisperAccept`), `TestLogContrastive
+Experiment` entfernt. `TestWhisperBestContrastiveExperiment` umgeschrieben:
+prüft jetzt direkt den zurückgegebenen `margin`-Wert (statt eines
+`debug_scores`-Dicts) inkl. Gegenprobe, dass `_whisper_accept()` mit einer
+tatsächlich berechneten (nicht `None`) Marge entscheidet.
+
 ## ✓ fetch_songtext.py v1.10.1 — Bugfix: --cache-only blockierte Live-Whisper + ein Whisper-Lauf statt bis zu vier
 
 **Bugfix — `--cache-only` blockierte fälschlich Live-Whisper:** `--cache-only`

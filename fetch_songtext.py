@@ -25,7 +25,7 @@ except ImportError:
     cache_store = None
 
 # Rückbau: lokal-Cache-Feature entfernt, wieder reiner Provider-Cache
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1291,14 +1291,17 @@ def _whisper_best(
 
     Song-Transkript-Cache (siehe CACHE_DESIGN.md, Künstler+Titel-Identität wie
     beim Provider-Cache): existiert bereits ein gecachtes Transkript für
-    (artist, title), wird die GESAMTE Fenster-Schleife/alle Whisper-Aufrufe für
-    diesen Lauf übersprungen — das gecachte Transkript entscheidet direkt über
+    (artist, title), wird der Whisper-Aufruf für diesen Lauf komplett
+    übersprungen — das gecachte Transkript entscheidet direkt über
     has_vocals/total_words, die Vergleichslogik (idf-Jaccard je LRC-Kandidat)
-    läuft unverändert weiter. Bei einem Cache-Miss läuft die bestehende
-    Fenster-Schleife wie bisher, aber am Ende wird GENAU EINMAL das zum
-    gewählten (oder — falls keiner akzeptiert wurde — bestverfügbaren)
-    Kandidaten gehörende Transkript persistent gecacht, damit derselbe Song
-    beim nächsten Lauf nicht erneut komplett durchgehört werden muss.
+    läuft unverändert weiter. Bei einem Cache-Miss läuft GENAU EIN
+    Whisper-Lauf: der Start-Offset ist der früheste erste Zeitstempel über
+    ALLE übergebenen Kandidaten (minus Pre-Roll), da alle Kandidaten dieselbe
+    Audiodatei beschreiben und ein einziges Transkript für den Vergleich mit
+    allen genügt (die Vergleichslogik ist ein reiner Wort-/Score-Vergleich,
+    keine Zeit-Ausrichtung je Kandidat). Am Ende wird dieses eine Transkript
+    persistent gecacht, damit derselbe Song beim nächsten Lauf nicht erneut
+    transkribiert werden muss.
 
     --wer-experiment (globales _wer_experiment): die Vergleichslogik je
     LRC-Kandidat läuft stattdessen über WER (_wer, Referenz=LRC-Kandidat,
@@ -1316,12 +1319,11 @@ def _whisper_best(
     Tabelle. Zusätzlich wird eine kontrastive Marge berechnet (siehe
     _contrastive_margin_and_decision) und ins debug_scores-Dict geschrieben;
     die eigentliche Akzeptanz-Entscheidung trifft weiterhin fetch_lrc() über
-    _whisper_accept(..., margin=...). Analoges Sicherheitsnetz unter
-    --cache-only: existiert dabei KEIN gecachtes Transkript, wird ebenfalls
-    NICHT live transkribiert (model_used=_CONTRASTIVE_SKIP_NO_TRANSCRIPT) --
-    --cache-only heisst "nur Cache-Treffer, keine Live-Arbeit", das gilt seit
-    v1.10.0 auch für Whisper. Ausserhalb von --cache-only läuft ein
-    Cache-Miss unverändert über die volle Fenster-Schleife (siehe oben).
+    _whisper_accept(..., margin=...). --cache-only betrifft NUR Live-
+    Provider-Abfragen (siehe _cache_only-Docstring weiter oben), NICHT
+    Whisper (ein v1.10.0-Refactor hatte das faelschlich gekoppelt, seit
+    v1.10.1 wieder korrigiert): ein Cache-Miss transkribiert immer live,
+    unabhängig von --cache-only.
 
     debug_scores: falls ein dict übergeben wird, füllt die Funktion es mit
     {"old_avg", "old_ok"} (bester IDF-Jaccard-Score/dessen Entscheidung nach
@@ -1336,15 +1338,18 @@ def _whisper_best(
 
     ctx = _whisper_context_sec(expected_dur)
 
-    # Start-Offset pro Kandidat bestimmen
-    candidate_starts: list[tuple[Path, float]] = []
+    # EIN Start-Offset fuer den EINEN Whisper-Lauf (frueheste Kandidaten-
+    # Zeitmarke -- verpasst keine echten frühen Vokale). Alle Kandidaten
+    # beschreiben dieselbe Audiodatei, daher genuegt ein Transkript fuer
+    # den Vergleich mit allen (statt einer pro Kandidat/Start).
+    starts: list[float] = []
     for p in candidates:
         try:
             ft = _first_timestamp(p.read_text(encoding="utf-8"))
-            start = max(0.0, (ft if ft > 0 else 0.0) - _WHISPER_PRE_ROLL)
+            starts.append(max(0.0, (ft if ft > 0 else 0.0) - _WHISPER_PRE_ROLL))
         except Exception:
-            start = 0.0
-        candidate_starts.append((p, start))
+            starts.append(0.0)
+    start = min(starts) if starts else 0.0
 
     lrc_lang = _detect_lrc_language(candidates)
     n_docs, df = _contrastive_idf or (0, {})
@@ -1406,7 +1411,7 @@ def _whisper_best(
         best_path: Path | None = None
         best_score = 0.0
         old_best_score = 0.0
-        for p, _start in candidate_starts:
+        for p in candidates:
             old_s = _score_against_idf(words, p)
             if old_s > old_best_score:
                 old_best_score = old_s
@@ -1457,63 +1462,33 @@ def _whisper_best(
         # behandelt das wie "kein Whisper verfügbar".
         return (None, 0.0, False, 0, _WER_SKIP_NO_TRANSCRIPT, lrc_lang)
 
-    if _cache_only:
-        # Sicherheitsnetz: --cache-only aktiv, aber kein gecachtes Transkript
-        # vorhanden -> KEIN Live-Whisper-Lauf (--cache-only heisst "nur
-        # Cache-Treffer, keine Live-Arbeit" -- das gilt jetzt auch fuer
-        # Whisper, nicht nur fuer Provider-Abfragen). fetch_lrc() erkennt
-        # model_used == _CONTRASTIVE_SKIP_NO_TRANSCRIPT und behandelt das wie
-        # "kein Whisper verfügbar". Ausserhalb von --cache-only laeuft die
-        # normale Fenster-Schleife (unten) unveraendert weiter, damit neue
-        # Songs weiterhin live transkribiert und gecacht werden koennen.
-        return (None, 0.0, False, 0, _CONTRASTIVE_SKIP_NO_TRANSCRIPT, lrc_lang)
+    # BUGFIX (war in v1.10.0 faelschlich an _cache_only gekoppelt):
+    # --cache-only betrifft nur Live-PROVIDER-Abfragen (siehe Docstring bei
+    # _cache_only weiter oben), nicht Whisper. Ein Cache-Miss transkribiert
+    # daher immer live -- auch unter --cache-only, sonst wuerde kein neuer
+    # Song je zum ersten Mal verifiziert.
 
-    # Cache-Miss: bestehende Fenster-Schleife unverändert.
-    # cache: start_key → (words, no_speech_prob, avg_logprob) — hier bereits
-    # halluzinationsgefiltert, für die Score-/Vokal-Logik dieses Laufs.
-    # raw_cache: dieselben Keys, aber die UNGEFILTERTEN Whisper-Wörter — nur
-    # diese werden persistiert, damit die Halluzinations-Erkennung beim
-    # nächsten Abruf frisch (mit ggf. geänderten Schwellwerten) erneut auf das
-    # Rohtranskript angewendet werden kann, statt an einer alten Filterung
-    # festzuhängen.
-    _CacheVal = tuple[list[str], float, float]
-
-    cache: dict[int, _CacheVal] = {}
-    raw_cache: dict[int, _CacheVal] = {}
-    distinct = len({round(start / 3) for _, start in candidate_starts})
-    done = 0
-    for _, start in candidate_starts:
-        key = round(start / 3)
-        if key not in cache:
-            done += 1
-            _print_status(
-                f"  {flac_path.name}  Whisper transkribiert ({done}/{distinct})..."
-            )
-            words, no_speech, logprob = _transcribe(
-                flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
-            )
-            raw_cache[key] = (words, no_speech, logprob)
-            if _is_hallucination(words):
-                words = []
-            cache[key] = (words, no_speech, logprob)
+    # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
+    # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
+    # ein Transkript genuegt fuer den Vergleich mit allen.
+    _print_status(f"  {flac_path.name}  Whisper transkribiert...")
+    raw_words, no_speech, logprob = _transcribe(
+        flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
+    )
+    words = [] if _is_hallucination(raw_words) else raw_words
 
     # has_vocals: primär no_speech_prob, sekundär Wortzahl
-    vals = list(cache.values())
-    avg_no_speech = sum(v[1] for v in vals) / len(vals) if vals else 1.0
-    total_words = sum(len(v[0]) for v in vals)
+    total_words = len(words)
     has_vocals = (
-        avg_no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
+        no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
     )
 
     best_path = None
     best_score = 0.0
     abs_best_path: Path | None = None
     abs_best_score = -1.0
-    abs_best_key: int | None = None
     old_best_score = 0.0  # nur für --wer-experiment-Debug-Logging gebraucht
-    for p, start in candidate_starts:
-        key = round(start / 3)
-        words, _, _ = cache.get(key, ([], 1.0, 0.0))
+    for p in candidates:
         old_s = _score_against_idf(words, p)
         if old_s > old_best_score:
             old_best_score = old_s
@@ -1523,7 +1498,6 @@ def _whisper_best(
             if abs_best_path is None or score < abs_best_score:
                 abs_best_score = score
                 abs_best_path = p
-                abs_best_key = key
             if best_path is None or score < best_score:
                 best_score = score
                 best_path = p
@@ -1532,23 +1506,9 @@ def _whisper_best(
             if score > abs_best_score:
                 abs_best_score = score
                 abs_best_path = p
-                abs_best_key = key
             if score > best_score:
                 best_score = score
                 best_path = p
-
-    # Kanonisches Transkript dieses Songs: das zum gewählten best_path, oder —
-    # wenn kein Kandidat akzeptiert wurde (kein-vokal/unter-schwelle) — das
-    # bestverfügbare (höchster Score), sonst das erste berechnete Fenster.
-    # Wird sowohl fürs Song-Cache-Schreiben (unten) als auch für die
-    # kontrastive Marge (die EIN Transkript für diesen Song braucht, nicht
-    # eines je Fenster) gebraucht.
-    if best_path is not None:
-        chosen_key = round(next(s for p, s in candidate_starts if p == best_path) / 3)
-    elif abs_best_path is not None:
-        chosen_key = abs_best_key
-    else:
-        chosen_key = round(candidate_starts[0][1] / 3) if candidate_starts else None
 
     if debug_scores is not None:
         debug_scores.update(
@@ -1560,11 +1520,8 @@ def _whisper_best(
                 new_avg=best_score,
                 new_ok=best_score <= _WER_WHISPER_MAX_THRESHOLD,
             )
-        chosen_words = (
-            cache.get(chosen_key, ([], 1.0, 0.0))[0] if chosen_key is not None else []
-        )
         c_bg_max, c_margin, c_fallback = _contrastive_result_for(
-            best_score, chosen_words, lrc_lang, artist_key, titel_key, n_docs, df
+            best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
         )
         debug_scores.update(
             contrastive_best_score=best_score,
@@ -1574,18 +1531,17 @@ def _whisper_best(
             contrastive_ok=_whisper_accept(best_score, lrc_lang, margin=c_margin),
         )
 
-    # GENAU EINMAL persistent cachen (siehe chosen_key oben).
-    if use_cache and chosen_key is not None and chosen_key in raw_cache:
-        chosen_raw_words, chosen_no_speech, chosen_logprob = raw_cache[chosen_key]
+    # GENAU EINMAL persistent cachen (das eine Transkript dieses Laufs).
+    if use_cache:
         try:
             with _cache_lock:
                 cache_store.put_transcript(
                     _cache_conn,
                     artist_key,
                     titel_key,
-                    " ".join(chosen_raw_words),
-                    chosen_no_speech,
-                    chosen_logprob,
+                    " ".join(raw_words),
+                    no_speech,
+                    logprob,
                     modell=_WHISPER_MODEL,
                 )
         except Exception:
@@ -2246,10 +2202,10 @@ def main() -> None:
         help=(
             "Keine Live-Provider-Abfragen — nur Cache-Treffer verwenden. Auch "
             "Provider mit gecachtem Fehlschlag (Timeout/Rate-Limit/Captcha/"
-            "gesperrt) werden NICHT live nachgefragt. Gilt auch für Whisper: "
-            "ohne gecachtes Transkript wird ein Track übersprungen statt live "
-            "transkribiert (vorhandene .lrc bleibt unangetastet). Schließt "
-            "sich mit --force/--refresh-cache/--no-cache aus."
+            "gesperrt) werden NICHT live nachgefragt. Betrifft nur Provider, "
+            "nicht Whisper: ohne gecachtes Transkript wird trotzdem live "
+            "transkribiert. Schließt sich mit --force/--refresh-cache/"
+            "--no-cache aus."
         ),
     )
     parser.add_argument(

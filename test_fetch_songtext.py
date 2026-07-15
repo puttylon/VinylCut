@@ -1542,12 +1542,48 @@ class TestTranscriptCache:
         )
         assert len(calls) == 1  # kein zweiter _transcribe-Aufruf für denselben Song
 
+    def test_mehrere_kandidaten_unterschiedlicher_start_nur_ein_transcribe_aufruf(
+        self, tmp_path, monkeypatch
+    ):
+        """Mehrere Kandidaten mit UNTERSCHIEDLICHEN ersten Zeitstempeln
+        beschreiben dieselbe Audiodatei -- _whisper_best darf pro Aufruf nur
+        EINMAL transkribieren (frühester Kandidaten-Start), nicht einmal pro
+        unterschiedlichem Start wie vor v1.10.1."""
+        self._prep(monkeypatch, tmp_path)
+
+        calls = []
+
+        def _counting_transcribe(path, start, ctx, model, language=None):
+            calls.append(start)
+            return ["hello", "world", "foo", "bar"], 0.05, -0.3
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _counting_transcribe)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"z")
+        lrc_spaet = self._make_lrc(
+            tmp_path, "spaet.lrc", "[00:40.00]hello world foo bar\n"
+        )
+        lrc_frueh = self._make_lrc(
+            tmp_path, "frueh.lrc", "[00:05.00]hello world foo bar\n"
+        )
+
+        fetch_songtext._whisper_best(
+            flac,
+            [lrc_spaet, lrc_frueh],
+            artist="Multi Artist",
+            title="Multi Title",
+        )
+        assert len(calls) == 1
+        assert calls[0] == pytest.approx(5.0)  # frühester Kandidaten-Start
+
 
 class TestWerExperimentWhisperSafetyNet:
-    """--wer-experiment: kein gecachtes Transkript -> KEIN Live-Whisper-Lauf,
-    unabhängig von --cache-only (das seit v1.10.0 ebenfalls Whisper ohne
-    Transkript-Cache-Treffer verhindert, siehe
-    TestContrastiveExperimentWhisperSafetyNet)."""
+    """--wer-experiment: kein gecachtes Transkript -> KEIN Live-Whisper-Lauf.
+    Das ist ein eigenständiges Sicherheitsnetz nur für --wer-experiment --
+    --cache-only greift hier NICHT (siehe
+    TestContrastiveExperimentWhisperSafetyNet: ein Cache-Miss transkribiert
+    unter --cache-only immer live)."""
 
     def teardown_method(self):
         fetch_songtext._cache_conn = None
@@ -2053,11 +2089,11 @@ class TestWhisperBestContrastiveExperiment:
 
 
 class TestContrastiveExperimentWhisperSafetyNet:
-    """Kontrastive Marge: kein gecachtes Transkript -> KEIN Live-Whisper-Lauf,
-    aber NUR unter --cache-only (analog TestWerExperimentWhisperSafetyNet,
-    dort an --wer-experiment gekoppelt). Ausserhalb von --cache-only muss ein
-    Cache-Miss weiterhin live transkribieren (siehe TestTranscriptCache) --
-    sonst koennte kein neuer Song je zum ersten Mal verifiziert werden."""
+    """--cache-only betrifft nur Live-PROVIDER-Abfragen (siehe _cache_only-
+    Docstring), NICHT Whisper (Bugfix v1.10.1 -- ein v1.10.0-Refactor hatte
+    das faelschlich gekoppelt). Ein Cache-Miss transkribiert daher IMMER live,
+    unabhaengig von --cache-only -- sonst koennte kein neuer Song je zum
+    ersten Mal verifiziert werden."""
 
     def teardown_method(self):
         fetch_songtext._cache_conn = None
@@ -2065,7 +2101,7 @@ class TestContrastiveExperimentWhisperSafetyNet:
         fetch_songtext._cache_only = False
         fetch_songtext._contrastive_idf = None
 
-    def test_cache_only_kein_cache_treffer_kein_live_transcribe(
+    def test_cache_only_transkribiert_trotzdem_live_bei_cache_miss(
         self, tmp_path, monkeypatch
     ):
         conn = cache_store.open_cache(tmp_path / "cache.db")
@@ -2073,18 +2109,16 @@ class TestContrastiveExperimentWhisperSafetyNet:
         fetch_songtext._cache_ttl_days = 30
         fetch_songtext._cache_refresh = False
         fetch_songtext._cache_only = True
+        fetch_songtext._contrastive_idf = (1, {})
         monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
         monkeypatch.setattr(
             fetch_songtext, "_detect_lrc_language", lambda candidates: None
         )
 
-        def _fail_if_called(*a, **k):
-            pytest.fail(
-                "Live-Whisper darf unter --cache-only ohne "
-                "Transkript-Cache-Treffer nicht laufen"
-            )
+        def _fake_transcribe(path, start, ctx, model, language=None):
+            return ["hello", "world"], 0.05, -0.3
 
-        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fake_transcribe)
 
         flac = tmp_path / "song.flac"
         flac.write_bytes(b"x")
@@ -2094,9 +2128,8 @@ class TestContrastiveExperimentWhisperSafetyNet:
         best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
             flac, [lrc], artist="X", title="Y"
         )
-        assert model == _CONTRASTIVE_SKIP_NO_TRANSCRIPT
-        assert best_path is None
-        assert has_vocals is False
+        assert model != _CONTRASTIVE_SKIP_NO_TRANSCRIPT
+        assert best_path == lrc
 
     def test_ohne_cache_only_transkribiert_neuen_song_trotzdem_live(
         self, tmp_path, monkeypatch

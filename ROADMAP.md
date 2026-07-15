@@ -1,5 +1,58 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.10.1 — Bugfix: --cache-only blockierte Live-Whisper + ein Whisper-Lauf statt bis zu vier
+
+**Bugfix — `--cache-only` blockierte fälschlich Live-Whisper:** `--cache-only`
+war laut ursprünglichem Design (siehe Docstring bei `_cache_only`) immer nur
+für Live-PROVIDER-Abfragen zuständig, nie für Whisper. Der v1.10.0-Umbau
+(siehe Eintrag darunter, Abschnitt „Judgment Call") hatte das versehentlich
+gekoppelt: `_whisper_best()` übersprang die Whisper-Transkription bei
+fehlendem Transkript-Cache auch unter `--cache-only` (`model_used =
+_CONTRASTIVE_SKIP_NO_TRANSCRIPT`). Das bricht neue Songs komplett — kein Song
+hätte je zum ersten Mal verifiziert werden können, solange `--cache-only`
+aktiv ist. Jetzt korrigiert: Ein Cache-Miss transkribiert immer live,
+unabhängig von `--cache-only`. Der `if _cache_only: return (...)`-Sicherheits-
+netz-Block in `_whisper_best()` ist ersatzlos entfernt.
+
+**Effizienz — ein Whisper-Lauf statt bis zu vier pro Track:**
+`_whisper_best()` berechnete bisher pro Kandidaten-LRC (lrclib, genius,
+musixmatch, netease, „lokal" — bis zu 4-5) einen eigenen Start-Zeitpunkt aus
+dem jeweils ersten Zeitstempel und transkribierte für JEDEN unterschiedlichen
+(auf 3 Sekunden gerundeten) Start separat mit Whisper. Das war unnötig: alle
+Kandidaten beschreiben dieselbe Audiodatei, die Vergleichslogik ist ohnehin
+ein reiner Wort-/Score-Vergleich ohne Zeit-Ausrichtung. Jetzt: EIN
+Start-Zeitpunkt (`min()` über alle Kandidaten-Start-Hinweise, damit keine
+echten frühen Vokale verpasst werden), EIN `_transcribe()`-Aufruf, das eine
+Transkript wird gegen alle Kandidaten gescort — spart bis zu 75 % der
+Whisper-Laufzeit pro Track ohne Genauigkeitsverlust. Entfernt wurden dabei
+`candidate_starts` (Liste von (Pfad, Start)-Paaren pro Kandidat), das
+`cache`/`raw_cache`-Dict (keyed by gerundetem Start), die
+`chosen_key`/`chosen_words`-Logik sowie die `distinct`/`done`-
+Fortschrittszählung („Whisper transkribiert (2/3)…"); an ihrer Stelle gibt es
+nur noch eine einzelne `start`-Variable, `words`/`raw_words`/`no_speech`/
+`logprob` als Einzelwerte (kein Dict mehr) und eine Kandidaten-Scoring-
+Schleife über `for p in candidates:`.
+
+Version: `1.10.1` (Patch — Bugfix + Effizienzverbesserung, kein
+Verhaltenswechsel im Ergebnis der Verifikation).
+
+Tests: `TestContrastiveExperimentWhisperSafetyNet::
+test_cache_only_kein_cache_treffer_kein_live_transcribe` erwartete noch das
+alte (falsche) Verhalten und wurde umgeschrieben zu
+`test_cache_only_transkribiert_trotzdem_live_bei_cache_miss` (erwartet jetzt
+live-`_transcribe`-Aufruf statt `_CONTRASTIVE_SKIP_NO_TRANSCRIPT`). Neuer Test
+`TestTranscriptCache::
+test_mehrere_kandidaten_unterschiedlicher_start_nur_ein_transcribe_aufruf`
+verifiziert explizit: zwei Kandidaten mit unterschiedlichen ersten
+Zeitstempeln (`00:40.00` / `00:05.00`) führen zu genau einem
+`_transcribe`-Aufruf mit dem früheren Start. 168 Tests grün.
+
+**Bekannt, noch offen (nicht Teil dieses Fixes):**
+`_CONTRASTIVE_SKIP_NO_TRANSCRIPT` wird von `_whisper_best()` nirgends mehr
+zurückgegeben (totes Konstrukt, nur noch der `elif`-Zweig in `fetch_lrc()`
+und ein Test, der `_whisper_best` direkt mockt, referenzieren die Konstante
+noch) — Cleanup für ein andermal.
+
 ## ✓ fetch_songtext.py v1.10.0 — Kontrastive Marge + Hybrid-Boden als Standardverhalten, alte IDF-Datei-Infrastruktur entfernt
 
 Produktiv-Umbau nach der ausgiebigen Testphase (siehe „✓ v1.9.14 — Hybrid-Boden"

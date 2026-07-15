@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import csv
 import errno
 import fcntl
 import hashlib
 import math
+import random
 import re
 import os
 import json
@@ -23,7 +25,7 @@ except ImportError:
     cache_store = None
 
 # Rückbau: lokal-Cache-Feature entfernt, wieder reiner Provider-Cache
-__version__ = "1.9.13"
+__version__ = "1.10.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -74,37 +76,30 @@ _LRC_TOO_LONG_TOLERANCE = 0.10  # last_ts darf höchstens 10 % länger als der T
 # höchster falscher Wert 0,053 — Reserve nach beiden Seiten (siehe metric_bakeoff).
 _WHISPER_MIN_OVERLAP = 0.065  # Schwellwert: ab hier wird eine LRC akzeptiert
 
-# Sprachspezifische Schwellen: (schwelle, kalibriert_bei_n_docs). Noetig weil
-# eine kleinere Sprach-Teiltabelle (siehe _idf_table_for) JEDEN Score
-# systematisch senkt -- reiner Skaleneffekt der IDF-Formel, kein inhaltlicher
-# Unterschied. Default (_WHISPER_MIN_OVERLAP) gilt fuer alle Sprachen ohne
-# eigenen Eintrag hier (u.a. Englisch: dessen eigene Tabelle ist kaum kleiner
-# als die alte globale, keine Neukalibrierung noetig -- empirisch bestaetigt
-# in v1.9.13, siehe ROADMAP). Kalibriert an 8 Testfaellen (4 akzeptieren/4
-# ablehnen, echte Whisper-Transkriptionen), siehe ROADMAP v1.9.13 fuer Details.
+# --wer-experiment. Ersetzt probeweise _idf_jaccard bei der Whisper-
+# Verifikation durch die Word Error Rate (WER = wortweise Levenshtein-
+# Editierdistanz / Länge Referenz-Wortliste, Referenz=LRC-Kandidat). Schwelle
+# 0.91 kalibriert gegen echte Cache-Daten (685 Songs): 94,45% Übereinstimmung
+# mit der alten IDF-Jaccard-Entscheidung, deutlich über der trivialen
+# Mehrheitsklassen-Baseline (89%) — siehe
+# scratch_wer_threshold_calibration_ergebnis.md im Nachbar-Worktree. WER <=
+# Schwelle = akzeptiert.
+_WER_WHISPER_MAX_THRESHOLD = 0.91
+
+# Sprachspezifische Schwellen: (schwelle, kalibriert_bei_n_docs). Diese
+# ABSOLUTEN Schwellen greifen nur noch als Fallback, wenn die kontrastive
+# Marge mangels ausreichendem gleichsprachigen Hintergrund-Pool None ist
+# (siehe _CONTRASTIVE_MIN_BACKGROUND/_whisper_accept). Default
+# (_WHISPER_MIN_OVERLAP) gilt fuer alle Sprachen ohne eigenen Eintrag hier
+# (u.a. Englisch: dessen eigene Tabelle ist kaum kleiner als die alte
+# globale, keine Neukalibrierung noetig -- empirisch bestaetigt in v1.9.13,
+# siehe ROADMAP). Kalibriert an 8 Testfaellen (4 akzeptieren/4 ablehnen,
+# echte Whisper-Transkriptionen), siehe ROADMAP v1.9.13 fuer Details.
 _WHISPER_MIN_OVERLAP_BY_LANG: dict[str, tuple[float, int]] = {
     "de": (0.043, 2212),
 }
-# Waechst eine kalibrierte Sprache um mehr als diesen Faktor, warnt
-# --rebuild-idf beim naechsten Lauf (siehe _build_idf) -- kein automatisches
-# Nachjustieren (ein Subsampling-Experiment zeigte Konvergenz statt eines
-# verlaesslichen fortlaufenden Trends, eine Formel waere nicht belastbar).
-_WHISPER_THRESHOLD_WARN_GROWTH = 1.5
 _WHISPER_MODEL = "small"
 _WHISPER_PRE_ROLL = 0.0  # direkt beim ersten LRC-Timestamp starten
-
-# Mindestanzahl Dokumente für eine sprachspezifische IDF-Teiltabelle. Darunter
-# ist die Stichprobe zu klein — die sprachspezifischen Werte würden mehr Rauschen
-# als Nutzen bringen, dann greift der globale Fallback (siehe _idf_table_for).
-_IDF_MIN_LANG_DOCS = 1000
-
-# IDF-Tabelle für _idf_jaccard: liegt neben dem Code (nicht in der Musikbibliothek),
-# damit auch lokale Läufe ohne Netzwerk-Mount eine Tabelle haben. Wird per
-# --rebuild-idf <bibliothekspfad> neu gebaut (siehe _build_idf).
-_IDF_CACHE_PATH = Path(__file__).parent / "fetch_songtext_idf.json"
-_idf_cache: dict | None = (
-    None  # module-level Cache: {"global": {...}, "languages": {...}}
-)
 
 # Provider-Konsens: wenn genug Provider übereinstimmen, wird Whisper-Threshold überstimmt.
 _CONSENSUS_MIN_PROVIDERS = (
@@ -113,6 +108,17 @@ _CONSENSUS_MIN_PROVIDERS = (
 _CONSENSUS_MIN_JACCARD = (
     0.40  # mindest-Übereinstimmung zwischen den Provider-LRCs untereinander
 )
+
+# --wer-experiment. Ersetzt probeweise das paarweise Jaccard beim Provider-
+# Konsens durch die symmetrische Word Error Rate (WER = Editierdistanz /
+# LÄNGERE der beiden Wortlisten, siehe scratch_wer_calibration.py::wer_sym).
+# Konsens = durchschnittliche paarweise WER <= dieser Schwelle (Fehlerrate,
+# ACHTUNG: niedriger = besser — umgekehrte Skala zu Jaccard). Schwelle 0.81
+# kalibriert gegen echte Cache-Daten (2932 Songs): 99,25% Übereinstimmung mit
+# der alten Jaccard-Entscheidung, deutlich über der trivialen Mehrheits-
+# klassen-Baseline (95%) — siehe scratch_wer_threshold_calibration_ergebnis.md
+# im Nachbar-Worktree. WER <= Schwelle = akzeptiert.
+_WER_CONSENSUS_MAX_THRESHOLD = 0.81
 
 _VOCALS_MIN_WORDS = 5  # Fallback: weniger Wörter → als instrumental behandelt
 _VOCALS_NO_SPEECH_THOLD = (
@@ -177,6 +183,73 @@ _cache_ttl_days = 30
 _cache_refresh = False
 _cache_only = False
 _cache_lock = threading.Lock()
+
+# --wer-experiment: probeweise WER statt Jaccard/IDF-Jaccard als Entscheidungs-
+# kriterium bei Provider-Konsens und Whisper-Verifikation (siehe
+# _WER_CONSENSUS_MAX_THRESHOLD/_WER_WHISPER_MAX_THRESHOLD weiter oben, dort
+# kalibriert, und _provider_consensus/_whisper_best weiter unten). Default
+# aus — ändert dann nichts am bisherigen Verhalten. Rein additiv, kein Ersatz
+# des bisherigen Pfads.
+_wer_experiment = False
+_WER_EXPERIMENT_LOG_PATH = Path(
+    "wer_experiment_log.csv"
+)  # im aktuellen Arbeitsverzeichnis
+# Sentinel für _whisper_best()'s model_used-Rückgabewert: WER-Experiment aktiv,
+# aber kein gecachtes Transkript vorhanden -> Sicherheitsnetz, kein Live-
+# Whisper-Lauf (siehe _whisper_best-Docstring und fetch_lrc-Auswertung).
+_WER_SKIP_NO_TRANSCRIPT = "wer-skip-no-transcript"
+
+# Kontrastive Marge (seit v1.10.0 Standardverfahren der Whisper-Verifikation,
+# vormals --contrastive-experiment). Ersetzt die ABSOLUTE Whisper-
+# Verifikationsschwelle (_whisper_threshold_for) durch eine KONTRASTIVE Marge:
+# statt "IDF-Jaccard >= feste sprachabhängige Schwelle" wird gefragt "hebt
+# sich der beste Kandidat deutlich vom Zufall ab?" (Marge = best_score − bester
+# Score von K=20 zufälligen ANDEREN Songs gleicher Sprache aus dem Cache, als
+# Hintergrund). Betrifft NUR die Whisper-Verifikation, NICHT den Konsens-Pfad
+# (der bleibt Jaccard, hat mit IDF nichts zu tun). Nutzt eine GLOBALE IDF-
+# Tabelle aus der Cache-DB (siehe _build_contrastive_context) — keine Datei-
+# basierte, sprachspezifische Tabelle mehr — ein DB-Test hat validiert, dass
+# eine sprachunabhängige globale IDF für die kontrastive Entscheidung
+# ausreicht (AUC-Differenz global vs. sprachrichtig DE: −0,0007). Siehe
+# scratch_contrastive_test_ergebnis.md (Nachbar-Worktree) für die volle
+# Analyse. Unabhängig von --wer-experiment.
+_CONTRASTIVE_EXPERIMENT_LOG_PATH = Path(
+    "contrastive_experiment_log.csv"
+)  # im aktuellen Arbeitsverzeichnis
+# Marge-Schwelle: an 8200 Cache-Texten / 680 Eval-Songs (EN+DE gemeinsam)
+# optimiert — 95,0% Genauigkeit ggü. 90,6% der heutigen zwei sprachspezifischen
+# absoluten Schwellen (siehe scratch_contrastive_test_ergebnis.md Abschnitt 3).
+# PROVISORISCH aus synthetischer Kalibrierung, nicht an einem echten
+# Produktionslauf verifiziert.
+_CONTRASTIVE_MARGIN = 0.0115
+# Hybrid-Boden (v1.9.14): ein hoher absoluter Score allein reicht schon zur
+# Akzeptanz, unabhängig vom Hintergrund-Vergleich -- faengt Faelle ab, in denen
+# der Hintergrund-Pool durch einen einzelnen fehlerhaften Kandidaten (Provider-
+# Fehltreffer bei einem ANDEREN, zufaellig gezogenen Song) kontaminiert ist und
+# dadurch die Marge eines eigentlich korrekten Songtexts unter die Schwelle
+# drueckt (siehe Garth-Brooks-"White-Christmas"-Fall in ROADMAP.md).
+_CONTRASTIVE_ABSOLUTE_FLOOR = 0.3
+_CONTRASTIVE_BACKGROUND_K = (
+    20  # Größe des Hintergrund-Pools (zufällige andere Songs gleicher Sprache)
+)
+_CONTRASTIVE_MIN_BACKGROUND = 5  # darunter: Hintergrund zu klein für eine sinnvolle Marge -> Fallback auf alte absolute Schwelle
+_CONTRASTIVE_SEED = 20260714  # fester Seed (identisch zum Validierungsskript) für reproduzierbare Hintergrund-Ziehung
+# Sentinel für _whisper_best()'s model_used-Rückgabewert: --cache-only aktiv,
+# aber kein gecachtes Transkript vorhanden -> Sicherheitsnetz, kein Live-
+# Whisper-Lauf (analog _WER_SKIP_NO_TRANSCRIPT, dort an --wer-experiment statt
+# --cache-only gekoppelt).
+_CONTRASTIVE_SKIP_NO_TRANSCRIPT = "contrastive-skip-no-transcript"
+
+# In-memory-Kontext für die kontrastive Marge, einmal pro Lauf gebaut (siehe
+# _build_contrastive_context, in main() aufgerufen). None solange nicht gebaut.
+_contrastive_idf: "tuple[int, dict] | None" = None  # (n_docs, df) -- globale Cache-IDF
+_contrastive_lang_pools: "dict[str, list[int]] | None" = (
+    None  # Sprache -> [song_id, ...]
+)
+_contrastive_song_texts: "dict[int, list[str]] | None" = (
+    None  # song_id -> Kandidatentexte (roh)
+)
+_contrastive_song_words_cache: dict = {}  # song_id -> tokenisierte Kandidatentexte, memoisiert
 
 
 def _ts() -> str:
@@ -621,44 +694,100 @@ def _word_overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _load_idf() -> dict:
-    """Lädt die IDF-Tabelle aus _IDF_CACHE_PATH — einmalig pro Prozess.
-
-    Format seit v1.9.12: {"global": {"n_docs":.., "df":{..}}, "languages": {"<lang>": {"n_docs":.., "df":{..}}, ..}}.
-    Bricht mit einer klaren Fehlermeldung ab statt still auf ein degeneriertes
-    Verhalten zurückzufallen (z.B. Containment oder df=leer), wenn die Tabelle
-    fehlt oder noch im alten (flachen, vor-sprachbezogenen) Format vorliegt —
-    ohne sie ist _idf_jaccard nicht sinnvoll auswertbar.
-    """
-    global _idf_cache
-    if _idf_cache is not None:
-        return _idf_cache
-    if not _IDF_CACHE_PATH.exists():
-        print(
-            f"FEHLER: IDF-Tabelle fehlt ({_IDF_CACHE_PATH}).\n"
-            f"Einmalig aufbauen mit: fetch_songtext.py --rebuild-idf <bibliothekspfad>"
-        )
-        sys.exit(1)
-    data = json.loads(_IDF_CACHE_PATH.read_text(encoding="utf-8"))
-    if "global" not in data or "languages" not in data:
-        print(
-            f"FEHLER: IDF-Tabelle ({_IDF_CACHE_PATH}) hat ein veraltetes Format "
-            f"(vor der sprachbezogenen IDF-Umstellung) — neu aufbauen mit: "
-            f"fetch_songtext.py --rebuild-idf <bibliothekspfad>"
-        )
-        sys.exit(1)
-    _idf_cache = data
-    return _idf_cache
+# --- WER (Word Error Rate) — experimentell, siehe --wer-experiment ---------
+# Reine-Python-Wort-Editierdistanz (Levenshtein), 1:1 übernommen aus der
+# Kalibrierungsanalyse scratch_wer_calibration.py (dort edit_distance/wer).
 
 
-def _idf_table_for(lang: str | None, idf_data: dict) -> tuple[int, dict]:
-    """Waehlt die Sprach-Teiltabelle falls vorhanden (>= _IDF_MIN_LANG_DOCS Dokumente beim Bau), sonst global."""
-    if lang is not None:
-        entry = idf_data["languages"].get(lang)
-        if entry is not None:
-            return entry["n_docs"], entry["df"]
-    g = idf_data["global"]
-    return g["n_docs"], g["df"]
+def _edit_distance(ref: list[str], hyp: list[str]) -> int:
+    """Wortweise Levenshtein-Distanz (S+D+I). DP mit rollierenden Zeilen
+    (O(n*m) Zeit, O(min(n,m)) Speicher)."""
+    if len(hyp) < len(ref):
+        ref, hyp = hyp, ref
+    n, m = len(ref), len(hyp)
+    if n == 0:
+        return m
+    prev = list(range(m + 1))
+    for i in range(1, n + 1):
+        curr = [i] + [0] * m
+        ref_i = ref[i - 1]
+        for j in range(1, m + 1):
+            cost = 0 if ref_i == hyp[j - 1] else 1
+            curr[j] = min(
+                prev[j] + 1,  # Deletion
+                curr[j - 1] + 1,  # Insertion
+                prev[j - 1] + cost,  # Substitution
+            )
+        prev = curr
+    return prev[m]
+
+
+def _wer(ref: list[str], hyp: list[str]) -> float:
+    """Standard-WER = (S+D+I) / len(Referenz). ref=[] -> 0.0 falls hyp auch leer, sonst 1.0."""
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    return _edit_distance(ref, hyp) / len(ref)
+
+
+def _wer_symmetric(a: list[str], b: list[str]) -> float:
+    """Symmetrische WER-Variante für Provider-Konsens (keine natürliche
+    Referenzrichtung zwischen zwei gleichrangigen Providern): Editierdistanz
+    geteilt durch die LÄNGERE der beiden Wortlisten."""
+    if not a and not b:
+        return 0.0
+    ed = _edit_distance(a, b)
+    longer = max(len(a), len(b))
+    return ed / longer if longer else 0.0
+
+
+def _log_wer_experiment(
+    artist: str,
+    title: str,
+    vergleichstyp: str,
+    old_score: float | None,
+    old_decision: bool | None,
+    new_score: float | None,
+    new_decision: bool | None,
+) -> None:
+    """Hängt eine Vergleichszeile an _WER_EXPERIMENT_LOG_PATH an (nur bei
+    --wer-experiment aufgerufen). Grundlage für die spätere Auswertung
+    alt-Metrik-vs-WER. Best-effort: Logging-Fehler dürfen den Lauf nie stoppen."""
+    try:
+        is_new = not _WER_EXPERIMENT_LOG_PATH.exists()
+        with _WER_EXPERIMENT_LOG_PATH.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if is_new:
+                writer.writerow(
+                    [
+                        "artist",
+                        "title",
+                        "vergleichstyp",
+                        "old_score",
+                        "old_decision",
+                        "new_score",
+                        "new_decision",
+                        "uebereinstimmung",
+                    ]
+                )
+            match = (
+                old_decision == new_decision
+                if old_decision is not None and new_decision is not None
+                else ""
+            )
+            writer.writerow(
+                [
+                    artist,
+                    title,
+                    vergleichstyp,
+                    old_score,
+                    old_decision,
+                    new_score,
+                    new_decision,
+                    match,
+                ]
+            )
+    except Exception:
+        pass
 
 
 def _whisper_threshold_for(lang: str | None) -> float:
@@ -666,6 +795,31 @@ def _whisper_threshold_for(lang: str | None) -> float:
     if lang is not None and lang in _WHISPER_MIN_OVERLAP_BY_LANG:
         return _WHISPER_MIN_OVERLAP_BY_LANG[lang][0]
     return _WHISPER_MIN_OVERLAP
+
+
+def _whisper_accept(
+    score: float, lang: str | None, margin: float | None = None
+) -> bool:
+    """Akzeptanz-Check fuer den Whisper-Score aus fetch_lrc(). Mit aktivem
+    --wer-experiment (globales _wer_experiment, separates, nicht Teil dieser
+    Umstellung): score ist stattdessen eine WER (Fehlerrate) -- Akzeptanz wenn
+    score <= _WER_WHISPER_MAX_THRESHOLD (umgekehrte Skala, siehe
+    Konstanten-Kommentar).
+
+    Standard (seit v1.10.0): margin ist die kontrastive Marge (siehe
+    _contrastive_margin_and_decision) -- Akzeptanz per Hybrid-Regel (v1.9.14):
+    score >= _CONTRASTIVE_ABSOLUTE_FLOOR ODER margin >= _CONTRASTIVE_MARGIN.
+    Der absolute Boden greift unabhaengig vom Hintergrund-Vergleich und
+    faengt Faelle ab, in denen der Hintergrund-Pool durch einen einzelnen
+    fehlerhaften Kandidaten kontaminiert ist (siehe
+    _CONTRASTIVE_ABSOLUTE_FLOOR-Kommentar). margin=None (kein/zu kleiner
+    gleichsprachiger Hintergrund-Pool, siehe _CONTRASTIVE_MIN_BACKGROUND)
+    faellt auf die alte absolute Schwelle (_whisper_threshold_for) zurueck."""
+    if _wer_experiment:
+        return score <= _WER_WHISPER_MAX_THRESHOLD
+    if margin is not None:
+        return score >= _CONTRASTIVE_ABSOLUTE_FLOOR or margin >= _CONTRASTIVE_MARGIN
+    return score >= _whisper_threshold_for(lang)
 
 
 def _idf(word: str, n_docs: int, df: dict) -> float:
@@ -691,92 +845,243 @@ def _idf_jaccard(transcript_words: set, lrc_words: set, n_docs: int, df: dict) -
     return sum(_idf(w, n_docs, df) for w in inter) / denom
 
 
-def _build_idf(root: Path) -> None:
-    """Baut die IDF-Tabelle aus allen *.lrc-Dateien unter `root` neu und schreibt _IDF_CACHE_PATH.
+# --- Kontrastive Marge (Whisper-Verifikation) — Standardverfahren ----------
 
-    Ein Zählschritt (Dokumentfrequenz) pro Song, nicht pro Wortvorkommen.
-    Zusätzlich zur globalen Tabelle (alle Songs, unabhängig von der Sprache)
-    wird pro erkannter Sprache (via _detect_lrc_language) eine Teiltabelle
-    gefuehrt. Nur Sprachen mit >= _IDF_MIN_LANG_DOCS Dokumenten landen im
-    Output — darunter ist die Stichprobe zu klein, die globale Tabelle deckt
-    diese Songs weiterhin als Fallback ab.
 
-    Warnt zusaetzlich (siehe v1.9.13): wenn eine in
-    _WHISPER_MIN_OVERLAP_BY_LANG kalibrierte Sprache stark gewachsen ist
-    (Schwelle koennte veraltet sein), bzw. weist darauf hin, wenn eine
-    Sprache erstmals eine eigene Tabelle bekommt, aber noch mit der
-    unkalibrierten Default-Schwelle laeuft.
+def _global_cache_idf(conn) -> tuple[int, dict]:
+    """Baut df/n_docs aus ALLEN texte.inhalt der Cache-DB (ein Zaehlschritt pro
+    Text, Tokenisierung wie _extract_lrc_words) -- die globale IDF-Tabelle fuer
+    die kontrastive Marge (siehe Modul-Kommentar _CONTRASTIVE_MARGIN). Keine
+    Sprach-Teiltabellen, keine Datei -- die Tabelle lebt ausschliesslich in der
+    Cache-DB.
     """
     from collections import Counter
 
-    global_df: Counter = Counter()
-    global_n = 0
-    lang_counters: dict[str, dict] = {}
-    errors = 0
-    paths = list(root.rglob("*.lrc"))
-    for i, p in enumerate(paths):
-        try:
-            content = p.read_text(encoding="utf-8")
-        except Exception:
-            errors += 1
+    df: Counter = Counter()
+    n_docs = 0
+    for (inhalt,) in conn.execute("SELECT inhalt FROM texte").fetchall():
+        if not inhalt:
             continue
-        words = set(_extract_lrc_words(content))
+        words = set(_extract_lrc_words(inhalt))
         if not words:
             continue
-        global_n += 1
-        global_df.update(words)
-        lang = _detect_lrc_language([p])
-        if lang is not None:
-            entry = lang_counters.setdefault(lang, {"n": 0, "df": Counter()})
-            entry["n"] += 1
-            entry["df"].update(words)
-        if (i + 1) % 2000 == 0:
-            print(f"  ...{i + 1}/{len(paths)} verarbeitet", flush=True)
+        n_docs += 1
+        df.update(words)
+    return n_docs, dict(df)
 
-    languages_out = {
-        lang: {"n_docs": entry["n"], "df": dict(entry["df"])}
-        for lang, entry in lang_counters.items()
-        if entry["n"] >= _IDF_MIN_LANG_DOCS
-    }
 
-    out = {
-        "global": {"n_docs": global_n, "df": dict(global_df)},
-        "languages": languages_out,
-    }
-    _IDF_CACHE_PATH.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+def _song_candidate_words(song_id: int) -> list[list[str]]:
+    """Tokenisierte Kandidatentexte eines Cache-Songs (memoisiert) -- nur fuer
+    den Hintergrund-Pool der kontrastiven Marge gebraucht (siehe
+    _contrastive_margin_and_decision). Erwartet, dass _contrastive_song_texts
+    bereits gebaut ist (siehe _build_contrastive_context)."""
+    cached = _contrastive_song_words_cache.get(song_id)
+    if cached is not None:
+        return cached
+    texts = (_contrastive_song_texts or {}).get(song_id, [])
+    words = [_extract_lrc_words(t) for t in texts]
+    _contrastive_song_words_cache[song_id] = words
+    return words
 
-    print(
-        f"IDF-Tabelle gebaut: {global_n} Dokumente, {len(global_df)} distinkte Wörter, "
-        f"{errors} Lesefehler. Gespeichert: {_IDF_CACHE_PATH}"
+
+def _build_contrastive_context() -> None:
+    """Baut einmal pro Lauf (vor der Whisper-Verifikation, siehe main()) den
+    Kontext fuer die kontrastive Marge: globale Cache-IDF (_global_cache_idf) +
+    eine song_id -> Sprache-Map (je ein Provider-Treffer-Text pro Song via
+    _detect_lrc_language) fuer die gleichsprachigen Hintergrund-Pools.
+
+    Braucht eine offene Cache-Verbindung -- ohne Cache ist kein Hintergrund-
+    Pool moeglich. main() verhindert die Kombination --no-cache + aktive
+    Whisper-Verifikation bereits per parser.error(), diese Fehlermeldung hier
+    ist nur ein zusaetzliches Sicherheitsnetz."""
+    global _contrastive_idf, _contrastive_lang_pools, _contrastive_song_texts
+    global _contrastive_song_words_cache
+    if _cache_conn is None:
+        print(
+            "FEHLER: Die Whisper-Verifikation braucht eine offene Cache-DB "
+            "(fetch_songtext_cache.db) -- ohne Cache ist kein Hintergrund-Pool "
+            "fuer die kontrastive Marge moeglich. Nicht mit --no-cache kombinierbar "
+            "(--no-whisper oder --fast umgehen die Whisper-Verifikation und "
+            "funktionieren weiterhin ohne Cache)."
+        )
+        sys.exit(1)
+
+    _contrastive_song_words_cache = {}
+    _contrastive_idf = _global_cache_idf(_cache_conn)
+
+    cur = _cache_conn.execute("SELECT fingerabdruck, inhalt FROM texte")
+    texte_map = {fp: inhalt for fp, inhalt in cur.fetchall() if inhalt}
+
+    cur = _cache_conn.execute(
+        "SELECT song_id, fingerabdruck FROM ergebnisse WHERE status='treffer'"
     )
-    print("Erkannte Sprachen (Dokumente):")
-    for lang, entry in sorted(
-        lang_counters.items(), key=lambda kv: kv[1]["n"], reverse=True
-    ):
-        marker = "eigene Tabelle" if entry["n"] >= _IDF_MIN_LANG_DOCS else "→ global"
-        print(f"  {lang}: {entry['n']} ({marker})")
+    song_texts: dict[int, list[str]] = {}
+    for song_id, fp in cur.fetchall():
+        inhalt = texte_map.get(fp)
+        if inhalt:
+            song_texts.setdefault(song_id, []).append(inhalt)
+    _contrastive_song_texts = song_texts
 
-    for lang, entry in lang_counters.items():
-        if entry["n"] < _IDF_MIN_LANG_DOCS:
-            continue
-        calibrated = _WHISPER_MIN_OVERLAP_BY_LANG.get(lang)
-        if calibrated is not None:
-            threshold, calibrated_n = calibrated
-            if entry["n"] >= calibrated_n * _WHISPER_THRESHOLD_WARN_GROWTH:
-                growth_pct = (entry["n"] / calibrated_n - 1) * 100
-                print(
-                    f"WARNUNG: Sprache '{lang}' ist von {calibrated_n} auf {entry['n']} "
-                    f"Dokumente gewachsen (+{growth_pct:.1f}%) -- Schwelle {threshold} "
-                    f"in _WHISPER_MIN_OVERLAP_BY_LANG sollte neu geprueft werden "
-                    f"(siehe ROADMAP v1.9.13 fuer Methodik)."
+    pools: dict[str, list[int]] = {}
+    for song_id, texts in song_texts.items():
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(texts[0])
+            tmp_path = Path(f.name)
+        try:
+            lang = _detect_lrc_language([tmp_path])
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        if lang is not None:
+            pools.setdefault(lang, []).append(song_id)
+    _contrastive_lang_pools = pools
+
+    n_docs = _contrastive_idf[0]
+    print(
+        f"Kontrastiver Hintergrund-Kontext gebaut: {n_docs} IDF-Dokumente, "
+        f"{len(song_texts)} Cache-Songs, {len(pools)} Sprachen mit Hintergrund-Pool."
+    )
+
+
+def _lookup_cache_song_id(artist_key: str, titel_key: str) -> int | None:
+    """song_id des aktuellen Songs in der Cache-DB (falls vorhanden) -- wird
+    gebraucht, um den aktuellen Song aus seinem eigenen Hintergrund-Pool
+    auszuschliessen (siehe _contrastive_margin_and_decision)."""
+    if _cache_conn is None:
+        return None
+    try:
+        row = _cache_conn.execute(
+            "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+            (artist_key, titel_key),
+        ).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _contrastive_margin_and_decision(
+    transcript_words: list[str],
+    best_score: float,
+    lrc_lang: str | None,
+    exclude_song_id: int | None,
+    n_docs: int,
+    df: dict,
+) -> tuple[float | None, float | None, bool]:
+    """Kontrastive Marge (siehe _CONTRASTIVE_MARGIN):
+    Marge = best_score - bester Score von K=20 zufaelligen ANDEREN Songs
+    gleicher Sprache aus dem Cache (Hintergrund, via _song_candidate_words).
+    Fester, songspezifischer Seed (_CONTRASTIVE_SEED + Sprache + song_id) fuer
+    reproduzierbare Ziehung unabhaengig von der Verarbeitungsreihenfolge.
+
+    Gibt (max_hintergrund, marge, fallback) zurueck. fallback=True (beide
+    Werte dann None): kein oder zu kleiner (< _CONTRASTIVE_MIN_BACKGROUND)
+    gleichsprachiger Hintergrund-Pool -- Aufrufer (_whisper_accept) faellt dann
+    auf die alte absolute Schwelle zurueck."""
+    pools = _contrastive_lang_pools or {}
+    pool = pools.get(lrc_lang, []) if lrc_lang is not None else []
+    others = [sid for sid in pool if sid != exclude_song_id]
+    if len(others) < _CONTRASTIVE_MIN_BACKGROUND:
+        return None, None, True
+
+    rng = random.Random(f"{_CONTRASTIVE_SEED}:{lrc_lang}:{exclude_song_id}")
+    k = min(_CONTRASTIVE_BACKGROUND_K, len(others))
+    background_ids = rng.sample(others, k)
+
+    tw = set(transcript_words)
+    bg_scores = []
+    for sid in background_ids:
+        cand_words = _song_candidate_words(sid)
+        s = max(
+            (_idf_jaccard(tw, set(cw), n_docs, df) for cw in cand_words),
+            default=0.0,
+        )
+        bg_scores.append(s)
+    bg_max = max(bg_scores) if bg_scores else 0.0
+    margin = best_score - bg_max
+    return bg_max, margin, False
+
+
+def _contrastive_result_for(
+    best_score: float,
+    transcript_words: list[str],
+    lrc_lang: str | None,
+    artist_key: str | None,
+    titel_key: str | None,
+    n_docs: int,
+    df: dict,
+) -> tuple[float | None, float | None, bool]:
+    """Wrapper um _contrastive_margin_and_decision: loest zuerst die song_id
+    des aktuellen Songs auf (fuer den Hintergrund-Ausschluss), siehe
+    _whisper_best."""
+    exclude_id = (
+        _lookup_cache_song_id(artist_key, titel_key) if artist_key is not None else None
+    )
+    return _contrastive_margin_and_decision(
+        transcript_words, best_score, lrc_lang, exclude_id, n_docs, df
+    )
+
+
+def _log_contrastive_experiment(
+    artist: str,
+    title: str,
+    lang: str | None,
+    old_score: float | None,
+    old_decision: bool | None,
+    best_score: float | None,
+    max_background: float | None,
+    margin: float | None,
+    new_decision: bool | None,
+    fallback: bool,
+) -> None:
+    """Haengt eine Vergleichszeile an _CONTRASTIVE_EXPERIMENT_LOG_PATH an (bei
+    jeder Whisper-Verifikation aufgerufen). Grundlage fuer die Auswertung
+    alte-absolute-Schwelle-vs-kontrastive-Marge. Best-effort: Logging-Fehler
+    duerfen den Lauf nie stoppen."""
+    try:
+        is_new = not _CONTRASTIVE_EXPERIMENT_LOG_PATH.exists()
+        with _CONTRASTIVE_EXPERIMENT_LOG_PATH.open(
+            "a", newline="", encoding="utf-8"
+        ) as f:
+            writer = csv.writer(f)
+            if is_new:
+                writer.writerow(
+                    [
+                        "artist",
+                        "title",
+                        "sprache",
+                        "alter_score",
+                        "alte_entscheidung",
+                        "best_score",
+                        "max_hintergrund",
+                        "marge",
+                        "neue_entscheidung",
+                        "uebereinstimmung",
+                        "fallback_absolute_schwelle",
+                    ]
                 )
-        else:
-            print(
-                f"HINWEIS: Sprache '{lang}' hat jetzt eine eigene IDF-Tabelle "
-                f"({entry['n']} Dokumente), nutzt aber weiterhin die Default-Schwelle "
-                f"{_WHISPER_MIN_OVERLAP} (nicht sprachspezifisch kalibriert) -- ggf. "
-                f"eigene Kalibrierung sinnvoll."
+            match = (
+                old_decision == new_decision
+                if old_decision is not None and new_decision is not None
+                else ""
             )
+            writer.writerow(
+                [
+                    artist,
+                    title,
+                    lang,
+                    old_score,
+                    old_decision,
+                    best_score,
+                    max_background,
+                    margin,
+                    new_decision,
+                    match,
+                    fallback,
+                ]
+            )
+    except Exception:
+        pass
 
 
 def _is_hallucination(words: list[str]) -> bool:
@@ -858,14 +1163,25 @@ def _transcribe(
 
 
 def _provider_consensus(
-    candidates: list[Path], min_providers: int = _CONSENSUS_MIN_PROVIDERS
+    candidates: list[Path],
+    min_providers: int = _CONSENSUS_MIN_PROVIDERS,
+    debug_scores: dict | None = None,
 ) -> tuple[Path | None, float]:
     """Prüft ob ≥ min_providers Provider inhaltlich übereinstimmen.
 
-    Gibt (repräsentativsten Kandidaten, avg_inter_jaccard) zurück,
-    oder (None, 0.0) wenn kein Konsens erreicht wird.
+    Gibt (repräsentativsten Kandidaten, avg_score) zurück, oder (None, avg_score)
+    wenn kein Konsens erreicht wird. Standardmäßig ist avg_score die
+    durchschnittliche paarweise Jaccard-Ähnlichkeit (hoch = ähnlich). Mit
+    aktivem --wer-experiment (globales _wer_experiment) wird stattdessen die
+    durchschnittliche paarweise WER verwendet (_WER_CONSENSUS_MAX_THRESHOLD,
+    ACHTUNG: niedrig = ähnlich — umgekehrte Skala, siehe Modul-Kommentar dort).
     C3: Bei initialem Scheitern wird der stärkste Ausreißer herausgeworfen
     und der Check auf den verbleibenden Kandidaten wiederholt.
+
+    debug_scores: nur für --wer-experiment gedacht. Falls ein dict übergeben
+    wird, füllt die Funktion es mit {"old_avg", "old_ok", "new_avg", "new_ok"}
+    — BEIDE Metriken, unabhängig davon welche gerade die Entscheidung trifft
+    — als Grundlage für das Vergleichs-CSV-Logging in fetch_lrc().
     """
     if len(candidates) < min_providers:
         return None, 0.0
@@ -880,28 +1196,46 @@ def _provider_consensus(
     if len(path_words) < min_providers:
         return None, 0.0
 
+    def _jaccard(a: set, b: set) -> float:
+        u = a | b
+        return len(a & b) / len(u) if u else 0.0
+
+    def _wer_pair(a: set, b: set) -> float:
+        return _wer_symmetric(list(a), list(b))
+
     def _eval(pw: list[tuple[Path, set]]) -> tuple[Path | None, float]:
         n = len(pw)
-        pair_scores = [
-            len(pw[i][1] & pw[j][1]) / len(pw[i][1] | pw[j][1])
-            if pw[i][1] | pw[j][1]
-            else 0.0
-            for i in range(n)
-            for j in range(i + 1, n)
-        ]
-        avg = sum(pair_scores) / len(pair_scores)
-        if avg < _CONSENSUS_MIN_JACCARD:
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        old_avg = sum(_jaccard(pw[i][1], pw[j][1]) for i, j in pairs) / len(pairs)
+        new_avg = sum(_wer_pair(pw[i][1], pw[j][1]) for i, j in pairs) / len(pairs)
+        old_ok = old_avg >= _CONSENSUS_MIN_JACCARD
+        new_ok = new_avg <= _WER_CONSENSUS_MAX_THRESHOLD
+        if debug_scores is not None:
+            debug_scores.update(
+                old_avg=old_avg, old_ok=old_ok, new_avg=new_avg, new_ok=new_ok
+            )
+
+        avg, ok = (new_avg, new_ok) if _wer_experiment else (old_avg, old_ok)
+        if not ok:
             return None, avg
+
         best_rep: Path | None = None
-        best_avg = -1.0
-        for i, (p, ws_i) in enumerate(pw):
-            others = [pw[j][1] for j in range(n) if j != i]
-            a = sum(
-                len(ws_i & o) / len(ws_i | o) if ws_i | o else 0.0 for o in others
-            ) / len(others)
-            if a > best_avg:
-                best_avg = a
-                best_rep = p
+        if _wer_experiment:
+            best_avg = float("inf")
+            for i, (p, ws_i) in enumerate(pw):
+                others = [pw[j][1] for j in range(n) if j != i]
+                a = sum(_wer_pair(ws_i, o) for o in others) / len(others)
+                if a < best_avg:
+                    best_avg = a
+                    best_rep = p
+        else:
+            best_avg = -1.0
+            for i, (p, ws_i) in enumerate(pw):
+                others = [pw[j][1] for j in range(n) if j != i]
+                a = sum(_jaccard(ws_i, o) for o in others) / len(others)
+                if a > best_avg:
+                    best_avg = a
+                    best_rep = p
         return best_rep, avg
 
     rep, avg = _eval(path_words)
@@ -911,19 +1245,30 @@ def _provider_consensus(
     # C3: Ausreißer herauswerfen und erneut prüfen (braucht ≥ 3 Kandidaten)
     if len(path_words) >= 3:
         n = len(path_words)
-        avg_to_others = [
-            sum(
-                len(path_words[i][1] & path_words[j][1])
-                / len(path_words[i][1] | path_words[j][1])
-                if path_words[i][1] | path_words[j][1]
-                else 0.0
-                for j in range(n)
-                if j != i
-            )
-            / (n - 1)
-            for i in range(n)
-        ]
-        worst = avg_to_others.index(min(avg_to_others))
+        if _wer_experiment:
+            avg_to_others = [
+                sum(
+                    _wer_pair(path_words[i][1], path_words[j][1])
+                    for j in range(n)
+                    if j != i
+                )
+                / (n - 1)
+                for i in range(n)
+            ]
+            worst = avg_to_others.index(
+                max(avg_to_others)
+            )  # höchste Fehlerrate = Ausreißer
+        else:
+            avg_to_others = [
+                sum(
+                    _jaccard(path_words[i][1], path_words[j][1])
+                    for j in range(n)
+                    if j != i
+                )
+                / (n - 1)
+                for i in range(n)
+            ]
+            worst = avg_to_others.index(min(avg_to_others))
         filtered = [pw for k, pw in enumerate(path_words) if k != worst]
         rep2, avg2 = _eval(filtered)
         if rep2 is not None:
@@ -938,6 +1283,7 @@ def _whisper_best(
     expected_dur: float = 0.0,
     artist: str = "",
     title: str = "",
+    debug_scores: dict | None = None,
 ) -> tuple[Path | None, float, bool, int, str, str | None]:
     """Verifikation via small: bester Kandidat nach IDF-Jaccard-Score (_idf_jaccard).
 
@@ -953,13 +1299,41 @@ def _whisper_best(
     gewählten (oder — falls keiner akzeptiert wurde — bestverfügbaren)
     Kandidaten gehörende Transkript persistent gecacht, damit derselbe Song
     beim nächsten Lauf nicht erneut komplett durchgehört werden muss.
+
+    --wer-experiment (globales _wer_experiment): die Vergleichslogik je
+    LRC-Kandidat läuft stattdessen über WER (_wer, Referenz=LRC-Kandidat,
+    Hypothese=Whisper-Transkript) statt _idf_jaccard — score wird dann als
+    Fehlerrate interpretiert (niedriger = besser), siehe
+    _WER_WHISPER_MAX_THRESHOLD. Sicherheitsnetz: existiert dabei KEIN
+    gecachtes Transkript (cache_store.get_transcript-Treffer), wird NICHT
+    live transkribiert — es wird sofort mit
+    model_used=_WER_SKIP_NO_TRANSCRIPT zurückgekehrt, der Aufrufer
+    (fetch_lrc) behandelt das wie "kein Whisper verfügbar" (vorhandene .lrc
+    bleibt unangetastet, kein Cache-Eintrag).
+
+    Kandidaten-Auswahl (bester IDF-Jaccard-Score) nutzt die GLOBALE Cache-IDF
+    (_contrastive_idf, siehe _build_contrastive_context) — keine Datei-basierte
+    Tabelle. Zusätzlich wird eine kontrastive Marge berechnet (siehe
+    _contrastive_margin_and_decision) und ins debug_scores-Dict geschrieben;
+    die eigentliche Akzeptanz-Entscheidung trifft weiterhin fetch_lrc() über
+    _whisper_accept(..., margin=...). Analoges Sicherheitsnetz unter
+    --cache-only: existiert dabei KEIN gecachtes Transkript, wird ebenfalls
+    NICHT live transkribiert (model_used=_CONTRASTIVE_SKIP_NO_TRANSCRIPT) --
+    --cache-only heisst "nur Cache-Treffer, keine Live-Arbeit", das gilt seit
+    v1.10.0 auch für Whisper. Ausserhalb von --cache-only läuft ein
+    Cache-Miss unverändert über die volle Fenster-Schleife (siehe oben).
+
+    debug_scores: falls ein dict übergeben wird, füllt die Funktion es mit
+    {"old_avg", "old_ok"} (bester IDF-Jaccard-Score/dessen Entscheidung nach
+    der alten absoluten Schwelle, immer), {"contrastive_best_score",
+    "contrastive_bg_max", "contrastive_margin", "contrastive_fallback",
+    "contrastive_ok"} (kontrastive Marge, immer) sowie — nur bei aktivem
+    --wer-experiment zusätzlich — {"new_avg", "new_ok"} (WER), als Grundlage
+    für das Vergleichs-CSV-Logging in fetch_lrc().
     """
     if _get_whisper_model(_WHISPER_MODEL) is None:
         return (None, 0.0, False, 0, "", None)
 
-    idf_data = (
-        _load_idf()
-    )  # einmal pro Lauf geladen (module-level Cache), nicht pro Track
     ctx = _whisper_context_sec(expected_dur)
 
     # Start-Offset pro Kandidat bestimmen
@@ -973,7 +1347,7 @@ def _whisper_best(
         candidate_starts.append((p, start))
 
     lrc_lang = _detect_lrc_language(candidates)
-    n_docs, df = _idf_table_for(lrc_lang, idf_data)
+    n_docs, df = _contrastive_idf or (0, {})
 
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = titel_key = None
@@ -990,7 +1364,8 @@ def _whisper_best(
             except Exception:
                 cached_transcript = None  # Cache-Fehler dürfen den Lauf nie stören
 
-    def _score_against(words: list[str], p: Path) -> float:
+    def _score_against_idf(words: list[str], p: Path) -> float:
+        """Alte Metrik: IDF-gewichtetes Jaccard (hoch = ähnlich)."""
         if not words:
             return 0.0
         try:
@@ -1002,6 +1377,15 @@ def _whisper_best(
             )
         except Exception:
             return 0.0
+
+    def _score_against_wer(words: list[str], p: Path) -> float:
+        """Neue Metrik (--wer-experiment): WER, Referenz=LRC-Kandidat,
+        Hypothese=Whisper-Transkript (niedrig = ähnlich)."""
+        try:
+            ref = _extract_lrc_words(p.read_text(encoding="utf-8"))
+        except Exception:
+            return float("inf")
+        return _wer(ref, words)
 
     if cached_transcript is not None:
         # Song-Cache-Treffer: kein einziger Whisper-Aufruf für diesen Lauf.
@@ -1021,11 +1405,41 @@ def _whisper_best(
 
         best_path: Path | None = None
         best_score = 0.0
+        old_best_score = 0.0
         for p, _start in candidate_starts:
-            score = _score_against(words, p)
-            if score > best_score:
-                best_score = score
-                best_path = p
+            old_s = _score_against_idf(words, p)
+            if old_s > old_best_score:
+                old_best_score = old_s
+            if _wer_experiment:
+                new_s = _score_against_wer(words, p)
+                if best_path is None or new_s < best_score:
+                    best_score = new_s
+                    best_path = p
+            else:
+                if old_s > best_score:
+                    best_score = old_s
+                    best_path = p
+
+        if debug_scores is not None:
+            debug_scores.update(
+                old_avg=old_best_score,
+                old_ok=old_best_score >= _whisper_threshold_for(lrc_lang),
+            )
+            if _wer_experiment:
+                debug_scores.update(
+                    new_avg=best_score,
+                    new_ok=best_score <= _WER_WHISPER_MAX_THRESHOLD,
+                )
+            c_bg_max, c_margin, c_fallback = _contrastive_result_for(
+                best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
+            )
+            debug_scores.update(
+                contrastive_best_score=best_score,
+                contrastive_bg_max=c_bg_max,
+                contrastive_margin=c_margin,
+                contrastive_fallback=c_fallback,
+                contrastive_ok=_whisper_accept(best_score, lrc_lang, margin=c_margin),
+            )
 
         return (
             best_path,
@@ -1035,6 +1449,24 @@ def _whisper_best(
             _WHISPER_MODEL,
             lrc_lang,
         )
+
+    if _wer_experiment:
+        # Sicherheitsnetz: --wer-experiment aktiv, aber kein gecachtes
+        # Transkript vorhanden -> KEIN Live-Whisper-Lauf (siehe Docstring).
+        # fetch_lrc() erkennt model_used == _WER_SKIP_NO_TRANSCRIPT und
+        # behandelt das wie "kein Whisper verfügbar".
+        return (None, 0.0, False, 0, _WER_SKIP_NO_TRANSCRIPT, lrc_lang)
+
+    if _cache_only:
+        # Sicherheitsnetz: --cache-only aktiv, aber kein gecachtes Transkript
+        # vorhanden -> KEIN Live-Whisper-Lauf (--cache-only heisst "nur
+        # Cache-Treffer, keine Live-Arbeit" -- das gilt jetzt auch fuer
+        # Whisper, nicht nur fuer Provider-Abfragen). fetch_lrc() erkennt
+        # model_used == _CONTRASTIVE_SKIP_NO_TRANSCRIPT und behandelt das wie
+        # "kein Whisper verfügbar". Ausserhalb von --cache-only laeuft die
+        # normale Fenster-Schleife (unten) unveraendert weiter, damit neue
+        # Songs weiterhin live transkribiert und gecacht werden koennen.
+        return (None, 0.0, False, 0, _CONTRASTIVE_SKIP_NO_TRANSCRIPT, lrc_lang)
 
     # Cache-Miss: bestehende Fenster-Schleife unverändert.
     # cache: start_key → (words, no_speech_prob, avg_logprob) — hier bereits
@@ -1078,45 +1510,86 @@ def _whisper_best(
     abs_best_path: Path | None = None
     abs_best_score = -1.0
     abs_best_key: int | None = None
+    old_best_score = 0.0  # nur für --wer-experiment-Debug-Logging gebraucht
     for p, start in candidate_starts:
         key = round(start / 3)
         words, _, _ = cache.get(key, ([], 1.0, 0.0))
-        score = _score_against(words, p)
-        if score > abs_best_score:
-            abs_best_score = score
-            abs_best_path = p
-            abs_best_key = key
-        if score > best_score:
-            best_score = score
-            best_path = p
+        old_s = _score_against_idf(words, p)
+        if old_s > old_best_score:
+            old_best_score = old_s
 
-    # GENAU EINMAL persistent cachen: das Transkript des gewählten best_path,
-    # oder — wenn kein Kandidat akzeptiert wurde (kein-vokal/unter-schwelle) —
-    # das bestverfügbare (höchster Score), sonst das erste berechnete Fenster.
-    if use_cache:
-        if best_path is not None:
-            chosen_key = round(
-                next(s for p, s in candidate_starts if p == best_path) / 3
-            )
-        elif abs_best_path is not None:
-            chosen_key = abs_best_key
+        if _wer_experiment:
+            score = _score_against_wer(words, p)
+            if abs_best_path is None or score < abs_best_score:
+                abs_best_score = score
+                abs_best_path = p
+                abs_best_key = key
+            if best_path is None or score < best_score:
+                best_score = score
+                best_path = p
         else:
-            chosen_key = round(candidate_starts[0][1] / 3) if candidate_starts else None
-        if chosen_key is not None and chosen_key in raw_cache:
-            chosen_words, chosen_no_speech, chosen_logprob = raw_cache[chosen_key]
-            try:
-                with _cache_lock:
-                    cache_store.put_transcript(
-                        _cache_conn,
-                        artist_key,
-                        titel_key,
-                        " ".join(chosen_words),
-                        chosen_no_speech,
-                        chosen_logprob,
-                        modell=_WHISPER_MODEL,
-                    )
-            except Exception:
-                pass
+            score = old_s
+            if score > abs_best_score:
+                abs_best_score = score
+                abs_best_path = p
+                abs_best_key = key
+            if score > best_score:
+                best_score = score
+                best_path = p
+
+    # Kanonisches Transkript dieses Songs: das zum gewählten best_path, oder —
+    # wenn kein Kandidat akzeptiert wurde (kein-vokal/unter-schwelle) — das
+    # bestverfügbare (höchster Score), sonst das erste berechnete Fenster.
+    # Wird sowohl fürs Song-Cache-Schreiben (unten) als auch für die
+    # kontrastive Marge (die EIN Transkript für diesen Song braucht, nicht
+    # eines je Fenster) gebraucht.
+    if best_path is not None:
+        chosen_key = round(next(s for p, s in candidate_starts if p == best_path) / 3)
+    elif abs_best_path is not None:
+        chosen_key = abs_best_key
+    else:
+        chosen_key = round(candidate_starts[0][1] / 3) if candidate_starts else None
+
+    if debug_scores is not None:
+        debug_scores.update(
+            old_avg=old_best_score,
+            old_ok=old_best_score >= _whisper_threshold_for(lrc_lang),
+        )
+        if _wer_experiment:
+            debug_scores.update(
+                new_avg=best_score,
+                new_ok=best_score <= _WER_WHISPER_MAX_THRESHOLD,
+            )
+        chosen_words = (
+            cache.get(chosen_key, ([], 1.0, 0.0))[0] if chosen_key is not None else []
+        )
+        c_bg_max, c_margin, c_fallback = _contrastive_result_for(
+            best_score, chosen_words, lrc_lang, artist_key, titel_key, n_docs, df
+        )
+        debug_scores.update(
+            contrastive_best_score=best_score,
+            contrastive_bg_max=c_bg_max,
+            contrastive_margin=c_margin,
+            contrastive_fallback=c_fallback,
+            contrastive_ok=_whisper_accept(best_score, lrc_lang, margin=c_margin),
+        )
+
+    # GENAU EINMAL persistent cachen (siehe chosen_key oben).
+    if use_cache and chosen_key is not None and chosen_key in raw_cache:
+        chosen_raw_words, chosen_no_speech, chosen_logprob = raw_cache[chosen_key]
+        try:
+            with _cache_lock:
+                cache_store.put_transcript(
+                    _cache_conn,
+                    artist_key,
+                    titel_key,
+                    " ".join(chosen_raw_words),
+                    chosen_no_speech,
+                    chosen_logprob,
+                    modell=_WHISPER_MODEL,
+                )
+        except Exception:
+            pass
 
     return (best_path, best_score, has_vocals, total_words, _WHISPER_MODEL, lrc_lang)
 
@@ -1206,9 +1679,32 @@ def fetch_lrc(
     hit_str = ", ".join(provider_hits) if provider_hits else "—"
     prov_str = f"{len(candidates)}/{len(_ALL_PROVIDERS)}: {hit_str}"
 
+    def _consensus_with_log(
+        cands: list[Path], min_providers: int = _CONSENSUS_MIN_PROVIDERS
+    ) -> tuple[Path | None, float]:
+        """Wrapper um _provider_consensus: schreibt bei aktivem --wer-experiment
+        zusätzlich eine Vergleichszeile (alt-Jaccard vs. neu-WER) ins CSV-Log."""
+        debug: dict = {}
+        rep, score = _provider_consensus(
+            cands,
+            min_providers=min_providers,
+            debug_scores=debug if _wer_experiment else None,
+        )
+        if _wer_experiment and debug:
+            _log_wer_experiment(
+                artist,
+                title,
+                "konsens",
+                debug.get("old_avg"),
+                debug.get("old_ok"),
+                debug.get("new_avg"),
+                debug.get("new_ok"),
+            )
+        return rep, score
+
     # Konsens-Check zuerst: stimmen ≥ 3 deduplizierte Provider überein?
     # Wenn ja → Whisper wird gespart, direkter Treffer.
-    consensus_rep, consensus_jaccard = _provider_consensus(candidates)
+    consensus_rep, consensus_jaccard = _consensus_with_log(candidates)
 
     if consensus_rep is not None:
         best_content = consensus_rep.read_bytes()
@@ -1225,7 +1721,7 @@ def fetch_lrc(
     elif no_whisper:
         # Whisper deaktiviert: 2-Provider-Konsens versuchen, sonst Dauer-Heuristik
         # mit Reject-Schwelle (kein blindes Schreiben eines falschen Songs).
-        novocal_rep, novocal_jaccard = _provider_consensus(candidates, min_providers=2)
+        novocal_rep, novocal_jaccard = _consensus_with_log(candidates, min_providers=2)
         if novocal_rep is not None:
             best_content = novocal_rep.read_bytes()
             info_str = f"{prov_str} │ Konsens {novocal_jaccard:.0%} (2P)"
@@ -1284,6 +1780,7 @@ def fetch_lrc(
         }
     elif flac_path and flac_path.exists():
         # Kein Konsens → Whisper als primärer Entscheider.
+        whisper_debug: dict = {}
         (
             best_path,
             best_score,
@@ -1292,74 +1789,155 @@ def fetch_lrc(
             model_used,
             lrc_lang,
         ) = _whisper_best(
-            flac_path, all_candidates, expected_dur, artist=artist, title=title
+            flac_path,
+            all_candidates,
+            expected_dur,
+            artist=artist,
+            title=title,
+            debug_scores=whisper_debug,
         )
-
-        method = f"whisper-{model_used}" if model_used else "heuristik"
-        model_str = f"[{model_used}]" if model_used else ""
-        lang_str = lrc_lang or ""
-        words_str = f"{whisper_words}W"
-        whisper_head = " ".join(
-            p for p in [model_str, lang_str, "Whisper", words_str] if p
-        )
-
-        if not has_vocals:
-            # kein Vokal: Prüfe ob ≥ 2 Provider inhaltlich übereinstimmen.
-            novocal_rep, novocal_jaccard = _provider_consensus(
-                candidates, min_providers=2
+        if _wer_experiment and whisper_debug:
+            _log_wer_experiment(
+                artist,
+                title,
+                "whisper",
+                whisper_debug.get("old_avg"),
+                whisper_debug.get("old_ok"),
+                whisper_debug.get("new_avg"),
+                whisper_debug.get("new_ok"),
             )
-            if novocal_rep is not None:
-                best_content = novocal_rep.read_bytes()
-                info_str = f"{prov_str} │ Konsens {novocal_jaccard:.0%} (kein Vokal)"
+        if whisper_debug:
+            # "alter Score" = derselbe best_score wie unten (Kandidaten-Auswahl
+            # ist unverändert, siehe _whisper_best-Docstring) — die Spalte
+            # vergleicht die ENTSCHEIDUNG (alte absolute Schwelle vs. neue
+            # Marge), nicht zwei unabhängig berechnete Scores.
+            _log_contrastive_experiment(
+                artist,
+                title,
+                lrc_lang,
+                whisper_debug.get("contrastive_best_score"),
+                whisper_debug.get("old_ok"),
+                whisper_debug.get("contrastive_best_score"),
+                whisper_debug.get("contrastive_bg_max"),
+                whisper_debug.get("contrastive_margin"),
+                whisper_debug.get("contrastive_ok"),
+                whisper_debug.get("contrastive_fallback", False),
+            )
+
+        if model_used == _WER_SKIP_NO_TRANSCRIPT:
+            # Sicherheitsnetz --wer-experiment: kein gecachtes Transkript,
+            # kein Live-Whisper-Lauf. Wie "kein Whisper verfügbar" behandeln —
+            # vorhandene .lrc bleibt unangetastet (siehe extras["wer_skip"] /
+            # main()), kein Cache-Eintrag.
+            best_content = None
+            info_str = (
+                f"{prov_str} │ WER-Experiment: kein Transkript-Cache, übersprungen"
+            )
+            extras = {
+                "providers": len(candidates),
+                "provider_names": provider_hits,
+                "method": None,
+                "no_vocal": False,
+                "score": None,
+                "reason": "wer-kein-cache-transkript",
+                "words": None,
+                "language": lrc_lang,
+                "wer_skip": True,
+            }
+        elif model_used == _CONTRASTIVE_SKIP_NO_TRANSCRIPT:
+            # Sicherheitsnetz: --cache-only aktiv, kein gecachtes Transkript,
+            # kein Live-Whisper-Lauf (analog --wer-experiment oben). Wie
+            # "kein Whisper verfügbar" behandeln — vorhandene .lrc bleibt
+            # unangetastet (siehe extras["contrastive_skip"] / main()), kein
+            # Cache-Eintrag.
+            best_content = None
+            info_str = (
+                f"{prov_str} │ Kontrastive Marge: kein Transkript-Cache, übersprungen"
+            )
+            extras = {
+                "providers": len(candidates),
+                "provider_names": provider_hits,
+                "method": None,
+                "no_vocal": False,
+                "score": None,
+                "reason": "contrastive-kein-cache-transkript",
+                "words": None,
+                "language": lrc_lang,
+                "contrastive_skip": True,
+            }
+        else:
+            method = f"whisper-{model_used}" if model_used else "heuristik"
+            model_str = f"[{model_used}]" if model_used else ""
+            lang_str = lrc_lang or ""
+            words_str = f"{whisper_words}W"
+            whisper_head = " ".join(
+                p for p in [model_str, lang_str, "Whisper", words_str] if p
+            )
+            metric_label = "wer" if _wer_experiment else "idf-jacc"
+            contrastive_margin = whisper_debug.get("contrastive_margin")
+
+            if not has_vocals:
+                # kein Vokal: Prüfe ob ≥ 2 Provider inhaltlich übereinstimmen.
+                novocal_rep, novocal_jaccard = _consensus_with_log(
+                    candidates, min_providers=2
+                )
+                if novocal_rep is not None:
+                    best_content = novocal_rep.read_bytes()
+                    info_str = (
+                        f"{prov_str} │ Konsens {novocal_jaccard:.0%} (kein Vokal)"
+                    )
+                    extras = {
+                        "providers": len(candidates),
+                        "provider_names": provider_hits,
+                        "method": "konsens",
+                        "no_vocal": True,
+                        "score": round(novocal_jaccard, 3),
+                        "words": whisper_words,
+                        "language": lrc_lang,
+                    }
+                else:
+                    best_content = None
+                    info_str = f"{prov_str} │ {whisper_head} kein Vokal"
+                    extras = {
+                        "providers": len(candidates),
+                        "provider_names": provider_hits,
+                        "method": method,
+                        "no_vocal": True,
+                        "score": 0.0,
+                        "reason": "kein-vokal",
+                        "words": 0,
+                        "language": lrc_lang,
+                    }
+            elif _whisper_accept(best_score, lrc_lang, margin=contrastive_margin):
+                best_content = best_path.read_bytes() if best_path else None
+                info_str = (
+                    f"{prov_str} │ {whisper_head} {metric_label}={best_score:.3f}"
+                )
                 extras = {
                     "providers": len(candidates),
                     "provider_names": provider_hits,
-                    "method": "konsens",
-                    "no_vocal": True,
-                    "score": round(novocal_jaccard, 3),
+                    "method": method,
+                    "no_vocal": False,
+                    "score": round(best_score, 3),
                     "words": whisper_words,
                     "language": lrc_lang,
                 }
             else:
                 best_content = None
-                info_str = f"{prov_str} │ {whisper_head} kein Vokal"
+                info_str = (
+                    f"{prov_str} │ {whisper_head} unter Schwelle "
+                    f"{metric_label}={best_score:.3f}"
+                )
                 extras = {
                     "providers": len(candidates),
                     "provider_names": provider_hits,
                     "method": method,
-                    "no_vocal": True,
-                    "score": 0.0,
-                    "reason": "kein-vokal",
-                    "words": 0,
+                    "no_vocal": False,
+                    "score": round(best_score, 3),
+                    "reason": "unter-schwelle",
+                    "words": whisper_words,
                     "language": lrc_lang,
                 }
-        elif best_score >= _whisper_threshold_for(lrc_lang):
-            best_content = best_path.read_bytes() if best_path else None
-            info_str = f"{prov_str} │ {whisper_head} idf-jacc={best_score:.3f}"
-            extras = {
-                "providers": len(candidates),
-                "provider_names": provider_hits,
-                "method": method,
-                "no_vocal": False,
-                "score": round(best_score, 3),
-                "words": whisper_words,
-                "language": lrc_lang,
-            }
-        else:
-            best_content = None
-            info_str = (
-                f"{prov_str} │ {whisper_head} unter Schwelle idf-jacc={best_score:.3f}"
-            )
-            extras = {
-                "providers": len(candidates),
-                "provider_names": provider_hits,
-                "method": method,
-                "no_vocal": False,
-                "score": round(best_score, 3),
-                "reason": "unter-schwelle",
-                "words": whisper_words,
-                "language": lrc_lang,
-            }
     else:
         best = max(all_candidates, key=lambda p: _score_lrc(p, expected_dur))
         best_content = best.read_bytes()
@@ -1534,6 +2112,27 @@ def _cache_entry_valid(entry: dict) -> bool:
     return _parse_version(entry.get("v", "0")) >= _parse_version(_CACHE_MIN_VERSION)
 
 
+def _whisper_rerun_needed(entry: dict, no_whisper: bool) -> bool:
+    """True wenn ein sonst gültiger Cache-Eintrag (siehe _cache_entry_valid)
+    TROTZDEM neu geprüft werden soll, weil sich die Whisper-Entscheidungslogik
+    seit dem letzten Lauf geändert haben könnte (main()-Skip-Check):
+
+    - --no-whisper: frühere Whisper-Ablehnungen (kein-vokal/unter-schwelle)
+      automatisch neu prüfen (Konsens/Dauer-Heuristik statt Content-Check).
+
+    Der frühere erzwungene Rerun JEDES bereits Whisper-verarbeiteten Songs
+    (an --contrastive-experiment gekoppelt) war eine einmalige Migrations-
+    maßnahme für die Umstellungsphase auf die kontrastive Marge — jetzt, wo
+    diese der einzige Whisper-Pfad ist, entfällt er. Bestehende Cache-
+    Einträge aus der Zeit vor der Umstellung lassen sich bei Bedarf einmalig
+    per --force auffrischen."""
+    return (
+        no_whisper
+        and entry.get("r") == "nf"
+        and entry.get("reason") in ("kein-vokal", "unter-schwelle")
+    )
+
+
 def _clear_status() -> None:
     """Löscht eine per _print_status() geschriebene Statuszeile."""
     print(f"\r{' ' * 100}\r", end="", flush=True)
@@ -1622,7 +2221,12 @@ def main() -> None:
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Provider-/Whisper-Cache (fetch_songtext_cache.db) komplett ignorieren",
+        help=(
+            "Provider-/Whisper-Cache (fetch_songtext_cache.db) komplett "
+            "ignorieren. Nur zusammen mit --no-whisper oder --fast nutzbar: "
+            "die Whisper-Verifikation (kontrastive Marge) braucht die "
+            "Cache-DB immer als Hintergrund-Pool."
+        ),
     )
     parser.add_argument(
         "--refresh-cache",
@@ -1642,18 +2246,25 @@ def main() -> None:
         help=(
             "Keine Live-Provider-Abfragen — nur Cache-Treffer verwenden. Auch "
             "Provider mit gecachtem Fehlschlag (Timeout/Rate-Limit/Captcha/"
-            "gesperrt) werden NICHT live nachgefragt. Schließt sich mit "
-            "--force/--refresh-cache/--no-cache aus."
+            "gesperrt) werden NICHT live nachgefragt. Gilt auch für Whisper: "
+            "ohne gecachtes Transkript wird ein Track übersprungen statt live "
+            "transkribiert (vorhandene .lrc bleibt unangetastet). Schließt "
+            "sich mit --force/--refresh-cache/--no-cache aus."
         ),
     )
     parser.add_argument(
-        "--rebuild-idf",
+        "--wer-experiment",
         action="store_true",
         help=(
-            "IDF-Tabelle (für Whisper-Matching, _idf_jaccard) aus allen *.lrc unter "
-            "'path' neu aufbauen und beenden — kein normaler Lauf danach. Baut "
-            "zusätzlich zur globalen Tabelle Teiltabellen je erkannter Sprache "
-            "(ab _IDF_MIN_LANG_DOCS Dokumenten)."
+            "EXPERIMENTELL (Schwellen kalibriert, Feature aber noch nicht "
+            "final übernommen): Provider-Konsens und Whisper-"
+            "Verifikation probeweise über Word Error Rate (WER, wortweise "
+            "Editierdistanz) statt Jaccard/IDF-Jaccard entscheiden lassen "
+            "(siehe _WER_CONSENSUS_MAX_THRESHOLD/_WER_WHISPER_MAX_THRESHOLD). "
+            "Schreibt zusätzlich eine Vergleichszeile (alt vs. WER) pro Song "
+            "in wer_experiment_log.csv. Sicherheitsnetz: kein Live-Whisper-"
+            "Lauf ohne gecachtes Transkript — solche Tracks werden "
+            "übersprungen, vorhandene .lrc bleibt unangetastet."
         ),
     )
     parser.add_argument(
@@ -1669,10 +2280,12 @@ def main() -> None:
         parser.error(
             "--cache-only und --force/--refresh-cache schließen sich aus (die erzwingen frische Live-Abfragen)."
         )
-
-    if args.rebuild_idf:
-        _build_idf(Path(args.path).resolve())
-        return
+    if args.no_cache and not args.no_whisper and not args.fast:
+        parser.error(
+            "--no-cache erfordert --no-whisper oder --fast: die Whisper-"
+            "Verifikation (kontrastive Marge) braucht die Cache-DB immer als "
+            "Hintergrund-Pool (siehe _build_contrastive_context)."
+        )
 
     root = Path(args.path).resolve()
     if root.is_file() and root.suffix.lower() in _AUDIO_EXTENSIONS:
@@ -1697,6 +2310,8 @@ def main() -> None:
         print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
 
     global _cache_conn, _cache_ttl_days, _cache_refresh, _cache_only
+    global _wer_experiment
+    _wer_experiment = args.wer_experiment
     _cache_ttl_days = args.cache_ttl
     # --force soll wirklich alles frisch abfragen (nicht nur den alten
     # Track-Speicher umgehen) — sonst würde --force stillschweigend
@@ -1732,8 +2347,13 @@ def main() -> None:
                 "Whisper-Verifikation fortfahren."
             )
             sys.exit(1)
-        _load_idf()  # vorladen — Meldung vor Track-Liste, nicht erst beim ersten Track
-    updated = skipped = not_found = errors = genre_skipped = no_tags = deferred = 0
+        # Globale Cache-IDF + Sprach-Pools fuer die kontrastive Marge (siehe
+        # _build_contrastive_context/Modul-Kommentar _CONTRASTIVE_MARGIN) --
+        # vorladen, Meldung vor Track-Liste, nicht erst beim ersten Track.
+        _build_contrastive_context()
+    updated = skipped = not_found = errors = genre_skipped = no_tags = deferred = (
+        wer_skipped
+    ) = contrastive_skipped = 0
 
     current_parent: Path | None = None
     dir_cache: dict = {}
@@ -1769,13 +2389,9 @@ def main() -> None:
         if not args.force:
             entry = dir_cache.get(cache_key)
             if entry and _cache_entry_valid(entry):
-                # --no-whisper: frühere Whisper-Ablehnungen automatisch neu prüfen
-                whisper_reject_rerun = (
-                    args.no_whisper
-                    and entry.get("r") == "nf"
-                    and entry.get("reason") in ("kein-vokal", "unter-schwelle")
-                )
-                if not whisper_reject_rerun and (
+                # --no-whisper: frühere Whisper-Ergebnisse ggf. neu prüfen
+                # (siehe _whisper_rerun_needed)
+                if not _whisper_rerun_needed(entry, args.no_whisper) and (
                     entry.get("r") != "ok" or lrc_path.exists()
                 ):
                     skipped += 1
@@ -1864,6 +2480,26 @@ def main() -> None:
                 dest.unlink(missing_ok=True)
             _tprint(f"{_ts()}  {rel}  {info}  =")
             deferred += 1
+        elif extras.get("wer_skip"):
+            # --wer-experiment-Sicherheitsnetz: kein gecachtes Transkript,
+            # kein Live-Whisper-Lauf (siehe _whisper_best/fetch_lrc). Wie
+            # "deferred" behandelt: kein Cache-Eintrag, vorhandene .lrc bleibt
+            # unangetastet, damit ein Lauf mit gecachtem Transkript den Track
+            # spaeter korrekt entscheidet.
+            if use_compare:
+                dest.unlink(missing_ok=True)
+            _tprint(f"{_ts()}  {rel}  {info}  =")
+            wer_skipped += 1
+        elif extras.get("contrastive_skip"):
+            # Kontrastive-Marge-Sicherheitsnetz: kein gecachtes Transkript,
+            # kein Live-Whisper-Lauf (analog wer_skip oben). Wie "deferred"
+            # behandelt: kein Cache-Eintrag, vorhandene .lrc bleibt
+            # unangetastet, damit ein Lauf mit gecachtem Transkript den Track
+            # spaeter korrekt entscheidet.
+            if use_compare:
+                dest.unlink(missing_ok=True)
+            _tprint(f"{_ts()}  {rel}  {info}  =")
+            contrastive_skipped += 1
         elif use_compare:
             if not found:
                 dest.unlink(missing_ok=True)
@@ -1922,6 +2558,12 @@ def main() -> None:
         summary += f", {no_tags} ohne Tags"
     if deferred:
         summary += f", {deferred} aufgeschoben für Whisper"
+    if wer_skipped:
+        summary += f", {wer_skipped} WER-Experiment ohne Whisper-Cache übersprungen"
+    if contrastive_skipped:
+        summary += (
+            f", {contrastive_skipped} kontrastive Marge ohne Whisper-Cache übersprungen"
+        )
     if errors:
         summary += f", {errors} Fehler"
     print(f"\n{summary}.")

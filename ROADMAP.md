@@ -1,5 +1,219 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.10.0 — Kontrastive Marge + Hybrid-Boden als Standardverhalten, alte IDF-Datei-Infrastruktur entfernt
+
+Produktiv-Umbau nach der ausgiebigen Testphase (siehe „✓ v1.9.14 — Hybrid-Boden"
+und „✗ Bigramm-Jaccard … — getestet, verworfen" oben): Die kontrastive Marge
+(inkl. Hybrid-Boden) ist keine Experimentier-Option mehr, sondern der EINZIGE,
+immer aktive Verifikationsweg für Whisper. Das alte, dateibasierte IDF-Verfahren
+(feste sprachspezifische Schwelle gegen `fetch_songtext_idf.json`) ist komplett
+entfernt.
+
+**Entfernt:**
+- `--contrastive-experiment`-CLI-Flag und die globale Variable
+  `_contrastive_experiment` — der bisherige `if`-Zweig (kontrastive Marge) ist
+  jetzt der einzige, unbedingt ausgeführte Code; der bisherige `else`-Zweig
+  (alte absolute IDF-Jaccard-Schwelle als primäre Entscheidung) ist gelöscht.
+  `_whisper_accept()` akzeptiert jetzt unbedingt per Hybrid-Regel, sobald eine
+  Marge berechnet wurde (`margin is not None`).
+- `--rebuild-idf`-CLI-Flag, `_build_idf`, `_load_idf`, `_idf_table_for`,
+  `fetch_songtext_idf.json`, `_IDF_CACHE_PATH`, `_idf_cache`,
+  `_IDF_MIN_LANG_DOCS`, `_WHISPER_THRESHOLD_WARN_GROWTH` — die gesamte
+  Datei-basierte, sprachbezogene IDF-Tabelle samt Bau-Logik. Ersetzt durch die
+  bereits vorhandene globale, aus der Cache-DB gebaute `_contrastive_idf`
+  (`_global_cache_idf`, `_build_contrastive_context`).
+- Der `idf_data`-Parameter, der bisher durch die `_whisper_best`-Aufrufkette
+  gereicht wurde, ist entfallen (ungenutzt, da nur noch `_contrastive_idf`
+  gebraucht wird).
+
+**Bleibt unverändert (nicht Teil dieses Umbaus):** `--wer-experiment` und alles
+was daran hängt (separate, weiterhin experimentelle Option für den
+Provider-Konsens- und Whisper-Vergleichspfad). `_whisper_threshold_for()`,
+`_WHISPER_MIN_OVERLAP`, `_WHISPER_MIN_OVERLAP_BY_LANG` bleiben ebenfalls
+erhalten — sie greifen weiterhin als Fallback, wenn der gleichsprachige
+Hintergrund-Pool zu klein ist (`margin is None`, siehe
+`_CONTRASTIVE_MIN_BACKGROUND`).
+
+**Neue Einschränkung — Whisper-Verifikation braucht jetzt immer eine
+Cache-DB:** `_build_contrastive_context()` (baut die globale IDF + die
+Sprach-Hintergrund-Pools) läuft jetzt vor JEDEM Lauf mit aktiver
+Whisper-Verifikation, nicht mehr nur optional hinter dem Flag. Ohne offene
+`fetch_songtext_cache.db` gibt es keinen Hintergrund-Pool — das Skript bricht
+mit einer klaren Fehlermeldung ab. `--no-cache` ist deshalb jetzt nur noch in
+Kombination mit `--no-whisper` oder `--fast` erlaubt (beide überspringen die
+Whisper-Verifikation vollständig); `main()` prüft das per `parser.error()`
+VOR dem Lauf, nicht erst beim Abbruch mitten im Verzeichnisbaum. Vorher lief
+`--contrastive-experiment` + `--no-cache` ebenfalls schon nicht (identischer
+Fehlerfall war bereits ausgeschlossen) — neu ist nur, dass es jetzt IMMER
+gilt, weil es keinen dateibasierten Fallback mehr gibt, der ohne Cache-DB
+auskäme.
+
+**Judgment Call — `--cache-only` statt eines pauschalen Sicherheitsnetzes:**
+Der bisherige `--contrastive-experiment`-Sicherheitsnetz-Pfad in
+`_whisper_best()` (kein gecachtes Transkript → sofort `model_used =
+_CONTRASTIVE_SKIP_NO_TRANSCRIPT`, kein Live-Whisper-Lauf) wäre bei wörtlicher
+Umsetzung ("Flag-Abfrage entfernen, if-Zweig wird unbedingt") permanent
+unbedingt geworden — das hätte die bestehende, vom Flag unabhängige
+Fenster-Transkriptions-Schleife (inkl. `cache_store.put_transcript`, siehe
+`TestTranscriptCache`) dauerhaft unerreichbar gemacht: KEIN neuer Song hätte
+je wieder eine erste Whisper-Transkription bekommen können. Das wurde beim
+Testlauf konkret sichtbar (`TestTranscriptCache::test_miss_transcribes_and_
+writes_cache` schlug fehl). Da die real validierte Nutzung dieses
+Sicherheitsnetzes immer mit `--cache-only` kombiniert war (siehe
+`CHECKPOINT_kontrastiv.md`: „echter Bibliothekslauf --cache-only
+--contrastive-experiment"), ist das Sicherheitsnetz jetzt an `_cache_only`
+gekoppelt statt an die entfernte Flag-Variable: `--cache-only` bedeutet jetzt
+konsequent „nur Cache-Treffer, keine Live-Arbeit" — auch für Whisper, nicht
+nur für Provider-Abfragen. Außerhalb von `--cache-only` transkribiert ein
+Cache-Miss weiterhin live wie vor dieser Umstellung.
+
+**Ebenfalls entfernt (Kollateral der Flag-Entfernung):** Der erzwungene Rerun
+JEDES bereits Whisper-verarbeiteten Songs in `_whisper_rerun_needed()` (an
+`--contrastive-experiment` gekoppelt) war eine einmalige Migrationsmaßnahme
+für die Umstellungsphase (damit der Ordner-Cache-Skip die Neubewertung unter
+der neuen Logik nicht verhindert). Dauerhaft unbedingt gemacht, hätte das
+JEDEN Whisper-Song bei JEDEM künftigen Lauf neu verarbeiten lassen (Provider
+erneut abgefragt, Ordner-Cache-Skip nie mehr wirksam) — das ist mit dem Flag
+entfallen. Bereits unter der alten absoluten Schwelle gecachte Einträge lassen
+sich bei Bedarf einmalig per `--force` auffrischen.
+
+Version: `1.10.0` (Minor-Bump, analog v1.4.0 „Zweistufige Whisper-
+Verifikation" — Normalverhalten ändert sich grundlegend, ein CLI-Flag
+verschwindet komplett, kein reiner Bugfix).
+
+Tests: alte Datei-IDF-Tests entfernt (`TestLoadIdf`, `TestBuildIdf`,
+`TestIdfTableFor`, `TestWhisperRerunNeeded`-Fälle für den entfernten
+Contrastive-Parameter, `--contrastive-experiment`/`--rebuild-idf`-CLI-Tests),
+neue Tests für die `--no-cache`-Guard-Kombinationen und die
+`--cache-only`-Sicherheitsnetz-Kopplung (inkl. Gegenprobe: Cache-Miss ohne
+`--cache-only` transkribiert weiterhin live). 321 Tests grün (vorher 335 —
+Differenz durch mehr entfernte als neu hinzugekommene Tests, keine
+unerklärten Ausfälle).
+
+## ✗ Bigramm-Jaccard statt Bag-of-Words (kontrastive Marge) — getestet, verworfen
+
+**Status (2026-07-15): Getestet und VERWORFEN.** Bigramm-Jaccard (2-Wort-Tupel,
+ungewichtet, keine IDF) sollte `_idf_jaccard` in der kontrastiven Marge
+(`_CONTRASTIVE_MARGIN` / `_contrastive_margin_and_decision` in
+`fetch_songtext.py`) ersetzen. Auslöser: Garth Brooks „White Christmas" —
+`best_score=0,890`, trotzdem abgelehnt (`marge=-0,0162`), siehe
+`contrastive_run_vergleich.md` Fall #0.
+
+**Validierungstest** (rein lesend gegen `fetch_songtext_cache.db`, Details in
+`bigram_jaccard_test_ergebnis.md`; die rohe Score-Verteilung aus
+`bigram_jaccard_log.csv` war nur Zwischenstand für diese Auswertung, danach
+aufgeräumt) — **Ergebnis:**
+- Auf dem harten 33-Fälle-Testset (`contrastive_run_vergleich.md`) schneidet
+  Bigramm-Jaccard **schlechter** ab als das bestehende Verfahren: **27/33
+  (82 %)** richtig gegenüber bisher **31/33 (94 %)**. 3 neue Fehl-Akzeptanzen
+  (Hannes Wittmer, JETZT! „Du Bist Nicht Allein", JETZT! „Was man Heimat
+  nennt" — Margen kippen knapp über 0, weil bei kurzen Kandidatentexten sehr
+  wenige Bigramme extrem rauschanfällig sind) und 1 neue Fehl-Ablehnung
+  (Heino — Whisper transkribierte fälschlich auf Englisch, dadurch 0
+  gemeinsame Bigramme trotz inhaltlich korrektem Kandidat).
+- Auf den 86 unstrittigen Kandidaten-Reselektionen (nie das eigentliche
+  Problem) funktioniert es dagegen nahezu perfekt (84/84) — bestätigt nur,
+  dass Bigramme bei EINDEUTIGEN Treffern gut trennen, hilft aber nicht bei
+  den harten Grenzfällen.
+- Kein Schwellwert (`margin_bigram > 0` oder sonst ein Cutoff) trennt die 4
+  bekannten „sollte akzeptiert werden"-Fälle sauber von den 29 bekannten
+  „sollte abgelehnt werden"-Fällen — die Werte liegen ineinander verschachtelt.
+
+**Wichtigste Erkenntnis — der Garth-Brooks-Fall hat eine ANDERE Ursache als
+angenommen, auch mit Bigrammen weiterhin abgelehnt
+(`best_score_bigram=0,762`, `margin_bigram=-0,0381`):** Kein zufälliger
+generischer Vokabular-Zufall zwischen zwei verschiedenen Weihnachtsliedern,
+sondern **Datenkontamination im Hintergrund-Pool selbst**. Der
+Hintergrund-Song „Michael Bublé – Christmas" (`song_id=15349`) hat vier
+gecachte Provider-Kandidatentexte in `ergebnisse`/`texte` — Genius und
+Netease korrekt („Christmas (Baby Please Come Home)"), aber **Musixmatch
+liefert wortwörtlich den „White Christmas"-Text** und lrclib einen dritten,
+ebenfalls falschen Song („Holly Jolly Christmas") — beides Provider-
+Fehltreffer bei einem fremden Song, unabhängig verifiziert (2026-07-15, per
+direkter DB-Abfrage). Die kontrastive Marge nimmt für jeden Hintergrund-Song
+den MAX über all seine Kandidatentexte (`_song_candidate_words`/
+`_contrastive_margin_and_decision`) — trifft also zwangsläufig den
+kontaminierten Musixmatch-Text. **Das ist ein Problem der
+Hintergrund-Pool-Zusammensetzung, keine Schwäche der Ähnlichkeitsmetrik** —
+weder Bigramme noch eine andere Metrik können das umgehen, solange
+Hintergrund-Kandidaten ungefiltert aus `ergebnisse` gezogen werden.
+
+**Entscheidung:** Bigramm-Ansatz nicht weiterverfolgen. Stattdessen bleibt
+der bereits im Checkpoint geplante **Hybrid-Boden**
+(`best_score ≥ 0,3 ODER Marge ≥ Schwelle`) die richtige nächste Maßnahme —
+er hängt NICHT von der Hintergrund-Pool-Qualität ab: `best_score=0,89` liegt
+so klar über 0,3, dass Garth Brooks damit unabhängig von jeder Kontamination
+korrekt akzeptiert würde. Die Hintergrund-Pool-Kontamination selbst ist ein
+eigenständiges, potenziell wiederkehrendes Problem (jeder Song mit einem
+Provider-Fehltreffer kann fälschlich als Hintergrund-Störsignal wirken) —
+mögliches eigenes Vorhaben für später (z. B. Hintergrund-Kandidaten per
+Provider-Konsens vorfiltern), aber keine Voraussetzung für den Hybrid-Boden.
+
+**Erkenntnisse aus der Untersuchung, die für eine ECHTE Sequenz-bewusste
+Implementierung (falls später doch angegangen) weiter gelten:**
+1. `_extract_lrc_words` sortiert nicht nach Zeitstempel, verkettet nur in
+   Datei-Reihenfolge — bei Bag-of-Words irrelevant, bei jeder
+   ordnungssensitiven Metrik (N-Gramme, WER, Alignment) ein echter
+   Korrektheitsfehler. LRC-Zeilen können mehrere führende Zeitstempel haben
+   (derselbe Text an mehreren Song-Zeitpunkten, z. B. wiederkehrender
+   Refrain), real gefunden in
+   `lrc_backup/U/U2/Achtung Baby/01 The Fly.lrc`:
+   `[03:24.71][03:06.98]Love...we shine like a`. Betrifft 36 von 16.183
+   Backup-Dateien (≈0,22 %). Bei künftigen ordnungssensitiven Ansätzen: pro
+   Zeile alle Zeitstempel einzeln auswerten, Text entsprechend vervielfachen,
+   nach Zeit sortieren, erst danach Wortfolge bilden.
+2. `_extract_lrc_words` filtert nur eckige Klammern (Zeitstempel,
+   `[Verse]`/`[Chorus]`) heraus, aber keine Genius-Klartext-Kopfzeilen wie
+   „6 Contributors" / „<Titel> Lyrics" — deren Wörter landen mit im
+   Wortschatz. Betrifft alte wie neue Metrik gleichermaßen, vermutlich
+   vernachlässigbar bei vollständigen Songtexten, aber separates
+   Aufräumthema.
+
+## ✓ fetch_songtext.py v1.9.14 — Hybrid-Boden für kontrastive Marge
+
+Problem: Der `--contrastive-experiment`-Zweig von `_whisper_accept()` akzeptierte
+bislang ausschließlich über `margin >= _CONTRASTIVE_MARGIN` — der absolute Score
+spielte keine Rolle mehr. Per Audio-Abhören und Datenbank-Analyse bestätigter
+Fehlerfall: Garth Brooks „White Christmas" hat `best_score = 0,890` (Transkript und
+Genius/Netease/Backup-Text nahezu wortidentisch, siehe `contrastive_run_vergleich.md`
+Fall #0), wurde aber mit `margin = −0,0162` fälschlich abgelehnt — der K=20-
+Hintergrund-Pool enthielt zufällig einen anderen Song mit noch höherem Score
+(`max_hintergrund = 0,906`), ein Artefakt sehr kurzer, hochrepetitiver,
+alltagssprachlicher Songtexte (Weihnachtslied-Standardvokabular). Ein Wechsel der
+Metrik (Bigramm-Jaccard) wurde bereits geprüft und verworfen (siehe „✗ Bigramm-
+Jaccard"-Eintrag oben) — das Problem liegt nicht an der Metrik, sondern daran, dass
+ein einzelner kontaminierter Hintergrund-Kandidat die Marge eines eigentlich
+korrekten Songtexts unter die Schwelle drücken kann.
+
+Lösung: Hybrid-Akzeptanzregel in `_whisper_accept()` — akzeptiert wenn
+`score >= _CONTRASTIVE_ABSOLUTE_FLOOR` (neue Konstante, `0.3`) ODER
+`margin >= _CONTRASTIVE_MARGIN` (unverändert `0,0115`). Der absolute Boden greift
+unabhängig vom Hintergrund-Vergleich und fängt genau die Fälle ab, in denen der
+Hintergrund-Pool kontaminiert ist. `margin=None` (kein/zu kleiner gleichsprachiger
+Hintergrund-Pool, `_CONTRASTIVE_MIN_BACKGROUND`) bleibt unverändert der Fallback
+auf die alte absolute Schwelle `_whisper_threshold_for(lang)`.
+
+Verifikation gegen die bereits vorhandenen 784 Zeilen aus dem
+`--cache-only --contrastive-experiment`-Testlauf-Log (kein neuer
+Bibliothekslauf; Rohdaten danach aufgeräumt): Die neue Hybrid-
+Entscheidung wurde für jede Zeile neu berechnet und mit der alten
+Entscheidung verglichen. Ergebnis: genau **1 Zeile kippt** von
+Ablehnung zu Akzeptanz — Garth Brooks „White Christmas" (jetzt korrekt
+akzeptiert). **Keine** Zeile kippt in die falsche Richtung (Akzeptanz →
+Ablehnung). Die 29 bereits bekannten RICHTIG-ablehnung-Fälle aus
+`contrastive_run_vergleich.md` haben durchweg `best_score <= 0,109` — weit unter
+dem neuen Boden 0,3, keiner davon kippt fälschlich. Die 84 HARMLOS- und 2
+VERBESSERUNG-Fälle aus `contrastive_reselection_check.md` betreffen ausschließlich
+Kandidaten-Neuauswahl bei bereits übereinstimmender Akzeptanz/Ablehnung, sind von
+der Akzeptanzregel-Änderung nicht berührt.
+
+Tests: 3 neue Unit-Tests in `TestWhisperAcceptContrastive` (hoher Score + negative
+Marge → akzeptiert; niedriger Score + negative Marge → weiterhin abgelehnt;
+niedriger Score + positive Marge → weiterhin akzeptiert), bestehender Test
+`test_marge_unter_schwelle_...` an die neue Regel angepasst (Score jetzt bewusst
+unter dem Boden gewählt, sonst hätte der Hybrid-Boden ihn akzeptiert). 335 Tests
+grün (vorher 332).
+
 ## ✓ fetch_songtext.py v1.9.13 — sprachspezifische Whisper-Schwelle + Rekalibrierung
 
 Problem: v1.9.12 machte die IDF-Tabelle sprachbezogen (eigene, kleinere
@@ -875,6 +1089,11 @@ pexpect: noch nicht recherchiert — steht als offener Punkt in ARCHITECTURE.md.
 ## Ideen (nicht geplant)
 
 ### Sequenz-bewusster Vergleich statt/zusätzlich zu Bag-of-Words (IDF-Jaccard)
+
+**Hinweis:** Wird inzwischen konkret umgesetzt/getestet — siehe
+„Geplant: Bigramm-Jaccard statt Bag-of-Words" ganz oben in diesem Dokument,
+nicht mehr nur Idee. Der Rest dieses Eintrags ist die ursprüngliche
+Problem-/Rechercheanalyse (2026-07-14), die zu diesem Vorhaben geführt hat.
 
 **Problem (2026-07-14 erkannt, im Rahmen der sprachbezogenen IDF-Analyse):**
 `_idf_jaccard` (und davor `_word_overlap`/Containment) sind alle drei

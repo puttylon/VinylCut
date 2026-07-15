@@ -15,6 +15,10 @@ import cache_store
 import fetch_songtext
 from fetch_songtext import (
     _CONSENSUS_MIN_JACCARD,
+    _CONTRASTIVE_ABSOLUTE_FLOOR,
+    _CONTRASTIVE_MARGIN,
+    _CONTRASTIVE_MIN_BACKGROUND,
+    _CONTRASTIVE_SKIP_NO_TRANSCRIPT,
     _FOLDER_BUSY,
     _HALLUCINATION_MAX_UNIQUE_RATIO,
     _HALLUCINATION_MIN_WORDS,
@@ -24,25 +28,36 @@ from fetch_songtext import (
     _RATE_LIMIT_MAX_SEC,
     _RATE_LIMIT_STUCK_THRESHOLD,
     _VOCALS_MIN_WORDS,
+    _WER_CONSENSUS_MAX_THRESHOLD,
+    _WER_SKIP_NO_TRANSCRIPT,
+    _WER_WHISPER_MAX_THRESHOLD,
     _WHISPER_MIN_OVERLAP,
-    _build_idf,
+    _build_contrastive_context,
     _clean_query_title,
+    _contrastive_margin_and_decision,
+    _edit_distance,
     _extract_lrc_words,
     _first_timestamp,
+    _global_cache_idf,
     _heuristic_best,
     _idf,
     _idf_jaccard,
-    _idf_table_for,
     _is_hallucination,
     _last_timestamp,
     _load_cache,
-    _load_idf,
+    _log_contrastive_experiment,
+    _log_wer_experiment,
     _provider_consensus,
     _rate_limit_report,
     _rate_limit_wait,
     _release_folder,
     _save_cache,
+    _song_candidate_words,
     _try_claim_folder,
+    _wer,
+    _wer_symmetric,
+    _whisper_accept,
+    _whisper_rerun_needed,
     _whisper_threshold_for,
     _word_overlap,
     fetch_lrc,
@@ -289,6 +304,173 @@ class TestProviderConsensus:
         paths = self._paths(self.LRC_A, self.LRC_WRONG)
         rep, score = _provider_consensus(paths, min_providers=2)
         assert rep is None
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+
+class TestWerCalculation:
+    """Wortweise Editierdistanz/WER — 1:1 übernommen aus scratch_wer_calibration.py.
+    Nur gezielte Stichproben, siehe --wer-experiment (CLAUDE.md: kein Over-Engineering
+    für ein Experiment)."""
+
+    def test_edit_distance_identisch_ist_null(self):
+        assert _edit_distance(["a", "b", "c"], ["a", "b", "c"]) == 0
+
+    def test_edit_distance_eine_substitution(self):
+        assert _edit_distance(["a", "b", "c"], ["a", "x", "c"]) == 1
+
+    def test_edit_distance_insertion(self):
+        assert _edit_distance(["a", "b"], ["a", "x", "b"]) == 1
+
+    def test_wer_identisch_ist_null(self):
+        assert _wer(["a", "b", "c"], ["a", "b", "c"]) == 0.0
+
+    def test_wer_ist_editierdistanz_durch_referenzlaenge(self):
+        # 1 Substitution auf 3 Referenzwörtern → 1/3
+        assert _wer(["a", "b", "c"], ["a", "x", "c"]) == pytest.approx(1 / 3)
+
+    def test_wer_leere_referenz_und_hypothese(self):
+        assert _wer([], []) == 0.0
+
+    def test_wer_leere_referenz_nichtleere_hypothese(self):
+        assert _wer([], ["a"]) == 1.0
+
+    def test_wer_symmetric_teilt_durch_laengere_liste(self):
+        # 2 Insertionen nötig, längere Liste hat 4 Wörter → 2/4 = 0.5
+        a = ["a", "b"]
+        b = ["a", "b", "c", "d"]
+        assert _wer_symmetric(a, b) == pytest.approx(0.5)
+
+    def test_wer_symmetric_ist_symmetrisch(self):
+        a = ["a", "b"]
+        b = ["a", "b", "c", "d"]
+        assert _wer_symmetric(a, b) == _wer_symmetric(b, a)
+
+    def test_wer_symmetric_beide_leer(self):
+        assert _wer_symmetric([], []) == 0.0
+
+
+class TestWhisperAccept:
+    """_whisper_accept() ist der zentrale Umschaltpunkt für die Whisper-
+    Akzeptanzschwelle: IDF-Jaccard (Standard, hoch=gut) vs. WER
+    (--wer-experiment, niedrig=gut)."""
+
+    def teardown_method(self):
+        fetch_songtext._wer_experiment = False
+
+    def test_standardmodus_nutzt_idf_jaccard_schwelle(self):
+        fetch_songtext._wer_experiment = False
+        assert _whisper_accept(_WHISPER_MIN_OVERLAP, None) is True
+        assert _whisper_accept(_WHISPER_MIN_OVERLAP - 0.001, None) is False
+
+    def test_wer_experiment_nutzt_wer_schwelle_umgekehrte_skala(self):
+        fetch_songtext._wer_experiment = True
+        assert _whisper_accept(_WER_WHISPER_MAX_THRESHOLD, None) is True
+        assert _whisper_accept(_WER_WHISPER_MAX_THRESHOLD + 0.01, None) is False
+        # Ein Score der unter der ALTEN Schwelle liegen würde, ist hier
+        # irrelevant -- die Skala ist bei WER umgekehrt (0.0 = perfektes Match).
+        assert _whisper_accept(0.0, None) is True
+
+
+class TestWhisperAcceptContrastive:
+    """_whisper_accept() Standardverhalten (seit v1.10.0, vormals
+    --contrastive-experiment): Hybrid-Regel (v1.9.14) -- akzeptiert wenn
+    margin >= _CONTRASTIVE_MARGIN ODER score >= _CONTRASTIVE_ABSOLUTE_FLOOR.
+    Der absolute Boden fängt Fälle ab, in denen ein einzelner fehlerhafter
+    Kandidat im Hintergrund-Pool die Marge eines eigentlich korrekten
+    Songtexts unter die Schwelle drückt (siehe Garth-Brooks-Fall,
+    ROADMAP.md). margin=None (kein/zu kleiner Hintergrund-Pool) fällt
+    unverändert auf die alte absolute Schwelle zurück."""
+
+    def test_marge_ueber_schwelle_akzeptiert_unabhaengig_vom_score(self):
+        # Score liegt weit UNTER dem absoluten Boden -- akzeptiert trotzdem,
+        # weil die Marge allein schon ausreicht.
+        assert _whisper_accept(0.001, None, margin=_CONTRASTIVE_MARGIN) is True
+
+    def test_marge_unter_schwelle_und_score_unter_boden_lehnt_ab(self):
+        # Weder Marge noch absoluter Boden erreicht -- abgelehnt.
+        assert _whisper_accept(0.05, None, margin=_CONTRASTIVE_MARGIN - 0.001) is False
+
+    def test_hoher_score_akzeptiert_trotz_negativer_marge_hybrid_boden(self):
+        # Garth-Brooks-Fall: hoher Score (>= _CONTRASTIVE_ABSOLUTE_FLOOR), aber
+        # Marge negativ (Hintergrund-Pool durch einen fehlerhaften Kandidaten
+        # kontaminiert) -- der Hybrid-Boden greift trotzdem.
+        assert (
+            _whisper_accept(_CONTRASTIVE_ABSOLUTE_FLOOR + 0.2, None, margin=-0.02)
+            is True
+        )
+
+    def test_niedriger_score_mit_negativer_marge_bleibt_abgelehnt(self):
+        # Niedriger Score (< _CONTRASTIVE_ABSOLUTE_FLOOR) UND negative Marge --
+        # kein Fehlalarm durch den neuen Boden, weiterhin abgelehnt.
+        assert (
+            _whisper_accept(_CONTRASTIVE_ABSOLUTE_FLOOR - 0.25, None, margin=-0.02)
+            is False
+        )
+
+    def test_positive_marge_bei_niedrigem_score_bleibt_akzeptiert(self):
+        # Alte Margen-Regel bleibt unverändert wirksam, auch wenn der Score
+        # weit unter dem absoluten Boden liegt.
+        assert (
+            _whisper_accept(_CONTRASTIVE_ABSOLUTE_FLOOR - 0.25, None, margin=0.02)
+            is True
+        )
+
+    def test_margin_none_faellt_auf_alte_absolute_schwelle_zurueck(self):
+        assert _whisper_accept(_WHISPER_MIN_OVERLAP, None, margin=None) is True
+        assert _whisper_accept(_WHISPER_MIN_OVERLAP - 0.001, None, margin=None) is False
+
+
+class TestProviderConsensusWerExperiment:
+    """_provider_consensus() mit aktivem --wer-experiment: paarweise WER statt
+    Jaccard, inklusive debug_scores für das Vergleichs-CSV-Logging.
+
+    Eigene Fixtures statt TestProviderConsensus.LRC_A/B/C (deren paarweise WER
+    von ca. 0,33-0,4 zwar unter der kalibrierten Schwelle _WER_CONSENSUS_MAX_
+    THRESHOLD=0,81 läge, aber nicht mehr klar "eindeutig ähnlich" demonstriert
+    — WER bestraft Wortumstellungen stärker als das ungeordnete Jaccard).
+    Hier stattdessen drei Texte mit je genau einem Wort Unterschied (WER
+    0,1-0,2 pro Paar, klar unter der Schwelle) für den Konsens-Fall, und
+    LRC_WRONG (WER 1,0, klar über der Schwelle) für den Ablehnungs-Fall.
+    Schwellenwert-AN-der-Grenze wird gezielt in TestWhisperAccept geprüft
+    (dort über die Konstante selbst, nicht über Fixture-Texte).
+    """
+
+    LRC_X = "[00:10.00]The quick brown fox jumps over the lazy dog today\n"
+    LRC_Y = "[00:10.00]The quick brown fox jumps over the lazy cat today\n"
+    LRC_Z = "[00:10.00]The quick brown fox leaps over the lazy dog today\n"
+    LRC_WRONG = TestProviderConsensus.LRC_WRONG
+
+    def teardown_method(self):
+        fetch_songtext._wer_experiment = False
+
+    def test_wer_modus_erreicht_konsens_bei_aehnlichen_texten(self):
+        fetch_songtext._wer_experiment = True
+        paths = [_make_lrc(t) for t in (self.LRC_X, self.LRC_Y, self.LRC_Z)]
+        rep, score = _provider_consensus(paths)
+        assert rep is not None
+        assert score <= _WER_CONSENSUS_MAX_THRESHOLD  # WER: niedrig = gut
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+    def test_wer_modus_kein_konsens_bei_komplett_falschem_kandidat(self):
+        fetch_songtext._wer_experiment = True
+        paths = [_make_lrc(t) for t in (self.LRC_X, self.LRC_WRONG)]
+        rep, score = _provider_consensus(paths, min_providers=2)
+        assert rep is None
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+    def test_debug_scores_liefert_beide_metriken_unabhaengig_vom_aktiven_modus(self):
+        fetch_songtext._wer_experiment = True
+        paths = [_make_lrc(t) for t in (self.LRC_X, self.LRC_Y, self.LRC_Z)]
+        debug: dict = {}
+        _provider_consensus(paths, debug_scores=debug)
+        assert set(debug) == {"old_avg", "old_ok", "new_avg", "new_ok"}
+        assert debug["old_avg"] >= _CONSENSUS_MIN_JACCARD  # alte Metrik: hoch=gut
+        assert (
+            debug["new_avg"] <= _WER_CONSENSUS_MAX_THRESHOLD
+        )  # neue Metrik: niedrig=gut
         for p in paths:
             p.unlink(missing_ok=True)
 
@@ -921,192 +1103,6 @@ class TestIdfJaccard:
         assert passender_score >= _WHISPER_MIN_OVERLAP
 
 
-class TestLoadIdf:
-    def test_fehlende_datei_bricht_mit_klarer_meldung_ab(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        monkeypatch.setattr(
-            fetch_songtext, "_IDF_CACHE_PATH", tmp_path / "missing.json"
-        )
-        monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
-        with pytest.raises(SystemExit):
-            _load_idf()
-        out = capsys.readouterr().out
-        assert "--rebuild-idf" in out
-
-    def test_laedt_und_cached_module_level(self, tmp_path, monkeypatch):
-        cache_path = tmp_path / "idf.json"
-        expected = {"global": {"n_docs": 5, "df": {"a": 1}}, "languages": {}}
-        cache_path.write_text(json.dumps(expected), encoding="utf-8")
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", cache_path)
-        monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
-
-        assert _load_idf() == expected
-
-        # Datei danach ändern — zweiter Aufruf muss den module-level Cache
-        # zurückgeben, nicht neu von Platte lesen.
-        cache_path.write_text(
-            json.dumps({"global": {"n_docs": 999, "df": {}}, "languages": {}}),
-            encoding="utf-8",
-        )
-        assert _load_idf() == expected
-
-    def test_veraltetes_format_bricht_mit_klarer_meldung_ab(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        cache_path = tmp_path / "idf.json"
-        cache_path.write_text(json.dumps({"n_docs": 5, "df": {}}), encoding="utf-8")
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", cache_path)
-        monkeypatch.setattr(fetch_songtext, "_idf_cache", None)
-
-        with pytest.raises(SystemExit):
-            _load_idf()
-        out = capsys.readouterr().out
-        assert "--rebuild-idf" in out
-
-
-class TestBuildIdf:
-    def test_baut_dokumentfrequenz_ueber_lrc_dateien(self, tmp_path, monkeypatch):
-        out_path = tmp_path / "out.json"
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
-
-        lib = tmp_path / "lib"
-        (lib / "A").mkdir(parents=True)
-        (lib / "A" / "a.lrc").write_text("[00:01.00]hello world\n", encoding="utf-8")
-        (lib / "A" / "b.lrc").write_text("[00:01.00]hello there\n", encoding="utf-8")
-        # Leere LRC (kein Text) darf nicht als Dokument zählen
-        (lib / "A" / "empty.lrc").write_text("[00:01.00]\n", encoding="utf-8")
-
-        _build_idf(lib)
-
-        data = json.loads(out_path.read_text(encoding="utf-8"))
-        assert data["global"]["n_docs"] == 2
-        assert data["global"]["df"]["hello"] == 2
-        assert data["global"]["df"]["world"] == 1
-        assert data["global"]["df"]["there"] == 1
-        assert "" not in data["global"]["df"]
-
-    def test_sprach_teiltabelle_nur_ab_mindestgroesse(self, tmp_path, monkeypatch):
-        out_path = tmp_path / "out.json"
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
-        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
-
-        lib = tmp_path / "lib"
-        (lib / "A").mkdir(parents=True)
-        deutscher_text = (
-            "[00:01.00]Ich verstehe die Welt nicht mehr und suche einen Weg\n"
-            "[00:05.00]Ich verstehe die Welt nicht mehr und suche einen Weg\n"
-        )
-        englischer_text = (
-            "[00:01.00]I understand the world and search for a way to go home\n"
-        )
-        # Zwei deutsche Songs (>= gemocktem Minimum 2) -> eigene Tabelle.
-        (lib / "A" / "de1.lrc").write_text(deutscher_text, encoding="utf-8")
-        (lib / "A" / "de2.lrc").write_text(deutscher_text, encoding="utf-8")
-        # Nur ein englischer Song (< Minimum) -> kein eigener Eintrag, nur global.
-        (lib / "A" / "en1.lrc").write_text(englischer_text, encoding="utf-8")
-
-        _build_idf(lib)
-
-        data = json.loads(out_path.read_text(encoding="utf-8"))
-        assert "de" in data["languages"]
-        assert data["languages"]["de"]["n_docs"] == 2
-        assert "en" not in data["languages"]
-        # Englische Wörter sind trotzdem im globalen Fallback vorhanden.
-        assert "understand" in data["global"]["df"]
-
-    DEUTSCHE_TEXTE = [
-        "[00:01.00]Ich verstehe die Welt nicht mehr und suche einen Weg\n"
-        "[00:05.00]Die Zeit vergeht und ich warte auf ein Zeichen von dir\n",
-        "[00:01.00]Warum hast du mich damals einfach so verlassen\n"
-        "[00:05.00]Ich frage mich jeden Tag was wohl aus uns geworden waere\n",
-        "[00:01.00]Die Sonne scheint und ich denke an vergangene Tage\n"
-        "[00:05.00]Vielleicht wird alles wieder gut wenn ich nur warte\n",
-        "[00:01.00]Ich singe dieses Lied fuer dich in dunkler Nacht\n"
-        "[00:05.00]Und hoffe dass du irgendwo daran gedacht hast\n",
-    ]
-    ENGLISCHE_TEXTE = [
-        "[00:01.00]I understand the world and search for a way to go home\n",
-        "[00:01.00]Why did you leave me here alone in the dark tonight\n",
-        "[00:01.00]The sun is shining and I think about the good old days\n",
-        "[00:01.00]I sing this song for you deep into the quiet night\n",
-    ]
-
-    def test_wachstums_warnung_bei_starkem_sprachwachstum(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        out_path = tmp_path / "out.json"
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
-        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
-        # kalibriert bei 2 Docs -> Wachstumsfaktor 1.5 -> ab 3 Docs Warnung
-        monkeypatch.setattr(
-            fetch_songtext, "_WHISPER_MIN_OVERLAP_BY_LANG", {"de": (0.043, 2)}
-        )
-
-        lib = tmp_path / "lib"
-        (lib / "A").mkdir(parents=True)
-        for i, text in enumerate(self.DEUTSCHE_TEXTE):
-            (lib / "A" / f"de{i}.lrc").write_text(text, encoding="utf-8")
-
-        _build_idf(lib)
-        out = capsys.readouterr().out
-        assert "WARNUNG" in out
-        assert "de" in out
-
-    def test_kein_alarm_bei_leichtem_wachstum(self, tmp_path, monkeypatch, capsys):
-        out_path = tmp_path / "out.json"
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
-        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
-        # kalibriert bei 2 Docs, exakt 2 Docs vorhanden -> kein Wachstum
-        monkeypatch.setattr(
-            fetch_songtext, "_WHISPER_MIN_OVERLAP_BY_LANG", {"de": (0.043, 2)}
-        )
-
-        lib = tmp_path / "lib"
-        (lib / "A").mkdir(parents=True)
-        for i, text in enumerate(self.DEUTSCHE_TEXTE[:2]):
-            (lib / "A" / f"de{i}.lrc").write_text(text, encoding="utf-8")
-
-        _build_idf(lib)
-        out = capsys.readouterr().out
-        assert "WARNUNG" not in out
-
-    def test_hinweis_bei_unkalibrierter_sprache_mit_eigener_tabelle(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        out_path = tmp_path / "out.json"
-        monkeypatch.setattr(fetch_songtext, "_IDF_CACHE_PATH", out_path)
-        monkeypatch.setattr(fetch_songtext, "_IDF_MIN_LANG_DOCS", 2)
-        # keine Sprache kalibriert -> Englisch bekommt eigene Tabelle ohne Eintrag
-        monkeypatch.setattr(fetch_songtext, "_WHISPER_MIN_OVERLAP_BY_LANG", {})
-
-        lib = tmp_path / "lib"
-        (lib / "A").mkdir(parents=True)
-        for i, text in enumerate(self.ENGLISCHE_TEXTE):
-            (lib / "A" / f"en{i}.lrc").write_text(text, encoding="utf-8")
-
-        _build_idf(lib)
-        out = capsys.readouterr().out
-        assert "HINWEIS" in out
-        assert "en" in out
-
-
-class TestIdfTableFor:
-    IDF_DATA = {
-        "global": {"n_docs": 100, "df": {"the": 90}},
-        "languages": {"de": {"n_docs": 10, "df": {"und": 8}}},
-    }
-
-    def test_sprache_vorhanden_liefert_sprachtabelle(self):
-        assert _idf_table_for("de", self.IDF_DATA) == (10, {"und": 8})
-
-    def test_keine_sprache_liefert_global(self):
-        assert _idf_table_for(None, self.IDF_DATA) == (100, {"the": 90})
-
-    def test_sprache_nicht_in_tabelle_faellt_auf_global_zurueck(self):
-        assert _idf_table_for("fr", self.IDF_DATA) == (100, {"the": 90})
-
-
 class TestWhisperThresholdFor:
     def test_kalibrierte_sprache_liefert_eigene_schwelle(self):
         assert _whisper_threshold_for("de") == 0.043
@@ -1456,11 +1452,7 @@ class TestTranscriptCache:
         fetch_songtext._cache_ttl_days = 30
         fetch_songtext._cache_refresh = False
         monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
-        monkeypatch.setattr(
-            fetch_songtext,
-            "_load_idf",
-            lambda: {"global": {"n_docs": 1, "df": {}}, "languages": {}},
-        )
+        monkeypatch.setattr(fetch_songtext, "_contrastive_idf", (1, {}))
         monkeypatch.setattr(
             fetch_songtext, "_detect_lrc_language", lambda candidates: None
         )
@@ -1551,6 +1543,635 @@ class TestTranscriptCache:
         assert len(calls) == 1  # kein zweiter _transcribe-Aufruf für denselben Song
 
 
+class TestWerExperimentWhisperSafetyNet:
+    """--wer-experiment: kein gecachtes Transkript -> KEIN Live-Whisper-Lauf,
+    unabhängig von --cache-only (das seit v1.10.0 ebenfalls Whisper ohne
+    Transkript-Cache-Treffer verhindert, siehe
+    TestContrastiveExperimentWhisperSafetyNet)."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._wer_experiment = False
+
+    def test_kein_cache_treffer_kein_live_transcribe(self, tmp_path, monkeypatch):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._wer_experiment = True
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(fetch_songtext, "_contrastive_idf", (1, {}))
+        monkeypatch.setattr(
+            fetch_songtext, "_detect_lrc_language", lambda candidates: None
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail(
+                "Live-Whisper darf im WER-Experiment ohne Transkript-Cache-"
+                "Treffer nicht laufen"
+            )
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = tmp_path / "a.lrc"
+        lrc.write_text("[00:01.00]hello world\n", encoding="utf-8")
+
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="X", title="Y"
+        )
+        assert model == _WER_SKIP_NO_TRANSCRIPT
+        assert best_path is None
+        assert has_vocals is False
+
+    def test_cache_treffer_transkribiert_trotzdem_nicht_live(
+        self, tmp_path, monkeypatch
+    ):
+        """Gegenprobe: MIT Cache-Treffer läuft --wer-experiment normal weiter
+        (kein pauschales Live-Verbot, nur der Cache-Miss-Fall ist betroffen)."""
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._wer_experiment = True
+        cache_store.put_transcript(
+            conn, "the artist", "the title", "hello world foo bar", 0.1, -0.2
+        )
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(fetch_songtext, "_contrastive_idf", (1, {}))
+        monkeypatch.setattr(
+            fetch_songtext, "_detect_lrc_language", lambda candidates: None
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("_transcribe darf bei Song-Cache-Treffer nicht laufen")
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = tmp_path / "a.lrc"
+        lrc.write_text("[00:01.00]hello world foo bar\n", encoding="utf-8")
+
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="The Artist", title="The Title"
+        )
+        assert model == fetch_songtext._WHISPER_MODEL
+        assert best_path == lrc
+        assert score == 0.0  # WER 0.0 = perfektes Match (Transkript == LRC-Wörter)
+
+
+class TestFetchLrcWerSkip:
+    """fetch_lrc()-Integrationstest: das WER-Experiment-Sicherheitsnetz aus
+    _whisper_best (model_used == _WER_SKIP_NO_TRANSCRIPT) muss found=False mit
+    extras["wer_skip"]=True liefern und darf KEINEN Zieltext schreiben."""
+
+    LRC_A = TestProviderConsensus.LRC_A
+    LRC_B = TestProviderConsensus.LRC_B
+
+    def teardown_method(self):
+        fetch_songtext._wer_experiment = False
+
+    def test_wer_skip_liefert_found_false_ohne_geschriebene_datei(
+        self, tmp_path, monkeypatch
+    ):
+        fetch_songtext._wer_experiment = True
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.LRC_A, "genius": self.LRC_B}),
+        )
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_whisper_best",
+            lambda *a, **k: (None, 0.0, False, 0, _WER_SKIP_NO_TRANSCRIPT, None),
+        )
+
+        flac_path = tmp_path / "dummy.flac"
+        flac_path.write_bytes(b"")  # nur .exists() zählt
+        dest = tmp_path / "dest.lrc"
+
+        found, info, extras = fetch_lrc("query", dest, env={}, flac_path=flac_path)
+        assert found is False
+        assert extras.get("wer_skip") is True
+        assert extras.get("reason") == "wer-kein-cache-transkript"
+        assert not dest.exists()
+
+
+class TestLogWerExperiment:
+    """_log_wer_experiment() schreibt die Vergleichszeilen für die spätere
+    alt-vs-WER-Auswertung (CSV, Header nur einmal)."""
+
+    def test_schreibt_header_und_zeile(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "wer_experiment_log.csv"
+        monkeypatch.setattr(fetch_songtext, "_WER_EXPERIMENT_LOG_PATH", log_path)
+        _log_wer_experiment("The Artist", "The Title", "konsens", 0.5, True, 0.1, True)
+        rows = log_path.read_text(encoding="utf-8").splitlines()
+        assert rows[0] == (
+            "artist,title,vergleichstyp,old_score,old_decision,new_score,"
+            "new_decision,uebereinstimmung"
+        )
+        assert rows[1] == "The Artist,The Title,konsens,0.5,True,0.1,True,True"
+
+    def test_haengt_weitere_zeilen_an_statt_zu_ueberschreiben(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "wer_experiment_log.csv"
+        monkeypatch.setattr(fetch_songtext, "_WER_EXPERIMENT_LOG_PATH", log_path)
+        _log_wer_experiment("A", "B", "konsens", 0.1, True, 0.2, False)
+        _log_wer_experiment("C", "D", "whisper", 0.3, False, 0.4, False)
+        rows = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(rows) == 3  # Header + 2 Zeilen
+        assert rows[2] == "C,D,whisper,0.3,False,0.4,False,True"
+
+
+class TestGlobalCacheIdf:
+    """_global_cache_idf() baut df/n_docs aus ALLEN texte.inhalt der Cache-DB
+    -- ein Zählschritt pro Text (Dokumentfrequenz), Tokenisierung wie
+    _extract_lrc_words. Kein Sprach-Split -- keine Datei-basierte Tabelle."""
+
+    def test_zaehlt_jeden_text_einmal(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store.put_provider(
+            conn,
+            "lrclib",
+            "artist a",
+            "title a",
+            "treffer",
+            "[00:01.00]hello world\n[00:02.00]foo bar\n",
+        )
+        cache_store.put_provider(
+            conn,
+            "genius",
+            "artist b",
+            "title b",
+            "treffer",
+            "[00:01.00]hello there\n",
+        )
+        n_docs, df = _global_cache_idf(conn)
+        assert n_docs == 2
+        assert df["hello"] == 2
+        assert df["world"] == 1
+        assert df["there"] == 1
+
+    def test_identischer_inhalt_wird_ueber_fingerabdruck_dedupliziert(self, tmp_path):
+        """Zwei Provider mit identischem Content landen (via Fingerabdruck) nur
+        einmal in `texte` -- die IDF zählt ihn dann auch nur einmal."""
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        content = "[00:01.00]hello world\n"
+        cache_store.put_provider(conn, "lrclib", "a", "b", "treffer", content)
+        cache_store.put_provider(conn, "genius", "a", "b", "treffer", content)
+        n_docs, df = _global_cache_idf(conn)
+        assert n_docs == 1
+        assert df["hello"] == 1
+
+    def test_leere_cache_db_liefert_leere_tabelle(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        n_docs, df = _global_cache_idf(conn)
+        assert n_docs == 0
+        assert df == {}
+
+    def test_fehlschlaege_ohne_content_zaehlen_nicht(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store.put_provider(
+            conn, "lrclib", "a", "b", "fehlschlag", None, fehlergrund="timeout"
+        )
+        n_docs, df = _global_cache_idf(conn)
+        assert n_docs == 0
+
+
+class TestContrastiveMarginAndDecision:
+    """_contrastive_margin_and_decision(): Marge = best_score - bester Score
+    von K zufälligen ANDEREN Songs gleicher Sprache aus dem Cache
+    (Hintergrund). Mit leerem df-Dict entspricht _idf_jaccard exakt dem
+    unweighted Jaccard (alle Wörter bekommen dieselbe IDF) -- macht die
+    erwarteten Werte hier exakt berechenbar."""
+
+    def teardown_method(self):
+        fetch_songtext._contrastive_lang_pools = None
+        fetch_songtext._contrastive_song_texts = None
+        fetch_songtext._contrastive_song_words_cache = {}
+
+    def test_marge_ist_best_score_minus_bester_hintergrund_score(self):
+        # 5 Hintergrund-Songs (>= _CONTRASTIVE_MIN_BACKGROUND) gleicher Sprache.
+        fetch_songtext._contrastive_song_texts = {
+            201: ["aaa bbb ccc"],  # kein Overlap -> Jaccard 0
+            202: ["hello world baz qux"],  # {hello,world} / 6 -> 0.333...
+            203: ["zzz"],  # kein Overlap -> 0
+            204: ["foo bar mmm nnn"],  # {foo,bar} / 6 -> 0.333...
+            205: ["hello world foo bar"],  # exakt -> Jaccard 1.0 (Maximum)
+        }
+        fetch_songtext._contrastive_lang_pools = {"en": [201, 202, 203, 204, 205]}
+
+        bg_max, margin, fallback = _contrastive_margin_and_decision(
+            ["hello", "world", "foo", "bar"],
+            0.9,
+            "en",
+            999,  # exclude_song_id -- nicht im Pool, ändert nichts
+            n_docs=5,
+            df={},
+        )
+        assert fallback is False
+        assert bg_max == pytest.approx(1.0)
+        assert margin == pytest.approx(0.9 - 1.0)
+
+    def test_andere_sprache_ohne_pool_liefert_fallback(self):
+        fetch_songtext._contrastive_lang_pools = {"en": [1, 2, 3, 4, 5, 6]}
+        bg_max, margin, fallback = _contrastive_margin_and_decision(
+            ["a"], 0.5, "de", None, n_docs=5, df={}
+        )
+        assert fallback is True
+        assert bg_max is None
+        assert margin is None
+
+    def test_lang_none_liefert_fallback(self):
+        fetch_songtext._contrastive_lang_pools = {"en": [1, 2, 3, 4, 5, 6]}
+        bg_max, margin, fallback = _contrastive_margin_and_decision(
+            ["a"], 0.5, None, None, n_docs=5, df={}
+        )
+        assert fallback is True
+
+    def test_pool_kleiner_als_min_background_liefert_fallback(self):
+        pool = list(range(1, _CONTRASTIVE_MIN_BACKGROUND))  # genau eins zu wenig
+        assert len(pool) < _CONTRASTIVE_MIN_BACKGROUND
+        fetch_songtext._contrastive_lang_pools = {"en": pool}
+        _, _, fallback = _contrastive_margin_and_decision(
+            ["a"], 0.5, "en", None, n_docs=5, df={}
+        )
+        assert fallback is True
+
+    def test_exclude_song_id_verkleinert_pool_bis_zum_fallback(self):
+        pool = list(range(1, _CONTRASTIVE_MIN_BACKGROUND + 1))  # genau ausreichend
+        fetch_songtext._contrastive_song_texts = {i: ["x y z"] for i in pool}
+        fetch_songtext._contrastive_lang_pools = {"en": pool}
+
+        _, _, fallback_full = _contrastive_margin_and_decision(
+            ["x"], 0.5, "en", None, n_docs=5, df={}
+        )
+        assert fallback_full is False
+
+        _, _, fallback_excluded = _contrastive_margin_and_decision(
+            ["x"], 0.5, "en", pool[0], n_docs=5, df={}
+        )
+        assert fallback_excluded is True
+
+    def test_reproduzierbar_bei_gleichem_song_ueber_mehrere_aufrufe(self):
+        """Fester Seed pro Song (Sprache + song_id) -- zwei Aufrufe mit
+        identischen Argumenten müssen dieselbe Hintergrund-Ziehung/Marge
+        liefern (grosser Pool, K < Pool-Größe -- die Ziehung ist also
+        tatsächlich zufällig, nicht einfach 'alle')."""
+        pool = list(range(1, 101))
+        fetch_songtext._contrastive_song_texts = {
+            i: [f"word{i} common shared"] for i in pool
+        }
+        fetch_songtext._contrastive_lang_pools = {"en": pool}
+
+        r1 = _contrastive_margin_and_decision(
+            ["common", "shared", "unique"], 0.5, "en", 42, n_docs=5, df={}
+        )
+        fetch_songtext._contrastive_song_words_cache = {}  # Memo-Cache zurücksetzen
+        r2 = _contrastive_margin_and_decision(
+            ["common", "shared", "unique"], 0.5, "en", 42, n_docs=5, df={}
+        )
+        assert r1 == r2
+
+
+class TestSongCandidateWords:
+    """_song_candidate_words() tokenisiert die Kandidatentexte eines
+    Cache-Songs und memoisiert das Ergebnis (siehe _build_contrastive_context)."""
+
+    def teardown_method(self):
+        fetch_songtext._contrastive_song_texts = None
+        fetch_songtext._contrastive_song_words_cache = {}
+
+    def test_tokenisiert_alle_kandidatentexte_eines_songs(self):
+        fetch_songtext._contrastive_song_texts = {
+            7: ["[00:01.00]hello world\n", "[00:02.00]foo bar\n"]
+        }
+        words = _song_candidate_words(7)
+        assert words == [["hello", "world"], ["foo", "bar"]]
+
+    def test_unbekannte_song_id_liefert_leere_liste(self):
+        fetch_songtext._contrastive_song_texts = {}
+        assert _song_candidate_words(999) == []
+
+    def test_memoisiert_ergebnis(self):
+        fetch_songtext._contrastive_song_texts = {7: ["hello world"]}
+        first = _song_candidate_words(7)
+        fetch_songtext._contrastive_song_texts = {7: ["completely different"]}
+        second = _song_candidate_words(7)
+        assert first == second  # aus dem Memo-Cache, nicht neu tokenisiert
+
+
+class TestBuildContrastiveContext:
+    """_build_contrastive_context(): baut einmal pro Lauf die globale
+    Cache-IDF + song_id -> Sprache-Map aus einer echten Cache-DB."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._contrastive_idf = None
+        fetch_songtext._contrastive_lang_pools = None
+        fetch_songtext._contrastive_song_texts = None
+        fetch_songtext._contrastive_song_words_cache = {}
+
+    def test_baut_idf_und_sprach_pools_aus_cache_db(self, tmp_path, monkeypatch):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        # 6 englische Songs (genug für einen Pool >= _CONTRASTIVE_MIN_BACKGROUND),
+        # je EIGENER Inhalt (sonst dedupliziert texte.inhalt über den
+        # Fingerabdruck auf eine einzige Zeile -- gewollt für echte Duplikate,
+        # hier aber ein Testartefakt, das umgangen werden muss).
+        for i in range(6):
+            cache_store.put_provider(
+                conn,
+                "lrclib",
+                f"artist {i}",
+                f"title {i}",
+                "treffer",
+                f"[00:01.00]this is definitely an english song number {i} about "
+                "nothing important at all today\n",
+            )
+        fetch_songtext._cache_conn = conn
+
+        _build_contrastive_context()
+
+        n_docs, df = fetch_songtext._contrastive_idf
+        assert n_docs == 6
+        assert df["english"] == 6
+        assert "en" in fetch_songtext._contrastive_lang_pools
+        assert len(fetch_songtext._contrastive_lang_pools["en"]) == 6
+        assert len(fetch_songtext._contrastive_song_texts) == 6
+
+    def test_ohne_cache_conn_bricht_mit_fehlermeldung_ab(self, capsys):
+        fetch_songtext._cache_conn = None
+        with pytest.raises(SystemExit):
+            _build_contrastive_context()
+        out = capsys.readouterr().out
+        assert "Cache-DB" in out
+        assert "--no-cache" in out
+
+
+class TestWhisperRerunNeeded:
+    """_whisper_rerun_needed(): steuert main()s Ordner-Cache-Skip -- nur noch
+    für --no-whisper (frühere Whisper-Ablehnungen neu prüfen). Der frühere
+    erzwungene Rerun JEDES Whisper-verarbeiteten Songs (an
+    --contrastive-experiment gekoppelt) war eine einmalige Migrationsmaßnahme
+    für die Umstellungsphase und ist mit dem Flag entfallen (siehe Docstring
+    der Funktion)."""
+
+    def test_kein_flag_kein_rerun(self):
+        entry = {"r": "ok", "method": "whisper-small"}
+        assert _whisper_rerun_needed(entry, False) is False
+
+    def test_no_whisper_reject_rerun_unveraendert(self):
+        entry = {"r": "nf", "reason": "kein-vokal", "method": "whisper-small"}
+        assert _whisper_rerun_needed(entry, True) is True
+        entry2 = {"r": "nf", "reason": "sonstiges", "method": "whisper-small"}
+        assert _whisper_rerun_needed(entry2, True) is False
+
+
+class TestLogContrastiveExperiment:
+    """_log_contrastive_experiment() schreibt die Vergleichszeilen für die
+    spätere Auswertung alte-absolute-Schwelle-vs-kontrastive-Marge."""
+
+    def test_schreibt_header_und_zeile(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "contrastive_experiment_log.csv"
+        monkeypatch.setattr(
+            fetch_songtext, "_CONTRASTIVE_EXPERIMENT_LOG_PATH", log_path
+        )
+        _log_contrastive_experiment(
+            "The Artist", "The Title", "en", 0.5, True, 0.5, 0.2, 0.3, True, False
+        )
+        rows = log_path.read_text(encoding="utf-8").splitlines()
+        assert rows[0] == (
+            "artist,title,sprache,alter_score,alte_entscheidung,best_score,"
+            "max_hintergrund,marge,neue_entscheidung,uebereinstimmung,"
+            "fallback_absolute_schwelle"
+        )
+        assert rows[1] == (
+            "The Artist,The Title,en,0.5,True,0.5,0.2,0.3,True,True,False"
+        )
+
+    def test_haengt_weitere_zeilen_an_statt_zu_ueberschreiben(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "contrastive_experiment_log.csv"
+        monkeypatch.setattr(
+            fetch_songtext, "_CONTRASTIVE_EXPERIMENT_LOG_PATH", log_path
+        )
+        _log_contrastive_experiment(
+            "A", "B", "en", 0.1, True, 0.1, 0.05, 0.05, True, False
+        )
+        _log_contrastive_experiment(
+            "C", "D", "de", 0.3, False, 0.3, 0.4, -0.1, False, True
+        )
+        rows = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(rows) == 3  # Header + 2 Zeilen
+        assert rows[2] == "C,D,de,0.3,False,0.3,0.4,-0.1,False,True,True"
+
+
+class TestWhisperBestContrastiveExperiment:
+    """_whisper_best() nutzt die globale Cache-IDF statt einer Datei-basierten
+    Tabelle, berechnet die kontrastive Marge und füllt debug_scores
+    entsprechend."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._contrastive_idf = None
+        fetch_songtext._contrastive_lang_pools = None
+        fetch_songtext._contrastive_song_texts = None
+        fetch_songtext._contrastive_song_words_cache = {}
+
+    def _prep(self, monkeypatch, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(
+            fetch_songtext, "_detect_lrc_language", lambda candidates: "en"
+        )
+        return conn
+
+    def test_nutzt_globale_cache_idf_statt_datei_idf(self, tmp_path, monkeypatch):
+        conn = self._prep(monkeypatch, tmp_path)
+        # 5 Hintergrund-Songs gleicher Sprache im Pool, ausreichend für die
+        # Marge. IDs bewusst weit weg von 1 -- put_transcript() unten legt den
+        # aktuellen Song als song_id=1 in derselben (frischen) DB an, eine
+        # Kollision mit dem Pool würde ihn dort faelschlich ausschliessen.
+        fetch_songtext._contrastive_idf = (10, {})  # leeres df -> Jaccard unweighted
+        fetch_songtext._contrastive_lang_pools = {"en": list(range(101, 106))}
+        fetch_songtext._contrastive_song_texts = {
+            i: ["completely unrelated background text here"] for i in range(101, 106)
+        }
+        cache_store.put_transcript(
+            conn, "the artist", "the title", "hello world foo bar", 0.1, -0.2
+        )
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = tmp_path / "a.lrc"
+        lrc.write_text("[00:01.00]hello world foo bar\n", encoding="utf-8")
+
+        debug: dict = {}
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="The Artist", title="The Title", debug_scores=debug
+        )
+        assert best_path == lrc
+        assert model == fetch_songtext._WHISPER_MODEL
+        assert debug["contrastive_best_score"] == score
+        assert debug["contrastive_bg_max"] == pytest.approx(0.0)  # kein Overlap
+        assert debug["contrastive_margin"] == pytest.approx(score)
+        assert debug["contrastive_fallback"] is False
+        assert debug["contrastive_ok"] is True  # Marge >= _CONTRASTIVE_MARGIN
+
+    def test_zu_kleiner_pool_setzt_fallback_in_debug_scores(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._prep(monkeypatch, tmp_path)
+        fetch_songtext._contrastive_idf = (10, {})
+        fetch_songtext._contrastive_lang_pools = {"en": [101, 102]}  # zu klein
+        fetch_songtext._contrastive_song_texts = {101: ["x"], 102: ["y"]}
+        cache_store.put_transcript(
+            conn, "the artist", "the title", "hello world foo bar", 0.1, -0.2
+        )
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = tmp_path / "a.lrc"
+        lrc.write_text("[00:01.00]hello world foo bar\n", encoding="utf-8")
+
+        debug: dict = {}
+        fetch_songtext._whisper_best(
+            flac, [lrc], artist="The Artist", title="The Title", debug_scores=debug
+        )
+        assert debug["contrastive_fallback"] is True
+        assert debug["contrastive_bg_max"] is None
+        assert debug["contrastive_margin"] is None
+
+
+class TestContrastiveExperimentWhisperSafetyNet:
+    """Kontrastive Marge: kein gecachtes Transkript -> KEIN Live-Whisper-Lauf,
+    aber NUR unter --cache-only (analog TestWerExperimentWhisperSafetyNet,
+    dort an --wer-experiment gekoppelt). Ausserhalb von --cache-only muss ein
+    Cache-Miss weiterhin live transkribieren (siehe TestTranscriptCache) --
+    sonst koennte kein neuer Song je zum ersten Mal verifiziert werden."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+        fetch_songtext._contrastive_idf = None
+
+    def test_cache_only_kein_cache_treffer_kein_live_transcribe(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = True
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(
+            fetch_songtext, "_detect_lrc_language", lambda candidates: None
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail(
+                "Live-Whisper darf unter --cache-only ohne "
+                "Transkript-Cache-Treffer nicht laufen"
+            )
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fail_if_called)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = tmp_path / "a.lrc"
+        lrc.write_text("[00:01.00]hello world\n", encoding="utf-8")
+
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="X", title="Y"
+        )
+        assert model == _CONTRASTIVE_SKIP_NO_TRANSCRIPT
+        assert best_path is None
+        assert has_vocals is False
+
+    def test_ohne_cache_only_transkribiert_neuen_song_trotzdem_live(
+        self, tmp_path, monkeypatch
+    ):
+        """Gegenprobe: OHNE --cache-only muss ein Cache-Miss weiterhin live
+        transkribieren -- die kontrastive Marge darf neue Songs nicht
+        pauschal blockieren."""
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+        fetch_songtext._contrastive_idf = (1, {})
+        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(
+            fetch_songtext, "_detect_lrc_language", lambda candidates: None
+        )
+
+        def _fake_transcribe(path, start, ctx, model, language=None):
+            return ["hello", "world"], 0.05, -0.3
+
+        monkeypatch.setattr(fetch_songtext, "_transcribe", _fake_transcribe)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = tmp_path / "a.lrc"
+        lrc.write_text("[00:01.00]hello world\n", encoding="utf-8")
+
+        best_path, score, has_vocals, words, model, lang = fetch_songtext._whisper_best(
+            flac, [lrc], artist="X", title="Y"
+        )
+        assert model != _CONTRASTIVE_SKIP_NO_TRANSCRIPT
+        assert best_path == lrc
+
+
+class TestFetchLrcContrastiveSkip:
+    """fetch_lrc()-Integrationstest: das Sicherheitsnetz aus _whisper_best
+    (model_used == _CONTRASTIVE_SKIP_NO_TRANSCRIPT) muss found=False mit
+    extras["contrastive_skip"]=True liefern und darf KEINEN Zieltext schreiben."""
+
+    LRC_A = TestProviderConsensus.LRC_A
+    LRC_B = TestProviderConsensus.LRC_B
+
+    def test_contrastive_skip_liefert_found_false_ohne_geschriebene_datei(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_query_provider",
+            _fake_query_provider({"lrclib": self.LRC_A, "genius": self.LRC_B}),
+        )
+        monkeypatch.setattr(
+            fetch_songtext,
+            "_whisper_best",
+            lambda *a, **k: (
+                None,
+                0.0,
+                False,
+                0,
+                _CONTRASTIVE_SKIP_NO_TRANSCRIPT,
+                None,
+            ),
+        )
+
+        flac_path = tmp_path / "dummy.flac"
+        flac_path.write_bytes(b"")  # nur .exists() zählt
+        dest = tmp_path / "dest.lrc"
+
+        found, info, extras = fetch_lrc("query", dest, env={}, flac_path=flac_path)
+        assert found is False
+        assert extras.get("contrastive_skip") is True
+        assert extras.get("reason") == "contrastive-kein-cache-transkript"
+        assert not dest.exists()
+
+
 class TestCacheCliFlags:
     def test_help_lists_cache_flags(self):
         out = subprocess.run(
@@ -1563,6 +2184,64 @@ class TestCacheCliFlags:
         assert "--refresh-cache" in out
         assert "--cache-ttl" in out
         assert "--cache-only" in out
+
+    def test_help_lists_wer_experiment_flag(self):
+        out = subprocess.run(
+            ["python3", "fetch_songtext.py", "--help"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "--wer-experiment" in out
+
+    def test_help_hat_keine_experiment_flags_fuer_kontrastive_marge_und_idf(self):
+        # --contrastive-experiment und --rebuild-idf sind entfernt -- die
+        # kontrastive Marge ist seit v1.10.0 Standardverhalten ohne Flag.
+        out = subprocess.run(
+            ["python3", "fetch_songtext.py", "--help"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "--contrastive-experiment" not in out
+        assert "--rebuild-idf" not in out
+
+    def test_no_cache_ohne_no_whisper_oder_fast_schliesst_sich_aus(self):
+        # Die Whisper-Verifikation (kontrastive Marge) braucht immer eine
+        # offene Cache-DB als Hintergrund-Pool -- --no-cache ist nur noch mit
+        # --no-whisper oder --fast kombinierbar.
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--no-cache", "x"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--no-cache" in result.stderr
+
+    def test_no_cache_mit_no_whisper_ist_erlaubt(self, tmp_path):
+        result = subprocess.run(
+            [
+                "python3",
+                "fetch_songtext.py",
+                "--no-cache",
+                "--no-whisper",
+                str(tmp_path),
+            ],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+
+    def test_no_cache_mit_fast_ist_erlaubt(self, tmp_path):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--no-cache", "--fast", str(tmp_path)],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
 
     def test_cache_only_und_no_cache_schliessen_sich_aus(self):
         result = subprocess.run(

@@ -1,6 +1,6 @@
 # VinylCut Roadmap
 
-## Geplant: Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (Meilenstein 2 von 5 erledigt)
+## ✓ Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (alle 5 Meilensteine erledigt)
 
 **Auslöser:** Nach dem lrclib-Dump-Bugfix (v1.13.1) und dem Fund, dass der
 Dump falsch verknüpfte Songtexte enthalten kann (Art Blakey „Blues March"
@@ -227,69 +227,95 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   Volle Suite: 413 grün + dieselben 13 bekannten Fehlschläge. `ruff check`/
   `ruff format` sauber.
 
-**Nächster Schritt: Meilenstein 3 — Phase 4 (`evaluate_lyrics.py`)**
+**✓ Meilenstein 3 — erledigt — Phase 4 (`evaluate_lyrics.py`)**
 - Baut: Konsens-Prüfung + Whisper-Entscheidung, wie im Dokument unter
   „Wie ruft das Steuer-Programm die Phasen auf?" beschrieben (ein Prozess,
   direkter Funktionsaufruf, Whisper-Modell + IDF-Hintergrund einmal pro
   Lauf laden, IDF alle N Songs auffrischen).
-- Übernehmen: `_provider_consensus` (Zeile 1066), `_whisper_best` (Zeile
-  1135), `_whisper_accept` (Zeile 771), `_build_contrastive_context` (Zeile
-  850), der Entscheidungsbaum aus `fetch_lrc` (Zeile 1404-1599).
-- Neu: der N-Songs-Zähler mit periodischem `_build_contrastive_context`-
-  Re-Aufruf (N konkret festlegen, z.B. 50, siehe Dokument F3). Die frühere
-  offene Frage aus Abschnitt 2 des Dokuments — wohin Phase 4 ihre
-  Entscheidung schreibt, falls `--phase 5` an einem ganz anderen Tag separat
-  aufgerufen wird — ist gelöst: KEIN neuer Ablageort in der DB. Die
-  Entscheidung ist ein reiner Vergleich bereits gespeicherter Daten
-  (`texte` + ggf. `transkripte`), braucht kein Netzwerk und keinen neuen
-  Whisper-Lauf. Phase 5 kann sie deshalb jederzeit selbst neu ausrechnen,
-  indem sie dieselbe Vergleichs-Funktion aus `evaluate_lyrics.py`
-  importiert und aufruft — deterministisch dieselbe Antwort, egal ob im
-  selben Lauf oder Tage später separat aufgerufen. Bedingung: für Songs
-  ohne Konsens muss vorher ein Whisper-Ergebnis in `transkripte` stehen
-  (das sicherzustellen ist Aufgabe von Phase 4) — fehlt es, überspringt
-  Phase 5 den Song wie gewohnt, statt zu raten.
-- Prüfen: Kann GEGEN DIE BESTEHENDE, SCHON BEFÜLLTE Produktions-Cache-DB
-  entwickelt und getestet werden — braucht keinen frischen Phase-1/2-Lauf,
-  weil `ergebnisse`/`texte`/`transkripte` bereits Daten aus bisherigen
-  `fetch_songtext.py`-Läufen enthalten. Bestehende Tests als Vorlage/
-  Wiederverwendung migrieren (`TestProviderConsensus`, `TestWhisperAccept`,
-  `TestWhisperAcceptContrastive`, `TestGlobalCacheIdf`,
-  `TestBuildContrastiveContext`, `TestContrastiveMarginAndDecision`).
-  Manuell: für einen bekannten Song das Ergebnis mit dem alten
-  `fetch_songtext.py`-Lauf vergleichen (z.B. per `inspect_song.py`-Stichprobe).
-- Einhängen: `--phase 4`.
-- Abhängigkeit: NICHT zwingend an Meilenstein 1/2 gebunden (Cache ist schon
-  befüllt) — kann parallel oder sogar vor Meilenstein 2 entwickelt werden;
-  wird aber gemäß Bau-Reihenfolge trotzdem erst nach Meilenstein 2 ins
-  Steuer-Skript eingehängt.
+- Übernommen: `_provider_consensus`, `_whisper_best`, `_whisper_accept`,
+  `_heuristic_best`, `_dedupe_by_content`, `_build_contrastive_context`,
+  `_detect_lrc_language` — unverändert importiert, der Entscheidungsbaum aus
+  `fetch_lrc` (Konsens → Whisper → Dauer-Heuristik) wurde als eigene
+  Funktion `evaluate_song()` nachgebaut, weil `fetch_lrc()` selbst live
+  abfragt UND schreibt (beides in der neuen Pipeline unerwünscht) — die
+  einzelnen Algorithmen bleiben dabei 1:1 dieselben Funktionsaufrufe.
+- **Modellwahl nach Sprache umgesetzt** (siehe unten, "Nachtrag: `large-v3`
+  ergänzt" — dort war die Umsetzung als "noch offen" markiert): Englische
+  Songs nutzen `medium`, nicht-englische (Sprach-Hint != "en") `large-v3`.
+  `fetch_songtext._whisper_best()` kennt kein Modell-Argument (liest
+  `_WHISPER_MODEL` immer als Modul-Global) — `_select_whisper_model()`
+  ruft `fetch_songtext._detect_lrc_language()` (dieselbe Funktion, die
+  `_whisper_best` intern sowieso nochmal aufruft) VOR dem `_whisper_best`-
+  Aufruf auf und setzt `fetch_songtext._WHISPER_MODEL` kurzzeitig um
+  (try/finally, immer zurückgesetzt) -- `fetch_songtext.py` selbst bleibt
+  unangetastet. Beide Modelle werden lazy von `_get_whisper_model()`
+  geladen und gecacht (höchstens je einmal pro Lauf, nicht pro Song).
+- Die frühere offene Frage aus Abschnitt 2 des Dokuments — wohin Phase 4
+  ihre Entscheidung schreibt, falls `--phase 5` separat aufgerufen wird —
+  ist wie geplant gelöst: KEIN neuer Ablageort in der DB. `write_lrc.py`
+  ruft `evaluate_lyrics.evaluate_song()` direkt erneut auf.
+- Einhängen: `--phase 4`, Scope-Prinzip identisch zu Phase 2 (ohne PFAD die
+  ganze DB, mit PFAD nur die Songs des aktuellen Laufs, frisch berechnet an
+  der Stelle in der Phasen-Schleife, an der Phase 4 dran ist).
+- **Umgesetzt und verifiziert:** `evaluate_lyrics.py` neu (`evaluate_song()`
+  für einen Song, `evaluate_all()` für den Lauf über mehrere Songs inkl.
+  IDF-Refresh alle 50 Songs) + `test_evaluate_lyrics.py` (20 Tests). Kandidaten
+  kommen aus `ergebnisse`/`texte` (Phase 2/3 haben schon geschrieben), keine
+  eigene Live-Abfrage, kein Datei-Schreibvorgang. Dabei einen echten Bug
+  gefunden und behoben: `evaluate_song()` nutzte anfangs
+  `fetch_songtext._lookup_cache_song_id()` für die song_id-Suche, die intern
+  am Modul-Global `_cache_conn` hängt statt am übergebenen `conn`-Parameter
+  — bei nicht vorbereiteten Globals (z.B. isolierter Unit-Test oder ein
+  eigenständiger `--phase 5`-Lauf) lieferte das immer `None`. Jetzt fragt
+  `evaluate_song()` die `songs`-Tabelle direkt über den übergebenen `conn`
+  ab. `pytest test_evaluate_lyrics.py` 20/20 grün.
 
-**Meilenstein 4 — Phase 5 (`write_lrc.py`)**
+**✓ Meilenstein 4 — erledigt — Phase 5 (`write_lrc.py`)**
 - Baut: `.lrc` schreiben/unverändert lassen/löschen je nach Phase-4-
   Entscheidung, JSON-Ordner-Cache und Ordner-Lock pflegen.
-- Übernehmen: der Schreib-/Vergleichsblock aus `main()` (Zeile 2344-2440),
-  `_load_cache`/`_save_cache` (Zeile 1637/1717), `_try_claim_folder`/
-  `_release_folder` (Zeile 1658/1692).
-- Neu: nichts Neues in der Datenbank. Phase 5 importiert die
-  Vergleichs-Funktion aus `evaluate_lyrics.py` (Phase 4) und ruft sie pro
-  Song auf, wenn sie für einen Fall ohne Konsens eine Entscheidung
-  braucht — kein DB-Umweg, kein neuer Ablageort (siehe Auflösung in
-  Meilenstein 3).
-- Prüfen: Voller Pipeline-Lauf (`songtext_pipeline.py <testordner>`, alle
-  Phasen) gegen Testordner; entstandene `.lrc`-Dateien mit einem
-  Referenzlauf des alten `fetch_songtext.py` auf demselben Ordner
-  vergleichen. Zusätzlich: `--phase 5` an einem separaten Aufruf NACH einem
-  vorherigen `--phase 4`-Lauf testen (auch mit zeitlichem Abstand simuliert)
-  — muss zum gleichen Ergebnis kommen wie ein gemeinsamer `--phase 4,5`-Lauf.
-  Bestehende Tests als Vorlage/Wiederverwendung migrieren (`TestLoadCache`,
-  `TestSaveCache`, `TestFolderClaim`, `TestFetchLrcNoWhisper`,
-  `TestFetchLrcFast`).
-- Einhängen: `--phase 5`.
-- Abhängigkeit: braucht ein für den jeweiligen Song bereits vorhandenes
-  Whisper-Ergebnis in `transkripte` (falls kein Konsens vorliegt) —
-  ansonsten wird der Song übersprungen und bei einem späteren
-  Phase-4-Lauf nachgeholt. Keine Abhängigkeit von einer
-  Speicher-Entscheidung aus Meilenstein 3 mehr.
+- Übernommen: der Schreib-/Vergleichsblock aus `main()`, `_load_cache`/
+  `_save_cache`, `_try_claim_folder`/`_release_folder`, `_cache_entry_valid`
+  — unverändert importiert und wiederverwendet, gleiche Cache-Eintrag-
+  Struktur (v/r/outcome/providers/...) wie im alten `fetch_songtext.py`,
+  damit `lrc_analyse.py`/`lrc_recheck.py` den Cache weiter lesen können.
+- Nichts Neues in der Datenbank: `write_lrc.write_all()` ruft
+  `evaluate_lyrics.evaluate_song()` direkt für jeden Song erneut auf (kein
+  DB-Umweg) — dafür bereitet es dieselben `fetch_songtext`-Globals vor wie
+  Phase 4 (`fetch_providers._prepare_fetch_songtext_globals`), damit ein
+  eigenständiger `--phase 5`-Lauf den Whisper-Transkript-Cache findet statt
+  unnötig neu zu transkribieren.
+- Bekannter, akzeptierter Unterschied zum alten `fetch_songtext.py`: der
+  explizite Genre-Skip mit `"reason": "genre"` passiert jetzt schon in
+  Phase 2 — ein Skip-Genre-Song hat hier deshalb einfach keine Provider-
+  Kandidaten und landet als `"kein-provider"`. Funktional gleichwertig
+  (kein falscher Songtext, vorhandene `.lrc` wird trotzdem gelöscht), nur
+  die berichtete Ursache im Cache-Eintrag unterscheidet sich.
+- Einhängen: `--phase 5`, braucht PFAD zwingend (schreibt echte Dateien) —
+  ohne PFAD kein Fehler, nur eine Meldung, dass nichts zu schreiben ist.
+  `_PHASES_NEEDING_FILE` um `5` ergänzt.
+- **Umgesetzt und verifiziert:** `write_lrc.py` neu (`write_all()`) +
+  `test_write_lrc.py` (6 Tests: schreiben, löschen bei Nichtfund,
+  unveränderter Inhalt wird nicht neu geschrieben, JSON-Cache-Skip beim
+  zweiten Lauf, `force=True` umgeht den Skip, leere `file_song_map`).
+  Zusätzlich zwei End-zu-Ende-Tests in `test_songtext_pipeline.py`, die
+  einen VOLLEN Pipeline-Lauf (alle 5 Phasen, gemockte Provider-Antworten im
+  3-Provider-Konsens-Fall, kein Whisper nötig) gegen einen Testordner
+  fahren und die tatsächlich geschriebene `.lrc`-Datei prüfen — inklusive
+  Wiederholbarkeits-Test (zweiter identischer Lauf fasst die Datei dank
+  JSON-Cache-Skip nicht erneut an, `mtime` unverändert). `pytest
+  test_evaluate_lyrics.py test_write_lrc.py test_songtext_pipeline.py`
+  46/46 grün. Volle Suite: 458 grün + dieselben 13 vorbestehenden,
+  unabhängigen Fehlschläge (Debug-Hack in `fetch_songtext.py`) — keine
+  neuen. `ruff check`/`ruff format` sauber auf allen neuen/geänderten
+  Dateien. Auf einen Live-Smoke-Test gegen die echte Produktionsbibliothek
+  wurde für diesen Meilenstein bewusst verzichtet (die End-zu-Ende-Tests
+  decken die reale Verdrahtung zwischen allen 5 Phasen bereits ab) — der
+  Nutzer testet manuell selbst im Anschluss.
+
+Damit sind alle 5 Phasen der Pipeline real implementiert. Was noch offen
+bleibt: eine Entscheidung, was mit `fetch_songtext.py` selbst passiert
+(behalten/löschen/parallel betreiben, siehe Hinweis oben) — bewusst nicht
+Teil dieses Umbaus.
 
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 

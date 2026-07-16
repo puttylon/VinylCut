@@ -1,4 +1,4 @@
-"""Tests für songtext_pipeline.py (Steuer-Skript, Meilenstein 0-2)."""
+"""Tests für songtext_pipeline.py (Steuer-Skript, Meilenstein 0-4)."""
 
 from pathlib import Path
 
@@ -46,8 +46,11 @@ def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
     # gesetzt (tmp_path) -- Phase 3 (Nachhol-Modus) wird deshalb übersprungen,
     # nicht ausgeführt (siehe Fix B, ROADMAP.md: PFAD gesetzt -> nur PFAD
     # verarbeiten, Phase 3 läuft nur ohne PFAD über die ganze Bibliothek).
+    # _get_whisper_model gemockt -- sonst würde Phase 4 ein echtes
+    # faster-whisper-Modell laden (langsam, nicht Testgegenstand hier).
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(tmp_path)])
     try:
         songtext_pipeline.main()
@@ -60,8 +63,14 @@ def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
             "(arbeitet über die ganze Bibliothek)." in out
         )
         assert "Phase 3 (fetch_providers, Nachhol-Modus):" not in out
-        assert "Phase 4 (evaluate_lyrics) würde hier laufen." in out
-        assert "Phase 5 (write_lrc) würde hier laufen." in out
+        assert (
+            "Phase 4 (evaluate_lyrics): 0 Konsens, 0 Whisper akzeptiert, "
+            "0 abgelehnt, 0 ohne Provider." in out
+        )
+        assert (
+            "Phase 5 (write_lrc): 0 geschrieben, 0 übersprungen, "
+            "0 nicht gefunden." in out
+        )
     finally:
         _reset_fetch_songtext_globals()
 
@@ -89,6 +98,7 @@ def test_main_phase_3_funktioniert_ohne_pfad(tmp_path, monkeypatch, capsys):
 def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr(
         "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "2,4,5"]
     )
@@ -99,8 +109,14 @@ def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, 
         assert "Phase 1" not in out
         assert "Phase 2 (fetch_providers, Normal-Modus): 0 Song(s) abgefragt." in out
         assert "Phase 3" not in out
-        assert "Phase 4 (evaluate_lyrics) würde hier laufen." in out
-        assert "Phase 5 (write_lrc) würde hier laufen." in out
+        assert (
+            "Phase 4 (evaluate_lyrics): 0 Konsens, 0 Whisper akzeptiert, "
+            "0 abgelehnt, 0 ohne Provider." in out
+        )
+        assert (
+            "Phase 5 (write_lrc): 0 geschrieben, 0 übersprungen, "
+            "0 nicht gefunden." in out
+        )
     finally:
         _reset_fetch_songtext_globals()
 
@@ -556,5 +572,155 @@ def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
         songtext_pipeline.main()
         out2 = capsys.readouterr().out
         assert "Keine passenden Cache-Einträge gefunden" in out2
+    finally:
+        _reset_fetch_songtext_globals()
+
+
+# --- Voller Pipeline-Lauf (Meilenstein 3+4): scan -> providers -> bewerten ->
+# schreiben, alles zusammen -- prüft die reale Verdrahtung zwischen den
+# Modulen (nicht nur einzeln gemockt wie in den Modul-eigenen Testdateien).
+
+LRC_KONSENS_A = "[00:10.00]Girl you know it's true I love you\n[00:15.00]I'm in love with you girl\n"
+LRC_KONSENS_B = "[00:10.00]Girl you know it's true yes I love you\n[00:15.00]I'm in love girl cause you're on my mind\n"
+LRC_KONSENS_C = "[00:10.00]You know it's true I love you girl oh\n[00:15.00]In love with you girl cause you're my mind\n"
+
+
+def test_voller_lauf_scan_provider_bewerten_schreiben(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    album_dir = tmp_path / "album"
+    album_dir.mkdir()
+    audio = album_dir / "01 - Song.flac"
+    audio.write_bytes(b"")
+
+    monkeypatch.setattr(
+        songtext_pipeline.fetch_songtext,
+        "_read_audio_tags",
+        lambda path: ("Test Artist", "Test Song", ""),
+    )
+    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+
+    def _fail_if_whisper_called(*a, **kw):
+        raise AssertionError(
+            "Whisper sollte bei 3-Provider-Konsens nicht aufgerufen werden"
+        )
+
+    monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_whisper_called)
+
+    fake_run = _fake_subprocess_run(
+        {
+            "test artist test song": LRC_KONSENS_A,  # lrclib
+        }
+    )
+
+    # 3 unterschiedliche Provider müssen übereinstimmen -- _fake_subprocess_run
+    # liefert nur EINEN Text pro Query-Needle, deshalb je Provider einzeln
+    # über die Kommandozeile (letztes Element = Provider-Name) unterscheiden.
+    def _run(cmd, **kwargs):
+        query, provider = cmd[1], cmd[-1]
+        fake_run.calls.append((query, provider))
+
+        class _Result:
+            stderr = ""
+
+        content_by_provider = {
+            "lrclib": LRC_KONSENS_A,
+            "musixmatch": LRC_KONSENS_B,
+            "netease": LRC_KONSENS_C,
+        }
+        content = content_by_provider.get(provider)
+        if content is not None:
+            Path(cmd[3]).write_text(content, encoding="utf-8")
+
+        return _Result()
+
+    monkeypatch.setattr(fetch_songtext.subprocess, "run", _run)
+
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(album_dir), "--recursive"]
+    )
+
+    try:
+        songtext_pipeline.main()
+    finally:
+        _reset_fetch_songtext_globals()
+
+    out = capsys.readouterr().out
+    assert "Phase 1 (scan_songs): 1 Song(s) gescannt/aktualisiert." in out
+    assert "Phase 4 (evaluate_lyrics): 1 Konsens" in out
+    assert "Phase 5 (write_lrc): 1 geschrieben" in out
+
+    conn = cs.open_cache(db_path)
+    song_row = conn.execute(
+        "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+        (cs.normalize_key("Test Artist"), cs.normalize_key("Test Song")),
+    ).fetchone()
+    assert song_row is not None
+
+    lrc_path = audio.with_suffix(".lrc")
+    assert lrc_path.exists()
+    content = lrc_path.read_text(encoding="utf-8")
+    assert "love you" in content
+
+
+def test_voller_lauf_zweiter_durchlauf_ist_idempotent(tmp_path, monkeypatch, capsys):
+    """Wiederholbarkeit (siehe workflow für songexte.txt, "generell: Jeder
+    Schritt muss wiederholt werden können"): ein zweiter identischer Lauf
+    darf die .lrc-Datei nicht erneut anfassen (JSON-Cache-Skip in Phase 5)."""
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    album_dir = tmp_path / "album"
+    album_dir.mkdir()
+    audio = album_dir / "01 - Song.flac"
+    audio.write_bytes(b"")
+
+    monkeypatch.setattr(
+        songtext_pipeline.fetch_songtext,
+        "_read_audio_tags",
+        lambda path: ("Test Artist", "Test Song", ""),
+    )
+    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+    monkeypatch.setattr(
+        fetch_songtext,
+        "_whisper_best",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("kein Whisper bei Konsens erwartet")
+        ),
+    )
+
+    def _run(cmd, **kwargs):
+        provider = cmd[-1]
+
+        class _Result:
+            stderr = ""
+
+        content_by_provider = {
+            "lrclib": LRC_KONSENS_A,
+            "musixmatch": LRC_KONSENS_B,
+            "netease": LRC_KONSENS_C,
+        }
+        content = content_by_provider.get(provider)
+        if content is not None:
+            Path(cmd[3]).write_text(content, encoding="utf-8")
+        return _Result()
+
+    monkeypatch.setattr(fetch_songtext.subprocess, "run", _run)
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(album_dir), "--recursive"]
+    )
+
+    try:
+        songtext_pipeline.main()
+        lrc_path = audio.with_suffix(".lrc")
+        mtime_after_first_run = lrc_path.stat().st_mtime_ns
+
+        songtext_pipeline.main()
+        assert lrc_path.stat().st_mtime_ns == mtime_after_first_run
     finally:
         _reset_fetch_songtext_globals()

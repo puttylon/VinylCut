@@ -3,12 +3,8 @@
 
 Orchestriert die 5 Phasen aus dem Architektur-Dokument
 "workflow für songexte.txt" (Abschnitt "ZIELARCHITEKTUR"): scannen, Anbieter
-abfragen, Anbieter nachholen, bewerten, .lrc schreiben. Phase 1 (scan_songs,
-Meilenstein 1) und Phase 2/3 (fetch_providers, Normal-/Nachhol-Modus,
-Meilenstein 2) laufen bereits echt. Die restlichen 2 Phasen-Programme
-(evaluate_lyrics, write_lrc) sind noch Platzhalter -- sie geben eine Log-Zeile
-aus und tun sonst nichts. Die echte Logik kommt in den folgenden
-Meilensteinen (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
+abfragen, Anbieter nachholen, bewerten, .lrc schreiben. Alle 5 Phasen laufen
+inzwischen echt (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
@@ -31,15 +27,18 @@ import sqlite3
 from pathlib import Path
 
 import cache_store
+import evaluate_lyrics
 import fetch_providers
 import fetch_songtext
 import scan_songs
+import write_lrc
 
 _ALL_PHASES = (1, 2, 3, 4, 5)
 # Phasen, die eine echte Audiodatei brauchen (siehe Design-Dokument, Abschnitt
 # 3 "PFAD und Audiodateien"): Phase 1 zum Scannen, Phase 4 nur wenn Whisper
-# den Song noch nie gehört hat. Alle anderen Phasen kommen ohne PFAD aus.
-_PHASES_NEEDING_FILE = frozenset({1, 4})
+# den Song noch nie gehört hat, Phase 5 immer (schreibt .lrc-Dateien). Alle
+# anderen Phasen kommen ohne PFAD aus.
+_PHASES_NEEDING_FILE = frozenset({1, 4, 5})
 
 
 def _parse_phase_list(spec: str) -> list[int]:
@@ -145,23 +144,40 @@ def fetch_providers_nachhol(conn: sqlite3.Connection) -> None:
     fetch_providers.retry_missing(conn)
 
 
-def evaluate_lyrics() -> None:
-    """Platzhalter für Phase 4 -- kommt in Meilenstein 3 (evaluate_lyrics.py)."""
-    print("Phase 4 (evaluate_lyrics) würde hier laufen.")
+def evaluate_lyrics_normal(
+    conn: sqlite3.Connection,
+    scope: set[tuple[str, str]] | None = None,
+    file_song_map: dict[tuple[str, str], Path] | None = None,
+) -> None:
+    """Phase 4: bewertet Songs (Konsens/Whisper), siehe evaluate_lyrics.evaluate_all.
+
+    scope wie bei Phase 2 (None ohne PFAD = ganze DB, sonst nur die Songs des
+    aktuellen Laufs). file_song_map erlaubt Whisper bei Cache-Miss live zu
+    transkribieren -- ohne Eintrag fällt der Song auf Konsens/Dauer-Heuristik
+    zurück."""
+    counts = evaluate_lyrics.evaluate_all(
+        conn, scope=scope, file_song_map=file_song_map
+    )
+    if not counts:
+        return
+    print(
+        f"Phase 4 (evaluate_lyrics): {counts['konsens']} Konsens, "
+        f"{counts['whisper-akzeptiert']} Whisper akzeptiert, "
+        f"{counts['abgelehnt']} abgelehnt, {counts['kein-provider']} ohne Provider."
+    )
 
 
-def write_lrc() -> None:
-    """Platzhalter für Phase 5 -- kommt in Meilenstein 4 (write_lrc.py)."""
-    print("Phase 5 (write_lrc) würde hier laufen.")
-
-
-# Phasen ohne Bedarf an der Cache-Connection als Argument (aktuell nur noch
-# die beiden Platzhalter 4/5) -- Phase 1/2/3 brauchen conn und werden direkt
-# in main()s Schleife behandelt, siehe dort.
-_PHASE_DISPATCH = {
-    4: evaluate_lyrics,
-    5: write_lrc,
-}
+def write_lrc_normal(
+    conn: sqlite3.Connection, file_song_map: list[tuple[Path, str, str]]
+) -> None:
+    """Phase 5: schreibt/löscht .lrc-Dateien je nach Phase-4-Entscheidung
+    (wird intern erneut berechnet, siehe write_lrc.write_all -- kein
+    Ablageort in der DB nötig)."""
+    counts = write_lrc.write_all(conn, file_song_map)
+    print(
+        f"Phase 5 (write_lrc): {counts['updated']} geschrieben, "
+        f"{counts['skipped']} übersprungen, {counts['not_found']} nicht gefunden."
+    )
 
 
 def _default_db_path() -> Path:
@@ -206,7 +222,7 @@ def main() -> None:
 
     # Die Cache-Connection wird von jeder Phase gebraucht (alle 5 lesen/
     # schreiben in der Cache-DB) -- deshalb immer geöffnet, unabhängig von
-    # PFAD. Nur Phase 1 und 4 brauchen zusätzlich eine echte Audiodatei
+    # PFAD. Phase 1/4/5 brauchen zusätzlich eine echte Audiodatei
     # (_PHASES_NEEDING_FILE); PFAD fehlt aber, ist das kein Fehler -- die
     # Datei-Zuordnung/der Scan wird einfach nicht versucht (siehe
     # Design-Dokument, Abschnitt 3, Randfall b). Die Verbindung bleibt über
@@ -281,8 +297,27 @@ def main() -> None:
                 fetch_providers_normal(conn, scope=scope)
             elif phase == 3:
                 fetch_providers_nachhol(conn)
-            else:
-                _PHASE_DISPATCH[phase]()
+            elif phase == 4:
+                # Scope + Datei-Zuordnung frisch berechnet wie bei Phase 2 --
+                # Whisper braucht die Audiodatei nur bei einem Transkript-
+                # Cache-Miss, file_song_map deckt genau das ab.
+                scope = None
+                file_map: dict[tuple[str, str], Path] = {}
+                if root is not None:
+                    mapping = build_file_song_map(root, args.recursive, conn)
+                    scope = {(a, t) for _, a, t in mapping}
+                    file_map = {(a, t): p for p, a, t in mapping}
+                evaluate_lyrics_normal(conn, scope=scope, file_song_map=file_map)
+            elif phase == 5:
+                # Phase 5 braucht PFAD zwingend (schreibt echte Dateien) --
+                # ohne PFAD gibt es nichts zu schreiben, kein Fehler.
+                if root is None:
+                    print(
+                        "Phase 5 (write_lrc): kein PFAD angegeben, nichts zu schreiben."
+                    )
+                    continue
+                mapping = build_file_song_map(root, args.recursive, conn)
+                write_lrc_normal(conn, mapping)
     finally:
         conn.close()
 

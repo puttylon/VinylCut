@@ -220,6 +220,114 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         assert all("andere band" not in q for q, _p in fake_run.calls)
         assert cs.get_provider(conn, "lrclib", "andere band", "anderer song") is None
 
+    def test_gibt_header_und_pro_song_status_und_ergebniszeile_aus(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Regressionstest für eine reale Nutzer-Rückmeldung (siehe
+        ROADMAP.md): ohne Fortschrittsanzeige wirkte ein Lauf mit mehreren
+        Songs und mehrsekündigen Live-Timeouts wie ein Hänger -- "falls sich
+        hier was tut, sieht man nichts davon". Prüft NICHT die genaue
+        Formatierung im Detail, nur: es wird während der Verarbeitung
+        tatsächlich etwas ausgegeben, nicht erst am Ende."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs._get_or_create_song(conn, "artist b", "title b", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        fake_run = _fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_providers.fetch_all(conn)
+
+        out = capsys.readouterr().out
+        assert "Frage 2 Song(s) bei 4 Anbietern ab" in out
+        # pro Song eine Ergebniszeile (_tprint, persistent -- die
+        # überschreibbare _print_status-Zeile per \r ist im capsys-Text
+        # ebenfalls enthalten, aber ihr genauer Inhalt wird hier bewusst
+        # nicht geprüft, siehe Spy-Test unten für die Status-Reihenfolge)
+        assert out.count("0/4: —") == 2
+        assert "artist a / title a" in out
+        assert "artist b / title b" in out
+
+    def test_statuszeile_erscheint_vor_der_provider_abfrage(
+        self, tmp_path, monkeypatch
+    ):
+        """Beweist die Reihenfolge (nicht nur dass irgendwann etwas
+        ausgegeben wird): die überschreibbare Statuszeile pro Song MUSS vor
+        der eigentlichen (potenziell mehrsekündigen) Live-Abfrage erscheinen,
+        nicht erst danach -- sonst wäre die Anzeige kein echter Fortschritt,
+        sondern nur ein nachträgliches Protokoll."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        status_calls: list[str] = []
+        tprint_calls: list[str] = []
+        monkeypatch.setattr(
+            fetch_songtext, "_print_status", lambda msg: status_calls.append(msg)
+        )
+        monkeypatch.setattr(
+            fetch_songtext, "_tprint", lambda msg: tprint_calls.append(msg)
+        )
+
+        def _fake_query_provider(query, provider, env, artist="", title=""):
+            # zum Zeitpunkt der Abfrage muss die Statuszeile für diesen Song
+            # bereits ausgegeben worden sein -- sonst hinge der Nutzer wieder
+            # ohne jede Rückmeldung vor einer mehrsekündigen Live-Anfrage.
+            assert status_calls, "Statuszeile muss vor der Provider-Abfrage stehen"
+            assert not tprint_calls, "Ergebniszeile darf noch nicht dastehen"
+            return provider, None
+
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider)
+
+        queried, skipped = fetch_providers.fetch_all(conn)
+
+        assert (queried, skipped) == (1, 0)
+        assert len(status_calls) == 1
+        assert "1/1" in status_calls[0]
+        assert "artist a" in status_calls[0]
+        assert len(tprint_calls) == 1
+        assert "artist a / title a" in tprint_calls[0]
+        assert "0/4" in tprint_calls[0]  # kein Provider lieferte einen Treffer
+
+    def test_skip_genre_song_bekommt_keine_eigene_status_oder_ergebniszeile(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", "Hörbuch")
+        conn.commit()
+
+        monkeypatch.setattr(
+            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        status_calls: list[str] = []
+        tprint_calls: list[str] = []
+        monkeypatch.setattr(
+            fetch_songtext, "_print_status", lambda msg: status_calls.append(msg)
+        )
+        monkeypatch.setattr(
+            fetch_songtext, "_tprint", lambda msg: tprint_calls.append(msg)
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "Ein Song mit Skip-Genre darf bei keinem Anbieter live abgefragt werden"
+            )
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+
+        fetch_providers.fetch_all(conn)
+
+        assert status_calls == []
+        assert tprint_calls == []
+
     def test_leerer_scope_fragt_gar_nichts_ab(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         cs._get_or_create_song(conn, "artist a", "title a", None)

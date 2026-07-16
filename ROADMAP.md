@@ -211,6 +211,21 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   Songs verhalten sich dabei unauffällig) — reines Unit-Testen gegen kleine
   synthetische DBs hat ihn nicht aufgedeckt, erst der echte Lauf gegen die
   gewachsene Produktionsbibliothek.
+- **Nachtrag — fehlende Fortschrittsanzeige, zweiter Fund aus demselben
+  echten Lauf:** Nachdem der Scope-Bug behoben war, lief Phase 2 korrekt,
+  aber sichtbar stumm — `fetch_all()` gab während des Laufs KEINE
+  Fortschrittsanzeige aus; bei 17 Songs × 4 Providern mit teils langen
+  Live-Timeouts wirkte das wie ein Hänger. Fix: `fetch_all()` bekam eine
+  Fortschrittsanzeige nach dem bereits etablierten Muster aus
+  `fetch_songtext._retry_missing`/`fetch_lrc` (`_print_status` für eine
+  überschreibbare Statuszeile pro Song vor der Abfrage, `_tprint` für eine
+  persistente Ergebniszeile danach mit Treffer-Zusammenfassung wie
+  `"artist / title  2/4: lrclib, genius"`), plus eine Kopfzeile mit der
+  Gesamtzahl der abzufragenden Songs. Reines Logging, keine
+  Verhaltensänderung an der Abfrage-/Cache-Logik.
+  `pytest test_fetch_providers.py test_songtext_pipeline.py`: 38/38 grün.
+  Volle Suite: 413 grün + dieselben 13 bekannten Fehlschläge. `ruff check`/
+  `ruff format` sauber.
 
 **Nächster Schritt: Meilenstein 3 — Phase 4 (`evaluate_lyrics.py`)**
 - Baut: Konsens-Prüfung + Whisper-Entscheidung, wie im Dokument unter

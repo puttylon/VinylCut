@@ -102,6 +102,20 @@ def fetch_all(
     .lower() auf und würde bei None abstürzen), deshalb wird die Prüfung
     nur bei gesetztem genre ausgeführt.
 
+    Fortschrittsanzeige (nach dem in fetch_songtext._retry_missing etablierten
+    Muster, siehe dortiger Aufruf von _print_status/_tprint): ohne sie wirkt
+    ein Lauf mit vielen Songs und mehrsekündigen Live-Timeouts (bis zu
+    fetch_songtext._PROVIDER_TIMEOUT pro Anfrage) wie ein Hänger -- reale
+    Nutzer-Rückmeldung nach einem Produktions-Lauf (ROADMAP.md). Vor der
+    Schleife eine Zeile mit der Gesamtzahl der tatsächlich abzufragenden
+    Songs (Skip-Genre-Songs schon herausgerechnet), pro Song eine
+    überschreibbare Statuszeile (_print_status) VOR der Provider-Abfrage,
+    danach eine persistente Ergebniszeile (_tprint) mit Treffer-
+    Zusammenfassung -- Vorbild ist die prov_str/hit_str-Logik aus dem
+    committeten fetch_songtext.fetch_lrc (Zeile ~1395 f.). Skip-Genre-Songs
+    bekommen keine eigene Zeile (stehen schon in der Abschluss-
+    Zusammenfassung des Aufrufers), nur tatsächlich abgefragte.
+
     Gibt (Anzahl abgefragter Songs, Anzahl wegen Genre übersprungener Songs)
     zurück -- Songs außerhalb von scope zählen in keinem der beiden.
     """
@@ -111,7 +125,7 @@ def fetch_all(
         "SELECT artist_key, titel_key, genre FROM songs ORDER BY artist_key, titel_key"
     ).fetchall()
 
-    queried = 0
+    to_query: list[tuple[str, str]] = []
     skipped = 0
     for artist_key, titel_key, genre in rows:
         if scope is not None and (artist_key, titel_key) not in scope:
@@ -119,8 +133,21 @@ def fetch_all(
         if genre and fetch_songtext._is_skip_genre(genre):
             skipped += 1
             continue
+        to_query.append((artist_key, titel_key))
+
+    total = len(to_query)
+    if total:
+        print(
+            f"Frage {total} Song(s) bei {len(fetch_songtext._ALL_PROVIDERS)} "
+            "Anbietern ab ..."
+        )
+
+    queried = 0
+    for i, (artist_key, titel_key) in enumerate(to_query, start=1):
         queried += 1
+        fetch_songtext._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
         query = f"{artist_key} {titel_key}".strip()
+        results = {}
         with ThreadPoolExecutor(max_workers=len(fetch_songtext._ALL_PROVIDERS)) as pool:
             futures = [
                 pool.submit(
@@ -134,9 +161,21 @@ def fetch_all(
                 for provider in fetch_songtext._ALL_PROVIDERS
             ]
             for future in as_completed(futures):
-                _provider, path = future.result()
-                if path is not None:
-                    path.unlink(missing_ok=True)
+                provider, path = future.result()
+                results[provider] = path
+
+        provider_hits = []
+        for provider in fetch_songtext._ALL_PROVIDERS:  # Reihenfolge beibehalten
+            path = results.get(provider)
+            if path is not None:
+                provider_hits.append(provider)
+                path.unlink(missing_ok=True)
+
+        hit_str = ", ".join(provider_hits) if provider_hits else "—"
+        fetch_songtext._tprint(
+            f"{fetch_songtext._ts()}  {artist_key} / {titel_key}  "
+            f"{len(provider_hits)}/{len(fetch_songtext._ALL_PROVIDERS)}: {hit_str}"
+        )
 
     return queried, skipped
 

@@ -385,6 +385,14 @@ Pro Song eine TXT-Datei (`<Artist>_<Titel>_modellvergleich.txt`, Kopf mit `Sprac
 
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 
+**`songtext_pipeline.py`** — Steuer-Skript für die künftige Phasen-Pipeline, die `fetch_songtext.py` schrittweise ablösen soll (Architektur siehe `workflow für songexte.txt`, Abschnitt „ZIELARCHITEKTUR", Baufortschritt siehe `ROADMAP.md`, „Songtexte-Pipeline-Umbau"). **Aktuell nur das Grundgerüst (Meilenstein 0):** Die 5 Phasen (scannen, Anbieter abfragen, Anbieter nachholen, bewerten, `.lrc` schreiben) sind bislang nur Platzhalter, die eine Log-Zeile ausgeben — noch **keine echte Funktionalität**. Für den produktiven Einsatz weiterhin `fetch_songtext.py` verwenden. Bereits fertig: die Kommandozeile mit Phasen-Auswahl und die Zuordnung Audiodatei ↔ Cache-DB-Eintrag über Künstler+Titel (ohne dauerhafte Pfad-Speicherung — wird bei jedem Lauf frisch berechnet).
+
+```bash
+python3 songtext_pipeline.py "/Musik/" --recursive        # alle 5 Phasen nacheinander (aktuell nur Platzhalter-Ausgabe)
+python3 songtext_pipeline.py "/Musik/" --phase 2,4,5      # nur ausgewählte Phasen
+python3 songtext_pipeline.py --phase 3                    # nur Nachhol-Modus — PFAD nicht nötig, reine Cache-DB-Operation
+```
+
 ---
 
 ## Abhängigkeiten

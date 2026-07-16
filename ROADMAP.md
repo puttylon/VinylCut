@@ -1,5 +1,201 @@
 # VinylCut Roadmap
 
+## Geplant: Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (Meilenstein 0 von 5 erledigt)
+
+**Auslöser:** Nach dem lrclib-Dump-Bugfix (v1.13.1) und dem Fund, dass der
+Dump falsch verknüpfte Songtexte enthalten kann (Art Blakey „Blues March"
+bekam über den Dump den Text von Elvis' „That's All Right" — siehe v1.13.0-
+Eintrag unten), wollte der Nutzer den gesamten Songtexte-Prüf-Teil
+durchleuchten. Die dabei gestellten Leitfragen (typische Abläufe, fehlende
+Funktionen, Obsoletes) sind inzwischen in einer eigenen Design-Session
+beantwortet worden — Ergebnis ist das Architektur-Dokument
+**[`workflow für songexte.txt`](workflow%20f%C3%BCr%20songexte.txt)**
+(Abschnitt „ZIELARCHITEKTUR"). Kernproblem, das den Umbau motiviert: Ein
+einzelner Provider-Ausfall (Rate-Limit, Netzwerk) lässt den Konsens-
+Mechanismus (braucht ≥3 Provider) fälschlich scheitern, obwohl ein späterer
+Retry das vermieden hätte — Whisper springt dann unnötig und langsam an.
+Die 5 Phasen aus den ursprünglichen Notizen (identifizieren → abfragen →
+nachholen → bewerten → schreiben) werden dafür in eigene, einzeln
+wiederholbare Programme zerlegt, orchestriert von einem Steuer-Skript.
+
+**Weiterhin offen, NICHT Teil dieses Umbaus (separates Thema, zurückgestellt):**
+Die ursprüngliche Bestandsaufnahme hatte drei mögliche Lücken benannt, die
+mit dem reinen Pipeline-Umbau nichts zu tun haben und hier bewusst nicht
+mitgelöst werden:
+1. Keine Statistik-/Aggregat-Sicht für den SQLite-Cache — `lrc_analyse.py`
+   deckt nur die JSON-Seite (`.fetch_songtext.json`) ab.
+2. Kein Bindeglied zwischen JSON-Cache und SQLite-Cache: findet
+   `--retry-missing`/der künftige Nachhol-Modus einen neuen Provider-Treffer,
+   bleibt unklar, welche Datei/welches Album im JSON-Cache noch als `nf`
+   markiert ist und einen normalen Neu-Lauf bräuchte, damit der Treffer
+   tatsächlich als `.lrc` geschrieben wird.
+3. Kein Werkzeug, um bereits AKZEPTIERTE (geschriebene) `.lrc`-Dateien
+   nachträglich auf Plausibilität zu prüfen — relevant nach dem
+   Art-Blakey/Elvis-Fund (v1.13.0/v1.13.1).
+
+**Hinweis für eine spätere, hier noch nicht getroffene Entscheidung** (was
+mit `fetch_songtext.py` selbst passiert — behalten/löschen/parallel betreiben):
+Mehrere andere Skripte importieren `fetch_songtext` heute als Modul —
+`compare_whisper_models.py` (Zeile 91), `test_compare_whisper_models.py`
+(Zeile 8) und `test_fetch_songtext.py` (Zeile 16); `cache_store.py` importiert
+es zusätzlich lazy für die `transkripte`-v1→v2-Migration (Zeile 120). Diese
+Abhängigkeiten sind von einer Aufteilung betroffen und sollten bei der
+späteren Entscheidung mitbedacht werden.
+
+---
+
+### Bau-Fahrplan (geplant, noch nicht begonnen)
+
+Reihenfolge: zuerst das Steuer-Skript-Grundgerüst (Phasen zunächst Stubs),
+danach phasenweise 1 → 2 (+Nachhol-Modus) → 4 → 5 — jede Phase wird gebaut
+UND sofort ins Steuer-Skript eingehängt, bevor die nächste beginnt. Jeder
+Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
+(kein Big-Bang am Ende, siehe CLAUDE.md).
+
+**✓ Meilenstein 0 — erledigt — Steuer-Skript-Grundgerüst (`songtext_pipeline.py`)**
+- Baut: CLI mit PFAD-Argument (Datei oder Ordner, `--recursive` für
+  Unterordner), `--phase`-Auswahl inkl. Mehrfachauswahl (`--phase 2,4,5`),
+  Datei-zu-DB-Zuordnung über Künstler+Titel (siehe Dokument, Abschnitt 3
+  „PFAD und Audiodateien"). Die 4 Phasen zunächst nur als Platzhalter
+  (Log-Zeile „Phase X würde hier laufen").
+- Übernehmen: Datei-Traversal `_iter_audio_dfs` (fetch_songtext.py Zeile
+  1798) direkt wiederverwendbar; Argparse-Grundgerüst kann sich an `main()`
+  (Zeile 2020 ff.) orientieren, wird aber neu geschrieben — die alten Flags
+  (`--fast`, `--retry-missing` usw.) entfallen zugunsten von `--phase`.
+- Neu: die komplette Phasen-Auswahl-Logik und die Live-Zuordnung
+  Datei↔DB-Eintrag (gibt es heute so nicht, siehe Dokument).
+- Prüfen: `songtext_pipeline.py <testordner> --phase 1,2,4,5` läuft ohne
+  Fehler durch und druckt für jede gewählte Phase ihre Platzhalter-Zeile;
+  `--phase 3` allein ignoriert PFAD wie im Dokument beschrieben. Neuer
+  pytest für die Argument-Parsing-Logik (welche Phasen bei welchem Flag
+  aktiv werden, Mehrfachauswahl-Parsing).
+- Abhängigkeit: keine — braucht keine der Phasen und keine DB-Änderung.
+- **Umgesetzt und verifiziert:** `songtext_pipeline.py` +
+  `test_songtext_pipeline.py` (17 Tests, alle grün) neu angelegt. Enthält
+  `_parse_phase_list`/`_phase_arg_type` (Mehrfachauswahl-Parsing,
+  Validierung 1-5), `_iter_audio_files`/`build_file_song_map`
+  (Datei-zu-DB-Zuordnung, wiederverwendet `fetch_songtext._iter_audio_dfs`/
+  `_read_audio_tags`/`_clean_query_title`, `cache_store.normalize_key` —
+  KEINE dauerhafte Pfad-Speicherung), die 4 Platzhalter-Funktionen
+  (`scan_songs`, `fetch_providers(mode)`, `evaluate_lyrics`, `write_lrc`)
+  mit `_PHASE_DISPATCH`-Mapping, `main()` mit Argparse. `ruff check` +
+  `ruff format` sauber. Manueller Smoke-Test bestätigt `--phase 2,4,5`
+  gegen leeren Ordner, `--phase 3` ganz ohne PFAD, `--phase 9` liefert
+  sauberen Fehler (Exit 2). Die volle Suite zeigt 13 vorbestehende, von
+  dieser Änderung unabhängige Fehlschläge in `test_fetch_songtext.py`
+  (verursacht durch ein bereits vor dieser Session uncommittetes
+  Debug-Flag `_LRCLIB_LIVE_FALLBACK = False`, per `git stash` bestätigt:
+  mit der committeten Version 177/177 grün) — separates, offenes Thema,
+  nicht Teil dieses Umbaus.
+
+**Nächster Schritt: Meilenstein 1 — Phase 1 (`scan_songs.py`)**
+- Baut: aktiver Scan-Schritt, der Audiodateien im Umfang durchgeht, Tags
+  (Künstler/Titel/Genre) + Dauer liest und die Song-Identität in `songs`
+  einträgt.
+- Übernehmen: `_read_audio_tags` (Zeile 256), `_clean_query_title` (Zeile
+  272), `_load_release` (Zeile 1610) für die Dauer aus `release.json`,
+  `cache_store._get_or_create_song` (bereits vorhanden, unverändert nutzbar).
+- Neu: der aktive Scan-Schritt selbst als eigener Durchlauf — heute wird die
+  Song-Identität nur als Nebeneffekt von `put_provider` beim Abfragen
+  angelegt, nicht vorab.
+- Einhängen: `--phase 1` im Steuer-Skript ruft `scan_songs` jetzt echt auf
+  statt der Platzhalter-Zeile.
+- Prüfen: Lauf gegen einen Testordner, danach per `inspect_song.py` oder
+  direkt per `sqlite3`-CLI verifizieren, dass für jede Datei eine
+  `songs`-Zeile existiert. pytest für die wiederverwendeten Tag-Lese-
+  Funktionen (bestehende Fälle in `test_fetch_songtext.py`, z.B.
+  `TestLoadRelease`, als Vorlage/Wiederverwendung prüfen).
+- Abhängigkeit: keine Vorbedingung, direkt gegen echte Testdateien
+  entwickelbar.
+
+**Meilenstein 2 — Phase 2 + Nachhol-Modus (`fetch_providers.py`)**
+- Baut: Normal-Modus (alle Anbieter für jeden Song aus `songs` abfragen)
+  und Nachhol-Modus (nur `status IN (nichts, fehlschlag)` erneut abfragen)
+  in einem Skript, per Flag umschaltbar.
+- Übernehmen: `_query_provider` (Zeile 443) komplett inkl. Rate-Limit-
+  Handling und lrclib-Dump-Lookup, der `ThreadPoolExecutor`-Block aus
+  `fetch_lrc` (Zeile 1354-1375), `_retry_missing` (Zeile 1825) fast
+  unverändert als zweiter Modus, `_open_lrclib_dump_conn` (Zeile 1986).
+- Neu: der CLI-Eintrittspunkt, der zwischen beiden Modi umschaltet, und die
+  Verdrahtung mit dem Scan-Ergebnis aus Phase 1 (`songs`-Tabelle) statt
+  Live-Tag-Lesen.
+- Einhängen: `--phase 2` (Normal) und `--phase 3` (Nachhol) im Steuer-Skript
+  rufen jetzt echt auf.
+- Prüfen: Lauf gegen Testordner mit bekannten Konsens- und Fehlschlag-
+  Fällen; bestehende Tests als Vorlage/Wiederverwendung migrieren
+  (`test_fetch_songtext.py::TestProviderCache`, `TestRateLimit`,
+  `TestRetryMissing`, `TestRetryMissingCli`, `TestLrclibDumpLookup`).
+  Danach gezielt den Nachhol-Modus gegen künstlich erzeugte
+  `fehlschlag`-Einträge testen.
+- Abhängigkeit: braucht befüllte `songs`-Tabelle (Meilenstein 1) als Input
+  für einen vollständigen Pipeline-Lauf — kann aber auch gegen die
+  bestehende, bereits befüllte Produktions-Cache-DB entwickelt werden, da
+  dort aus früheren `fetch_songtext.py`-Läufen schon Songs stehen.
+
+**Meilenstein 3 — Phase 4 (`evaluate_lyrics.py`)**
+- Baut: Konsens-Prüfung + Whisper-Entscheidung, wie im Dokument unter
+  „Wie ruft das Steuer-Programm die Phasen auf?" beschrieben (ein Prozess,
+  direkter Funktionsaufruf, Whisper-Modell + IDF-Hintergrund einmal pro
+  Lauf laden, IDF alle N Songs auffrischen).
+- Übernehmen: `_provider_consensus` (Zeile 1066), `_whisper_best` (Zeile
+  1135), `_whisper_accept` (Zeile 771), `_build_contrastive_context` (Zeile
+  850), der Entscheidungsbaum aus `fetch_lrc` (Zeile 1404-1599).
+- Neu: der N-Songs-Zähler mit periodischem `_build_contrastive_context`-
+  Re-Aufruf (N konkret festlegen, z.B. 50, siehe Dokument F3). Die frühere
+  offene Frage aus Abschnitt 2 des Dokuments — wohin Phase 4 ihre
+  Entscheidung schreibt, falls `--phase 5` an einem ganz anderen Tag separat
+  aufgerufen wird — ist gelöst: KEIN neuer Ablageort in der DB. Die
+  Entscheidung ist ein reiner Vergleich bereits gespeicherter Daten
+  (`texte` + ggf. `transkripte`), braucht kein Netzwerk und keinen neuen
+  Whisper-Lauf. Phase 5 kann sie deshalb jederzeit selbst neu ausrechnen,
+  indem sie dieselbe Vergleichs-Funktion aus `evaluate_lyrics.py`
+  importiert und aufruft — deterministisch dieselbe Antwort, egal ob im
+  selben Lauf oder Tage später separat aufgerufen. Bedingung: für Songs
+  ohne Konsens muss vorher ein Whisper-Ergebnis in `transkripte` stehen
+  (das sicherzustellen ist Aufgabe von Phase 4) — fehlt es, überspringt
+  Phase 5 den Song wie gewohnt, statt zu raten.
+- Prüfen: Kann GEGEN DIE BESTEHENDE, SCHON BEFÜLLTE Produktions-Cache-DB
+  entwickelt und getestet werden — braucht keinen frischen Phase-1/2-Lauf,
+  weil `ergebnisse`/`texte`/`transkripte` bereits Daten aus bisherigen
+  `fetch_songtext.py`-Läufen enthalten. Bestehende Tests als Vorlage/
+  Wiederverwendung migrieren (`TestProviderConsensus`, `TestWhisperAccept`,
+  `TestWhisperAcceptContrastive`, `TestGlobalCacheIdf`,
+  `TestBuildContrastiveContext`, `TestContrastiveMarginAndDecision`).
+  Manuell: für einen bekannten Song das Ergebnis mit dem alten
+  `fetch_songtext.py`-Lauf vergleichen (z.B. per `inspect_song.py`-Stichprobe).
+- Einhängen: `--phase 4`.
+- Abhängigkeit: NICHT zwingend an Meilenstein 1/2 gebunden (Cache ist schon
+  befüllt) — kann parallel oder sogar vor Meilenstein 2 entwickelt werden;
+  wird aber gemäß Bau-Reihenfolge trotzdem erst nach Meilenstein 2 ins
+  Steuer-Skript eingehängt.
+
+**Meilenstein 4 — Phase 5 (`write_lrc.py`)**
+- Baut: `.lrc` schreiben/unverändert lassen/löschen je nach Phase-4-
+  Entscheidung, JSON-Ordner-Cache und Ordner-Lock pflegen.
+- Übernehmen: der Schreib-/Vergleichsblock aus `main()` (Zeile 2344-2440),
+  `_load_cache`/`_save_cache` (Zeile 1637/1717), `_try_claim_folder`/
+  `_release_folder` (Zeile 1658/1692).
+- Neu: nichts Neues in der Datenbank. Phase 5 importiert die
+  Vergleichs-Funktion aus `evaluate_lyrics.py` (Phase 4) und ruft sie pro
+  Song auf, wenn sie für einen Fall ohne Konsens eine Entscheidung
+  braucht — kein DB-Umweg, kein neuer Ablageort (siehe Auflösung in
+  Meilenstein 3).
+- Prüfen: Voller Pipeline-Lauf (`songtext_pipeline.py <testordner>`, alle
+  Phasen) gegen Testordner; entstandene `.lrc`-Dateien mit einem
+  Referenzlauf des alten `fetch_songtext.py` auf demselben Ordner
+  vergleichen. Zusätzlich: `--phase 5` an einem separaten Aufruf NACH einem
+  vorherigen `--phase 4`-Lauf testen (auch mit zeitlichem Abstand simuliert)
+  — muss zum gleichen Ergebnis kommen wie ein gemeinsamer `--phase 4,5`-Lauf.
+  Bestehende Tests als Vorlage/Wiederverwendung migrieren (`TestLoadCache`,
+  `TestSaveCache`, `TestFolderClaim`, `TestFetchLrcNoWhisper`,
+  `TestFetchLrcFast`).
+- Einhängen: `--phase 5`.
+- Abhängigkeit: braucht ein für den jeweiligen Song bereits vorhandenes
+  Whisper-Ergebnis in `transkripte` (falls kein Konsens vorliegt) —
+  ansonsten wird der Song übersprungen und bei einem späteren
+  Phase-4-Lauf nachgeholt. Keine Abhängigkeit von einer
+  Speicher-Entscheidung aus Meilenstein 3 mehr.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

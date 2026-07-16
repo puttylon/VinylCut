@@ -178,6 +178,39 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   Live-Smoke-Test von `--phase 2`/`--phase 3` wurde bewusst verzichtet
   (würde echte Netzwerk-Abfragen gegen die Produktions-Cache-DB auslösen) —
   die gemockten Tests decken das Verhalten ab.
+- **Nachtrag — kritischer Scope-Bug, erst beim echten Lauf gefunden (nicht
+  im Test):** Der Nutzer startete `songtext_pipeline.py
+  ".../Saturday Night Fever" --recursive` gegen die echte Musikbibliothek
+  und musste abbrechen (Strg+C) — `fetch_all()` fragte nicht nur die Songs
+  des Albums ab, sondern JEDEN Song, der jemals in der Cache-DB gelandet
+  war (Jahre an Historie), weil die Funktion die komplette `songs`-Tabelle
+  unconditional abfragte. Hätte tausende echte, ratenlimitierte
+  Live-Anfragen ausgelöst. Ein zweiter, subtilerer Teilbug kam dazu: der
+  Scope wurde ursprünglich VOR Phase 1 in der Phasen-Schleife berechnet und
+  sah deshalb neu gescannte Songs desselben Laufs noch gar nicht (im Log:
+  „Datei-Zuordnung: 2 Datei(en)" statt der tatsächlichen 17).
+  Fix: `fetch_all(conn, scope=None)` — neuer optionaler Parameter
+  `scope: set[tuple[str,str]] | None`. Ohne PFAD bleibt `scope=None`
+  (bewusste „ganze Bibliothek"-Absicht). Mit PFAD wird `scope` auf die
+  Songs des aktuellen Albums/Laufs eingegrenzt — UND erst an der Stelle in
+  der Phasen-Schleife berechnet, an der Phase 2 tatsächlich dran ist, damit
+  er sieht, was ein vorheriges Phase-1 im selben Lauf gerade neu
+  eingetragen hat. Phase 3 (`retry_missing`) bewusst NICHT verändert —
+  bleibt PFAD-unabhängig, deckt absichtlich die ganze DB ab (bereits vorher
+  vom Nutzer bestätigte Design-Entscheidung).
+  Neue Tests bilden den echten Bug nach:
+  `test_main_phase_1_2_fragt_nur_pfad_songs_ab_nicht_die_ganze_db` (ein
+  „fremder" Song aus einem simulierten früheren Lauf wird bei
+  `--phase 1,2` mit PFAD NIE angefragt, nur die 2 Album-Songs = 8 Aufrufe)
+  und die Gegenprobe
+  `test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab`.
+  `pytest test_fetch_providers.py test_songtext_pipeline.py`: 35/35 grün.
+  Volle Suite: 410 grün + dieselben 13 bekannten, unabhängigen
+  Fehlschläge. `ruff check`/`ruff format` sauber.
+  Lehre: Der Bug betraf Skalierung/Scope (kleine Test-DBs mit wenigen
+  Songs verhalten sich dabei unauffällig) — reines Unit-Testen gegen kleine
+  synthetische DBs hat ihn nicht aufgedeckt, erst der echte Lauf gegen die
+  gewachsene Produktionsbibliothek.
 
 **Nächster Schritt: Meilenstein 3 — Phase 4 (`evaluate_lyrics.py`)**
 - Baut: Konsens-Prüfung + Whisper-Entscheidung, wie im Dokument unter

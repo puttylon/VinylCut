@@ -107,13 +107,21 @@ def build_file_song_map(
     return mapping
 
 
-def fetch_providers_normal(conn: sqlite3.Connection) -> None:
-    """Phase 2: Normal-Modus von fetch_providers -- fragt jeden Song in
-    "songs" bei allen 4 Anbietern ab (siehe fetch_providers.fetch_all).
+def fetch_providers_normal(
+    conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
+) -> None:
+    """Phase 2: Normal-Modus von fetch_providers -- fragt Songs in "songs"
+    bei allen 4 Anbietern ab (siehe fetch_providers.fetch_all).
+
+    scope wird unverändert durchgereicht: ist er gesetzt (PFAD-Lauf, siehe
+    main()), werden NUR die Songs des aktuellen Umfangs abgefragt, nicht die
+    komplette, historisch gewachsene Cache-DB (siehe fetch_all-Docstring,
+    "Behebt einen echten Bug").
+
     Songs mit Skip-Genre (Hörbuch/Hörspiel/... ) werden dabei übersprungen --
     die Anzahl wird separat sichtbar gemacht, nicht nur stillschweigend
     gezählt."""
-    queried, skipped = fetch_providers.fetch_all(conn)
+    queried, skipped = fetch_providers.fetch_all(conn, scope=scope)
     print(f"Phase 2 (fetch_providers, Normal-Modus): {queried} Song(s) abgefragt.")
     if skipped:
         print(
@@ -196,9 +204,15 @@ def main() -> None:
     # Design-Dokument, Abschnitt 3, Randfall b). Die Verbindung bleibt über
     # die gesamte Phasen-Schleife offen (statt je Phase eine eigene).
     conn = cache_store.open_cache(_default_db_path())
-    root: Path | None = None
-    if args.path and any(p in _PHASES_NEEDING_FILE for p in phases):
-        root = Path(args.path).resolve()
+    # root wird immer aus PFAD aufgelöst, sobald PFAD gegeben ist (reines
+    # Path.resolve(), kein Datei-I/O) -- unabhängig davon, ob Phase 1/4
+    # gewählt sind. Grund: Phase 2 braucht root weiter unten in der Schleife
+    # ebenfalls, um sich auf die Songs des aktuellen Laufs einzugrenzen
+    # (siehe dort). Die folgende, informative "Datei-Zuordnung"-Vorab-
+    # Ausgabe bleibt an ihre bisherige Bedingung (Phase 1/4 gewählt)
+    # gebunden -- unverändert, eigener Zweck.
+    root: Path | None = Path(args.path).resolve() if args.path else None
+    if root is not None and any(p in _PHASES_NEEDING_FILE for p in phases):
         file_song_map = build_file_song_map(root, args.recursive, conn)
         print(
             f"Datei-Zuordnung: {len(file_song_map)} Datei(en) einem Song in "
@@ -216,7 +230,26 @@ def main() -> None:
                 count = scan_songs.scan(root, args.recursive, conn)
                 print(f"Phase 1 (scan_songs): {count} Song(s) gescannt/aktualisiert.")
             elif phase == 2:
-                fetch_providers_normal(conn)
+                # Scope MUSS hier, an dieser Stelle in der Schleife, frisch
+                # berechnet werden -- nicht vor der Schleife (siehe root oben):
+                # läuft Phase 1 im selben Aufruf VOR Phase 2 (Standardfall,
+                # Phasen laufen sortiert aufsteigend), stehen die gerade neu
+                # gescannten Songs erst JETZT in der "songs"-Tabelle. Eine
+                # vorher berechnete Zuordnung sähe sie noch nicht (siehe
+                # ROADMAP.md, realer Bug: "Datei-Zuordnung: 2 Datei(en)" vor
+                # Phase 1, obwohl das Album 17 Songs hatte).
+                #
+                # Ohne PFAD (root is None) bleibt scope=None -- fetch_all
+                # fragt dann bewusst die komplette Cache-DB ab (explizite
+                # Nutzerabsicht "ganze Bibliothek nachziehen").
+                scope: set[tuple[str, str]] | None = None
+                if root is not None:
+                    file_song_map = build_file_song_map(root, args.recursive, conn)
+                    scope = {
+                        (artist_key, titel_key)
+                        for _, artist_key, titel_key in file_song_map
+                    }
+                fetch_providers_normal(conn, scope=scope)
             elif phase == 3:
                 fetch_providers_nachhol(conn)
             else:

@@ -2,11 +2,15 @@
 """Phase 2 (+ Nachhol-Modus als Phase 3) der Songtexte-Pipeline: Anbieter abfragen.
 
 Zwei Modi (siehe "workflow für songexte.txt", Abschnitt ZIELARCHITEKTUR):
-  - Normal-Modus (fetch_all, Phase 2): fragt für JEDEN Song in der Tabelle
-    "songs" (aus Meilenstein 1/scan_songs.py befüllt) alle 4 Anbieter
-    (lrclib, musixmatch, netease, genius) ab.
+  - Normal-Modus (fetch_all, Phase 2): fragt Songs aus der Tabelle "songs"
+    (aus Meilenstein 1/scan_songs.py befüllt) bei allen 4 Anbietern
+    (lrclib, musixmatch, netease, genius) ab -- optional eingegrenzt auf
+    einen `scope` (siehe dortiger Docstring; ohne scope: JEDER Song in der
+    Tabelle, also die komplette Cache-DB).
   - Nachhol-Modus (retry_missing, Phase 3): fragt gezielt nur (Song,
-    Provider)-Kombinationen mit status IN ('nichts', 'fehlschlag') erneut ab.
+    Provider)-Kombinationen mit status IN ('nichts', 'fehlschlag') erneut ab
+    -- bewusst weiterhin PFAD-unabhängig, deckt immer die ganze Cache-DB ab
+    (siehe dortiger Docstring).
 
 Beide Modi bauen auf fetch_songtext._query_provider auf (Rate-Limit-Handling,
 lrclib-Dump-Lookup, Cache-Schreiblogik -- siehe dortiger Docstring) statt
@@ -57,10 +61,25 @@ def _prepare_fetch_songtext_globals(conn: sqlite3.Connection) -> None:
     )
 
 
-def fetch_all(conn: sqlite3.Connection) -> tuple[int, int]:
-    """Normal-Modus (Phase 2): fragt für jeden Song in "songs" alle 4
-    Anbieter gleichzeitig ab (ThreadPoolExecutor, analog zum Provider-Block
-    in fetch_songtext.fetch_lrc, Zeile ~1348-1361 der committeten Version).
+def fetch_all(
+    conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
+) -> tuple[int, int]:
+    """Normal-Modus (Phase 2): fragt Songs aus "songs" bei allen 4 Anbietern
+    gleichzeitig ab (ThreadPoolExecutor, analog zum Provider-Block in
+    fetch_songtext.fetch_lrc, Zeile ~1348-1361 der committeten Version).
+
+    scope=None (Standard) fragt JEDEN Song in "songs" ab -- die komplette
+    Cache-DB, über alle jemals gescannten Alben hinweg. Das ist nur
+    beabsichtigt, wenn wirklich die ganze Bibliothek nachgezogen werden soll
+    (z.B. songtext_pipeline.py --phase 2 ohne PFAD). Ist scope gesetzt (eine
+    Menge von (artist_key, titel_key)-Paaren, siehe songtext_pipeline.main()),
+    werden NUR Songs abgefragt, deren (artist_key, titel_key) darin
+    enthalten ist -- alle anderen Zeilen aus "songs" werden komplett
+    übersprungen, weder in `queried` noch in `skipped` gezählt (sie wurden ja
+    gar nicht betrachtet). Behebt einen echten Bug aus einem Produktions-Lauf
+    (ROADMAP.md): ohne scope fragte ein PFAD-Lauf über ein einzelnes Album
+    versehentlich JEDE Song-Zeile der kompletten, über Jahre gewachsenen
+    Cache-DB live ab, statt nur die Songs des aktuellen Albums.
 
     Jedes Ergebnis landet als Seiteneffekt INNERHALB von _query_provider in
     der Cache-DB (Tabellen "ergebnisse"/"texte") -- die zurückgegebenen
@@ -84,7 +103,7 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[int, int]:
     nur bei gesetztem genre ausgeführt.
 
     Gibt (Anzahl abgefragter Songs, Anzahl wegen Genre übersprungener Songs)
-    zurück.
+    zurück -- Songs außerhalb von scope zählen in keinem der beiden.
     """
     _prepare_fetch_songtext_globals(conn)
     env = fetch_songtext._load_env()
@@ -95,6 +114,8 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[int, int]:
     queried = 0
     skipped = 0
     for artist_key, titel_key, genre in rows:
+        if scope is not None and (artist_key, titel_key) not in scope:
+            continue
         if genre and fetch_songtext._is_skip_genre(genre):
             skipped += 1
             continue

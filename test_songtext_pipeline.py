@@ -364,3 +364,110 @@ def test_main_phase_3_holt_nur_nichts_fehlschlag_kombis_nach(
         }
     finally:
         _reset_fetch_songtext_globals()
+
+
+# --- Regressionstest: Phase 2 muss auf den PFAD-Umfang eingrenzen ------
+#
+# Realer Produktions-Bug (siehe ROADMAP.md): ein Lauf über ein einzelnes
+# Album (`songtext_pipeline.py ALBUM_PFAD --recursive`, alle 5 Phasen) fragte
+# in Phase 2 JEDEN Song ab, der jemals in der Cache-DB gelandet war --
+# tausende Songs aus Jahren fetch_songtext.py-Nutzung, nicht nur die Songs
+# des aktuellen Albums. Ursache: fetch_all() kannte keinen Scope, und die
+# Datei-Zuordnung wurde ohnehin VOR Phase 1 berechnet (sah die frisch
+# gescannten Songs also noch gar nicht).
+
+
+def test_main_phase_1_2_fragt_nur_pfad_songs_ab_nicht_die_ganze_db(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    album_dir = tmp_path / "album"
+    album_dir.mkdir()
+
+    # simuliert einen frueheren Lauf ueber ein komplett anderes Album --
+    # diese Zeile stand schon VOR diesem Lauf in der Cache-DB.
+    conn = cs.open_cache(db_path)
+    cs._get_or_create_song(
+        conn, cs.normalize_key("Andere Band"), cs.normalize_key("Anderer Song"), None
+    )
+    conn.commit()
+    conn.close()
+
+    file_a = album_dir / "01 - Song A.flac"
+    file_a.write_bytes(b"")
+    file_b = album_dir / "02 - Song B.flac"
+    file_b.write_bytes(b"")
+    tags_by_path = {
+        file_a: ("Album Artist", "Song A", ""),
+        file_b: ("Album Artist", "Song B", ""),
+    }
+    monkeypatch.setattr(
+        songtext_pipeline.fetch_songtext,
+        "_read_audio_tags",
+        lambda path: tags_by_path.get(path, ("", "", "")),
+    )
+    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    fake_run = _fake_subprocess_run({})
+    monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(album_dir), "--phase", "1,2"]
+    )
+
+    try:
+        songtext_pipeline.main()
+
+        out = capsys.readouterr().out
+        assert "Phase 1 (scan_songs): 2 Song(s) gescannt/aktualisiert." in out
+        assert "Phase 2 (fetch_providers, Normal-Modus): 2 Song(s) abgefragt." in out
+
+        # 2 Album-Songs x 4 Provider -- NICHT der dritte, vorbestehende Song
+        assert len(fake_run.calls) == 8
+        assert all("andere band" not in q for q, _p in fake_run.calls)
+        assert all("anderer song" not in q for q, _p in fake_run.calls)
+
+        conn = cs.open_cache(db_path)
+        assert (
+            cs.get_provider(
+                conn,
+                "musixmatch",
+                cs.normalize_key("Andere Band"),
+                cs.normalize_key("Anderer Song"),
+            )
+            is None
+        )
+    finally:
+        _reset_fetch_songtext_globals()
+
+
+def test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab(
+    tmp_path, monkeypatch, capsys
+):
+    """Gegenprobe: --phase 2 OHNE PFAD ist weiterhin die bewusste
+    "ganze Bibliothek nachziehen"-Absicht -- fragt also auch Songs aus
+    früheren, anderen Läufen ab."""
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    conn = cs.open_cache(db_path)
+    cs._get_or_create_song(
+        conn, cs.normalize_key("Andere Band"), cs.normalize_key("Anderer Song"), None
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    fake_run = _fake_subprocess_run({})
+    monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "2"])
+
+    try:
+        songtext_pipeline.main()
+
+        out = capsys.readouterr().out
+        assert "Phase 2 (fetch_providers, Normal-Modus): 1 Song(s) abgefragt." in out
+        assert any("andere band" in q for q, _p in fake_run.calls)
+    finally:
+        _reset_fetch_songtext_globals()

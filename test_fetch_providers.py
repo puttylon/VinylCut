@@ -192,6 +192,69 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         assert (queried, skipped) == (1, 0)
         assert len(fake_run.calls) == 4
 
+    def test_scope_grenzt_auf_angegebene_songs_ein(self, tmp_path, monkeypatch):
+        """Regressionstest für den realen Produktionsbug (siehe ROADMAP.md):
+        ohne scope fragte fetch_all() JEDEN Song ab, der jemals in der
+        Cache-DB gelandet ist -- nicht nur die Songs des aktuellen PFAD-
+        Laufs."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs._get_or_create_song(conn, "andere band", "anderer song", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(
+            fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False
+        )
+        fake_run = _fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        queried, skipped = fetch_providers.fetch_all(
+            conn, scope={("artist a", "title a")}
+        )
+
+        assert (queried, skipped) == (1, 0)
+        assert len(fake_run.calls) == 4  # nur "artist a" x 4 Provider
+        assert all("andere band" not in q for q, _p in fake_run.calls)
+        assert cs.get_provider(conn, "lrclib", "andere band", "anderer song") is None
+
+    def test_leerer_scope_fragt_gar_nichts_ab(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("leerer scope darf nie live abfragen")
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+
+        assert fetch_providers.fetch_all(conn, scope=set()) == (0, 0)
+
+    def test_scope_none_bleibt_wie_bisher_die_ganze_datenbank(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs._get_or_create_song(conn, "andere band", "anderer song", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        fake_run = _fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        queried, skipped = fetch_providers.fetch_all(conn, scope=None)
+
+        assert (queried, skipped) == (2, 0)
+        assert any("andere band" in q for q, _p in fake_run.calls)
+
     def test_temporaere_lrc_pfade_werden_nach_dem_cachen_geloescht(
         self, tmp_path, monkeypatch
     ):

@@ -2749,3 +2749,146 @@ class TestRetryMissingCli:
         )
         assert result.returncode == 2
         assert "--artist/--title" in result.stderr
+
+
+class TestRetryMissingUsesLrclibDump:
+    """Regressionstest für einen echten Bug (Live-Test durch den Nutzer): der
+    --retry-missing-Zweig in main() endete mit `return`, BEVOR der Codeblock
+    erreicht wurde, der _lrclib_dump_conn öffnet -- _lrclib_dump_conn blieb
+    für den GESAMTEN --retry-missing-Lauf beim Modul-Default None, der lokale
+    Datenbank-Abzug wurde nie konsultiert, jede Anfrage ging sofort live raus
+    (beobachtet: 5-10s pro Song, "weiterhin Fehler (rate_limit)"). Fix:
+    _open_lrclib_dump_conn() wird jetzt aus BEIDEN main()-Zweigen aufgerufen.
+
+    Zusätzlich deckte die Fehlersuche eine zweite, subtilere Ursache auf:
+    _retry_missing() setzt _cache_refresh für die Laufzeit auf True (um den
+    EIGENEN Cache-Lookup zu zwingen) -- der Dump-Guard in _query_provider war
+    aber ebenfalls an "not _cache_refresh" gebunden, hätte also einen
+    Dump-Treffer selbst bei offener Verbindung ignoriert. Fix: neues Flag
+    _retry_missing_active unterscheidet beide Bedeutungen von _cache_refresh
+    (siehe Modulkommentar bei _retry_missing_active in fetch_songtext.py).
+
+    Testet main() end-to-end (nicht nur _retry_missing() direkt, wie
+    TestRetryMissing) -- nur so wäre der erste Teilbug (main() öffnet die
+    Dump-Verbindung im --retry-missing-Zweig nie) überhaupt aufgefallen.
+    main() öffnet die eigene Cache-DB immer relativ zu __file__ (siehe
+    TestRetryMissing-Klassendocstring) -- cache_store.open_cache wird deshalb
+    auf eine tmp_path-DB umgelenkt, damit die echte Produktions-DB
+    unangetastet bleibt."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._lrclib_dump_conn = None
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+        fetch_songtext._retry_missing_active = False
+
+    def _make_dump_file(
+        self, tmp_path, artist_lower: str, title_lower: str, content: str
+    ) -> Path:
+        dump_path = tmp_path / "dump.db"
+        conn = sqlite3.connect(str(dump_path))
+        conn.executescript(
+            "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name_lower TEXT, artist_name_lower TEXT, last_lyrics_id INTEGER);"
+            "CREATE TABLE lyrics (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "plain_lyrics TEXT, synced_lyrics TEXT, has_plain_lyrics BOOLEAN, "
+            "has_synced_lyrics BOOLEAN);"
+        )
+        cur = conn.execute(
+            "INSERT INTO lyrics (synced_lyrics, has_synced_lyrics, has_plain_lyrics) "
+            "VALUES (?, 1, 0)",
+            (content,),
+        )
+        conn.execute(
+            "INSERT INTO tracks (name_lower, artist_name_lower, last_lyrics_id) "
+            "VALUES (?, ?, ?)",
+            (title_lower, artist_lower, cur.lastrowid),
+        )
+        conn.commit()
+        conn.close()
+        return dump_path
+
+    def _redirect_cache_db(self, tmp_path, monkeypatch) -> None:
+        """main() öffnet die Cache-DB immer relativ zu __file__ -- auf eine
+        tmp_path-DB umlenken, damit die echte Produktions-DB unangetastet
+        bleibt (siehe TestRetryMissing-Klassendocstring zum selben Problem)."""
+        original_open_cache = cache_store.open_cache
+        monkeypatch.setattr(
+            cache_store,
+            "open_cache",
+            lambda path: original_open_cache(tmp_path / "cache.db"),
+        )
+
+    def test_end_to_end_dump_treffer_verhindert_live_abfrage(
+        self, tmp_path, monkeypatch
+    ):
+        seed_conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store.put_provider(
+            seed_conn, "lrclib", "the artist", "the title", "nichts", None
+        )
+        seed_conn.close()
+
+        dump_path = self._make_dump_file(
+            tmp_path, "the artist", "the title", "[00:01.00]dump-inhalt"
+        )
+        monkeypatch.setattr(fetch_songtext, "_LRCLIB_DUMP_PATH", dump_path)
+        self._redirect_cache_db(tmp_path, monkeypatch)
+
+        def _fail_if_called(*a, **k):
+            pytest.fail(
+                "--retry-missing muss einen Dump-Treffer nutzen, nicht live fragen"
+            )
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", "--retry-missing", "lrclib"]
+        )
+        fetch_songtext.main()
+
+        # Regressionscheck für den ursprünglichen Bug: main() muss die
+        # Dump-Verbindung auch im --retry-missing-Zweig tatsächlich geöffnet
+        # haben.
+        assert fetch_songtext._lrclib_dump_conn is not None
+
+    def test_end_to_end_fehlschlag_wird_durch_dump_treffer_zu_treffer(
+        self, tmp_path, monkeypatch
+    ):
+        """Startstatus 'fehlschlag' (nicht 'nichts') -- passend zum vom Nutzer
+        live beobachteten Symptom ("weiterhin Fehler (rate_limit)")."""
+        seed_conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store.put_provider(
+            seed_conn,
+            "lrclib",
+            "the artist",
+            "the title",
+            "fehlschlag",
+            None,
+            fehlergrund="rate_limit",
+        )
+        seed_conn.close()
+
+        dump_path = self._make_dump_file(
+            tmp_path, "the artist", "the title", "[00:01.00]dump-inhalt"
+        )
+        monkeypatch.setattr(fetch_songtext, "_LRCLIB_DUMP_PATH", dump_path)
+        self._redirect_cache_db(tmp_path, monkeypatch)
+
+        def _fail_if_called(*a, **k):
+            pytest.fail(
+                "--retry-missing muss einen Dump-Treffer nutzen, nicht live fragen"
+            )
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", "--retry-missing", "lrclib"]
+        )
+        fetch_songtext.main()
+
+        # Ohne jede Live-Abfrage: der Cache-Eintrag ist von 'fehlschlag' auf
+        # 'treffer' mit dem Dump-Inhalt gewechselt.
+        verify_conn = cache_store.open_cache(tmp_path / "cache.db")
+        cached = cache_store.get_provider(
+            verify_conn, "lrclib", "the artist", "the title"
+        )
+        assert cached == {"status": "treffer", "content": "[00:01.00]dump-inhalt"}

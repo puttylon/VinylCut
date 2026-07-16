@@ -171,6 +171,18 @@ _cache_refresh = False
 _cache_only = False
 _cache_lock = threading.Lock()
 
+# _retry_missing() setzt _cache_refresh für die Dauer seines Laufs auf True --
+# aber NUR, um den EIGENEN Cache-Lookup in _query_provider zu zwingen, ein
+# gecachtes "nichts" nicht als gültigen (nicht abgelaufenen) Treffer zu werten
+# (siehe _retry_missing-Docstring). Das ist eine andere Absicht als bei
+# --force/--refresh-cache, wo _cache_refresh="wirklich alles frisch, auch den
+# Dump umgehen" bedeutet. Ohne diese Unterscheidung würde der lrclib-Dump-
+# Lookup in _query_provider (der ebenfalls an "not _cache_refresh" hängt)
+# während JEDES --retry-missing-Laufs übersprungen -- ein Dump-Treffer könnte
+# dann nie einen Live-Versuch ersparen, obwohl genau das der Sinn ist. Siehe
+# Guard in _query_provider.
+_retry_missing_active = False
+
 # Lokaler LRCLib-Datenbank-Abzug (SMB-Netzlaufwerk, Original-LRCLib-Schema,
 # aktuell nicht mehr aktiv befüllt): wird in _query_provider bei der lrclib-
 # Quelle VOR einer echten Live-Abfrage durchsucht (cache_store.lookup_lrclib_dump),
@@ -462,7 +474,11 @@ def _query_provider(
     garantiert nie live fragt, egal ob die Cache-DB verfügbar ist.
 
     Lokaler LRCLib-Dump (nur provider == "lrclib", nur wenn not _cache_refresh
-    — genau wie beim eigenen Cache-Lookup oben): zwischen dem eigenen Cache-
+    ODER _retry_missing_active — siehe _retry_missing_active-Modulkommentar:
+    _cache_refresh bedeutet bei --force/--refresh-cache "wirklich alles frisch,
+    auch den Dump umgehen", bei --retry-missing dagegen nur "den EIGENEN
+    Cache-Lookup oben nicht als gültig werten" — ein Dump-Treffer soll dort
+    weiterhin einen Live-Versuch ersparen dürfen): zwischen dem eigenen Cache-
     Lookup und dem --cache-only-Guard wird zuerst cache_store.lookup_lrclib_dump
     gegen _lrclib_dump_conn geprüft (Beschleuniger, spart eine echte Live-
     Abfrage). Ist der Dump nicht verfügbar (_lrclib_dump_conn None, z.B. Mount
@@ -507,7 +523,7 @@ def _query_provider(
 
     if (
         provider == "lrclib"
-        and not _cache_refresh
+        and (not _cache_refresh or _retry_missing_active)
         and cache_store is not None
         and _lrclib_dump_conn is not None
     ):
@@ -1810,6 +1826,13 @@ def _retry_missing(providers: list[str], artist: str | None, title: str | None) 
     "nichts" von _query_provider als gültiger (nicht abgelaufener) Cache-
     Treffer behandelt und NIE live nachgefragt (siehe get_provider: nur
     status='fehlschlag' erzwingt dort von sich aus einen Live-Versuch).
+    Zusätzlich wird _retry_missing_active für dieselbe Dauer auf True gesetzt
+    (siehe Modulkommentar dort): _cache_refresh allein würde in
+    _query_provider auch den lrclib-Datenbank-Abzug überspringen (der genauso
+    an "not _cache_refresh" hängt, siehe dortiger Guard) -- hier soll ein
+    Dump-Treffer aber ausdrücklich weiterhin einen Live-Versuch ersparen
+    dürfen, _cache_refresh=True bedeutet in diesem Kontext nur "den EIGENEN
+    Cache nicht als gültig werten", nicht "auch den Dump umgehen".
 
     Query-String: da die Cache-DB nur normalisierte artist_key/titel_key
     speichert (NFC, gestrippt, kleingeschrieben -- siehe cache_store.py),
@@ -1885,11 +1908,16 @@ def _retry_missing(providers: list[str], artist: str | None, title: str | None) 
         return
 
     env = _load_env()
-    global _cache_refresh
+    global _cache_refresh, _retry_missing_active
     prev_refresh = _cache_refresh
     # Erzwingt bei _query_provider den Live-Versuch, statt ein gecachtes
     # "nichts" als gültigen (nicht abgelaufenen) Cache-Treffer zu werten.
     _cache_refresh = True
+    # Signalisiert _query_provider, dass dieses _cache_refresh=True NICHT
+    # "auch den lrclib-Dump umgehen" bedeutet (siehe Modulkommentar bei
+    # _retry_missing_active und Docstring oben) -- ein Dump-Treffer soll
+    # weiterhin einen Live-Versuch ersparen dürfen.
+    _retry_missing_active = True
     checked = now_found = still_missing = still_failing = 0
     try:
         for song_id, provider, song_artist_key, song_title_key in rows:
@@ -1937,12 +1965,47 @@ def _retry_missing(providers: list[str], artist: str | None, title: str | None) 
                 )
     finally:
         _cache_refresh = prev_refresh
+        _retry_missing_active = False
 
     print(
         f"\n--retry-missing fertig — {checked} (Song, Provider)-Kombinationen geprüft, "
         f"{now_found} jetzt gefunden, {still_missing} weiterhin ohne Treffer, "
         f"{still_failing} weiterhin mit Fehler (später erneut versuchen)."
     )
+
+
+def _open_lrclib_dump_conn(no_cache: bool) -> sqlite3.Connection | None:
+    """Öffnet den lokalen LRCLib-Datenbank-Abzug (siehe _query_provider) oder
+    gibt None zurück -- still degradieren bei jedem Fehler (Mount fehlt,
+    Datei fehlt, sonstiger Öffnungsfehler, oder no_cache=True) -- kein
+    Absturz, keine Meldung, die den Lauf stört (reiner Beschleuniger).
+    immutable=1 ist auf dem SMB-Mount nötig (siehe cache_store.
+    lookup_lrclib_dump-Docstring): SMB unterstützt kein SQLite-Locking,
+    mode=ro allein scheitert.
+
+    no_cache schaltet den Abzug ebenso ab wie den eigenen Cache
+    (CACHE_DESIGN.md: "--no-cache ignoriert den Cache komplett") -- als
+    expliziter Parameter statt eines globalen Zugriffs auf args.no_cache,
+    damit diese Funktion von JEDEM main()-Zweig aufgerufen werden kann
+    (auch dem --retry-missing-Zweig, wo --no-cache zwar laut Argparse-Check
+    ohnehin ausgeschlossen ist, aber die Funktion soll sich nicht
+    stillschweigend auf diese Regel verlassen).
+
+    Muss aus JEDEM main()-Zweig aufgerufen werden, der live gegen lrclib
+    fragen könnte (regulärer Lauf UND --retry-missing) -- ein früher
+    `return` vor dieser Stelle lässt _lrclib_dump_conn sonst beim
+    Modul-Default None stehen (Bug: --retry-missing ging deshalb bislang
+    IMMER live, ohne den Abzug je zu konsultieren)."""
+    if cache_store is None or no_cache:
+        return None
+    try:
+        return sqlite3.connect(
+            f"file:{_LRCLIB_DUMP_PATH}?mode=ro&immutable=1",
+            uri=True,
+            check_same_thread=False,
+        )
+    except Exception:
+        return None
 
 
 def main() -> None:
@@ -2109,6 +2172,7 @@ def main() -> None:
         except Exception as e:
             print(f"FEHLER: Cache-Datenbank konnte nicht geöffnet werden ({e}).")
             sys.exit(1)
+        _lrclib_dump_conn = _open_lrclib_dump_conn(args.no_cache)
         providers = (
             _ALL_PROVIDERS if args.retry_missing == "all" else [args.retry_missing]
         )
@@ -2155,24 +2219,7 @@ def main() -> None:
             )
             _cache_conn = None
 
-    # Lokaler LRCLib-Datenbank-Abzug (siehe _query_provider): still degradieren
-    # bei jedem Fehler (Mount fehlt, Datei fehlt, sonstiger Öffnungsfehler) —
-    # kein Absturz, keine Meldung, die den Lauf stört (reiner Beschleuniger).
-    # immutable=1 ist auf dem SMB-Mount nötig (siehe cache_store.lookup_lrclib_dump-
-    # Docstring): SMB unterstützt kein SQLite-Locking, mode=ro allein scheitert.
-    # --no-cache schaltet auch diesen Abzug ab (CACHE_DESIGN.md: "--no-cache
-    # ignoriert den Cache komplett") — dieselbe Bedingung wie beim _cache_conn-
-    # Block oben.
-    _lrclib_dump_conn = None
-    if cache_store is not None and not args.no_cache:
-        try:
-            _lrclib_dump_conn = sqlite3.connect(
-                f"file:{_LRCLIB_DUMP_PATH}?mode=ro&immutable=1",
-                uri=True,
-                check_same_thread=False,
-            )
-        except Exception:
-            _lrclib_dump_conn = None
+    _lrclib_dump_conn = _open_lrclib_dump_conn(args.no_cache)
 
     env = _load_env()
     if not args.no_whisper and not args.fast:

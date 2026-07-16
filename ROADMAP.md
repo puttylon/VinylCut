@@ -1,6 +1,6 @@
 # VinylCut Roadmap
 
-## Geplant: Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (Meilenstein 1 von 5 erledigt)
+## Geplant: Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (Meilenstein 2 von 5 erledigt)
 
 **Auslöser:** Nach dem lrclib-Dump-Bugfix (v1.13.1) und dem Fund, dass der
 Dump falsch verknüpfte Songtexte enthalten kann (Art Blakey „Blues March"
@@ -126,7 +126,7 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   Meilenstein 0 (keine Verschiebung). `ruff check`/`ruff format` sauber.
   Code-Diff gegengelesen.
 
-**Nächster Schritt: Meilenstein 2 — Phase 2 + Nachhol-Modus (`fetch_providers.py`)**
+**✓ Meilenstein 2 — erledigt — Phase 2 + Nachhol-Modus (`fetch_providers.py`)**
 - Baut: Normal-Modus (alle Anbieter für jeden Song aus `songs` abfragen)
   und Nachhol-Modus (nur `status IN (nichts, fehlschlag)` erneut abfragen)
   in einem Skript, per Flag umschaltbar.
@@ -149,8 +149,37 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   für einen vollständigen Pipeline-Lauf — kann aber auch gegen die
   bestehende, bereits befüllte Produktions-Cache-DB entwickelt werden, da
   dort aus früheren `fetch_songtext.py`-Läufen schon Songs stehen.
+- **Umgesetzt und verifiziert:** `fetch_providers.py` mit `fetch_all(conn)
+  -> (queried, skipped)` (Phase 2: fragt jeden Song aus `songs` bei allen 4
+  Anbietern ab, per `ThreadPoolExecutor`, wiederverwendet
+  `fetch_songtext._query_provider` unverändert statt zu duplizieren) und
+  `retry_missing(conn, providers=None)` (Phase 3: dünner Wrapper um das
+  bereits fertige `fetch_songtext._retry_missing`).
+  `_prepare_fetch_songtext_globals()` repliziert das
+  Cache-Connection/TTL/lrclib-Dump-Setup aus `fetch_songtext.main()`.
+  `songtext_pipeline.py`: `--phase 2`/`--phase 3` rufen jetzt echt auf; die
+  Cache-Connection wird jetzt IMMER geöffnet (nicht mehr nur bei PFAD+
+  Datei-Phase), da alle 5 Phasen die DB brauchen — nur Phase 1/4 brauchen
+  zusätzlich PFAD.
+  Im Bau entdeckte Lücke, direkt behoben (kein bereits bekannter Punkt aus
+  dem „Weiterhin offen"-Absatz oben, sondern neu beim Umsetzen gefunden):
+  `fetch_all()` fragte anfangs ALLE Songs ab, auch Hörbücher/Hörspiele/
+  Instrumentals — im alten `fetch_songtext.py` verhindert `_is_skip_genre()`
+  das VOR der Anbieter-Abfrage (spart ratenlimitierte Anfragen für Songs
+  ohne zu erwartenden Songtext). Nachgezogen: `fetch_all()` liest `genre`
+  mit, überspringt Skip-Genre-Songs komplett (mit `None`-Guard, da `genre`
+  in der DB NULL sein kann), gibt `(queried, skipped)` zurück,
+  `songtext_pipeline.py` zeigt die übersprungene Zahl in einer eigenen
+  Log-Zeile.
+  `pytest test_fetch_providers.py test_songtext_pipeline.py` 30/30 grün.
+  Volle Suite: 405 grün + dieselben 13 vorbestehenden, unabhängigen
+  Fehlschläge (Debug-Hack in `fetch_songtext.py`) — keine neuen.
+  `ruff check`/`ruff format` sauber. Code-Diff gegengelesen. Auf einen
+  Live-Smoke-Test von `--phase 2`/`--phase 3` wurde bewusst verzichtet
+  (würde echte Netzwerk-Abfragen gegen die Produktions-Cache-DB auslösen) —
+  die gemockten Tests decken das Verhalten ab.
 
-**Meilenstein 3 — Phase 4 (`evaluate_lyrics.py`)**
+**Nächster Schritt: Meilenstein 3 — Phase 4 (`evaluate_lyrics.py`)**
 - Baut: Konsens-Prüfung + Whisper-Entscheidung, wie im Dokument unter
   „Wie ruft das Steuer-Programm die Phasen auf?" beschrieben (ein Prozess,
   direkter Funktionsaufruf, Whisper-Modell + IDF-Hintergrund einmal pro

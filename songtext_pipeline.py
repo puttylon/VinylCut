@@ -4,10 +4,11 @@
 Orchestriert die 5 Phasen aus dem Architektur-Dokument
 "workflow für songexte.txt" (Abschnitt "ZIELARCHITEKTUR"): scannen, Anbieter
 abfragen, Anbieter nachholen, bewerten, .lrc schreiben. Phase 1 (scan_songs,
-Meilenstein 1) läuft bereits echt. Die restlichen 3 Phasen-Programme
-(fetch_providers, evaluate_lyrics, write_lrc) sind noch Platzhalter -- sie
-geben eine Log-Zeile aus und tun sonst nichts. Die echte Logik kommt in den
-folgenden Meilensteinen (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
+Meilenstein 1) und Phase 2/3 (fetch_providers, Normal-/Nachhol-Modus,
+Meilenstein 2) laufen bereits echt. Die restlichen 2 Phasen-Programme
+(evaluate_lyrics, write_lrc) sind noch Platzhalter -- sie geben eine Log-Zeile
+aus und tun sonst nichts. Die echte Logik kommt in den folgenden
+Meilensteinen (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
@@ -26,6 +27,7 @@ import sqlite3
 from pathlib import Path
 
 import cache_store
+import fetch_providers
 import fetch_songtext
 import scan_songs
 
@@ -105,14 +107,28 @@ def build_file_song_map(
     return mapping
 
 
-def fetch_providers(mode: str) -> None:
-    """Platzhalter für Phase 2/3 -- kommt in Meilenstein 2 (fetch_providers.py).
+def fetch_providers_normal(conn: sqlite3.Connection) -> None:
+    """Phase 2: Normal-Modus von fetch_providers -- fragt jeden Song in
+    "songs" bei allen 4 Anbietern ab (siehe fetch_providers.fetch_all).
+    Songs mit Skip-Genre (Hörbuch/Hörspiel/... ) werden dabei übersprungen --
+    die Anzahl wird separat sichtbar gemacht, nicht nur stillschweigend
+    gezählt."""
+    queried, skipped = fetch_providers.fetch_all(conn)
+    print(f"Phase 2 (fetch_providers, Normal-Modus): {queried} Song(s) abgefragt.")
+    if skipped:
+        print(
+            f"  {skipped} Song(s) wegen Genre übersprungen "
+            "(Hörbuch/Hörspiel/Instrumental/...)."
+        )
 
-    mode: "normal" (Phase 2) oder "nachhol" (Phase 3).
-    """
-    phase = 2 if mode == "normal" else 3
-    label = "Normal-Modus" if mode == "normal" else "Nachhol-Modus"
-    print(f"Phase {phase} (fetch_providers, {label}) würde hier laufen.")
+
+def fetch_providers_nachhol(conn: sqlite3.Connection) -> None:
+    """Phase 3: Nachhol-Modus von fetch_providers -- fragt gezielt nur
+    (Song, Provider)-Kombinationen mit status 'nichts'/'fehlschlag' erneut ab
+    (siehe fetch_providers.retry_missing). Reine Cache-DB-Operation, PFAD
+    wird nicht gebraucht."""
+    print("Phase 3 (fetch_providers, Nachhol-Modus):")
+    fetch_providers.retry_missing(conn)
 
 
 def evaluate_lyrics() -> None:
@@ -125,9 +141,10 @@ def write_lrc() -> None:
     print("Phase 5 (write_lrc) würde hier laufen.")
 
 
+# Phasen ohne Bedarf an der Cache-Connection als Argument (aktuell nur noch
+# die beiden Platzhalter 4/5) -- Phase 1/2/3 brauchen conn und werden direkt
+# in main()s Schleife behandelt, siehe dort.
 _PHASE_DISPATCH = {
-    2: lambda: fetch_providers("normal"),
-    3: lambda: fetch_providers("nachhol"),
     4: evaluate_lyrics,
     5: write_lrc,
 }
@@ -171,16 +188,17 @@ def main() -> None:
 
     phases = args.phase if args.phase is not None else list(_ALL_PHASES)
 
-    # PFAD fehlt, aber eine gewählte Phase bräuchte eigentlich eine Datei:
-    # kein Fehler -- die Datei-Zuordnung/der Scan wird einfach nicht versucht
-    # (siehe Design-Dokument, Abschnitt 3, Randfall b). Die Verbindung bleibt
-    # über die gesamte Phasen-Schleife offen, damit Phase 1 sie fürs Scannen
-    # mitbenutzen kann (statt einer zweiten Connection).
+    # Die Cache-Connection wird von jeder Phase gebraucht (alle 5 lesen/
+    # schreiben in der Cache-DB) -- deshalb immer geöffnet, unabhängig von
+    # PFAD. Nur Phase 1 und 4 brauchen zusätzlich eine echte Audiodatei
+    # (_PHASES_NEEDING_FILE); PFAD fehlt aber, ist das kein Fehler -- die
+    # Datei-Zuordnung/der Scan wird einfach nicht versucht (siehe
+    # Design-Dokument, Abschnitt 3, Randfall b). Die Verbindung bleibt über
+    # die gesamte Phasen-Schleife offen (statt je Phase eine eigene).
+    conn = cache_store.open_cache(_default_db_path())
     root: Path | None = None
-    conn: sqlite3.Connection | None = None
     if args.path and any(p in _PHASES_NEEDING_FILE for p in phases):
         root = Path(args.path).resolve()
-        conn = cache_store.open_cache(_default_db_path())
         file_song_map = build_file_song_map(root, args.recursive, conn)
         print(
             f"Datei-Zuordnung: {len(file_song_map)} Datei(en) einem Song in "
@@ -190,18 +208,21 @@ def main() -> None:
     try:
         for phase in phases:
             if phase == 1:
-                if root is None or conn is None:
+                if root is None:
                     print(
                         "Phase 1 (scan_songs): kein PFAD angegeben, nichts zu scannen."
                     )
                     continue
                 count = scan_songs.scan(root, args.recursive, conn)
                 print(f"Phase 1 (scan_songs): {count} Song(s) gescannt/aktualisiert.")
+            elif phase == 2:
+                fetch_providers_normal(conn)
+            elif phase == 3:
+                fetch_providers_nachhol(conn)
             else:
                 _PHASE_DISPATCH[phase]()
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
 
 
 if __name__ == "__main__":

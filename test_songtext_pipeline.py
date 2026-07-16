@@ -35,11 +35,15 @@ def test_parse_phase_list_ungueltiger_wert_wirft_value_error(spec):
 
 
 def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
+    # eigene DB in tmp_path -- sonst würde main() die echte Produktions-Cache-DB
+    # öffnen (siehe _default_db_path).
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(tmp_path)])
     songtext_pipeline.main()
 
     out = capsys.readouterr().out
-    assert "Phase 1 (scan_songs) würde hier laufen." in out
+    assert "Phase 1 (scan_songs): 0 Song(s) gescannt/aktualisiert." in out
     assert "Phase 2 (fetch_providers, Normal-Modus) würde hier laufen." in out
     assert "Phase 3 (fetch_providers, Nachhol-Modus) würde hier laufen." in out
     assert "Phase 4 (evaluate_lyrics) würde hier laufen." in out
@@ -70,6 +74,49 @@ def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, 
     assert "Phase 3" not in out
     assert "Phase 4 (evaluate_lyrics) würde hier laufen." in out
     assert "Phase 5 (write_lrc) würde hier laufen." in out
+
+
+def test_main_phase_1_ohne_pfad_meldet_und_ueberspringt(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "1"])
+    songtext_pipeline.main()
+
+    out = capsys.readouterr().out
+    assert "Phase 1 (scan_songs): kein PFAD angegeben, nichts zu scannen." in out
+
+
+# --- --phase 1 Ende-zu-Ende: Song landet wirklich in der DB -------------
+
+
+def test_main_phase_1_end_to_end_song_landet_in_songs_tabelle(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    audio_file = tmp_path / "01 - Naturtraene.flac"
+    audio_file.write_bytes(b"")
+
+    monkeypatch.setattr(
+        songtext_pipeline.fetch_songtext,
+        "_read_audio_tags",
+        lambda path: ("Nina Hagen", "Naturtraene", "Punk"),
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "1"]
+    )
+
+    songtext_pipeline.main()
+
+    out = capsys.readouterr().out
+    assert "Phase 1 (scan_songs): 1 Song(s) gescannt/aktualisiert." in out
+
+    conn = cs.open_cache(db_path)
+    row = conn.execute("SELECT artist_key, titel_key, genre FROM songs").fetchone()
+    assert row == (
+        cs.normalize_key("Nina Hagen"),
+        cs.normalize_key("Naturtraene"),
+        "Punk",
+    )
 
 
 def test_main_phase_ungueltiger_wert_exit_2(tmp_path, monkeypatch, capsys):

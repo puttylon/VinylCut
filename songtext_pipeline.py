@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Steuer-Skript für die Songtexte-Pipeline (Meilenstein 0 -- Grundgerüst).
+"""Steuer-Skript für die Songtexte-Pipeline.
 
 Orchestriert die 5 Phasen aus dem Architektur-Dokument
 "workflow für songexte.txt" (Abschnitt "ZIELARCHITEKTUR"): scannen, Anbieter
-abfragen, Anbieter nachholen, bewerten, .lrc schreiben. In diesem Meilenstein
-sind die 4 echten Phasen-Programme (scan_songs, fetch_providers,
-evaluate_lyrics, write_lrc) nur Platzhalter -- sie geben eine Log-Zeile aus
-und tun sonst nichts. Die echte Logik kommt in den folgenden Meilensteinen
-(siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
+abfragen, Anbieter nachholen, bewerten, .lrc schreiben. Phase 1 (scan_songs,
+Meilenstein 1) läuft bereits echt. Die restlichen 3 Phasen-Programme
+(fetch_providers, evaluate_lyrics, write_lrc) sind noch Platzhalter -- sie
+geben eine Log-Zeile aus und tun sonst nichts. Die echte Logik kommt in den
+folgenden Meilensteinen (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
@@ -23,11 +23,11 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from collections.abc import Iterable
 from pathlib import Path
 
 import cache_store
 import fetch_songtext
+import scan_songs
 
 _ALL_PHASES = (1, 2, 3, 4, 5)
 # Phasen, die eine echte Audiodatei brauchen (siehe Design-Dokument, Abschnitt
@@ -72,25 +72,6 @@ def _phase_arg_type(spec: str) -> list[int]:
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
-def _iter_audio_files(root: Path, recursive: bool) -> Iterable[Path]:
-    """Liefert die Audiodateien unter root: einzelne Datei, ein Ordner (nur
-    oberste Ebene) oder rekursiv via fetch_songtext._iter_audio_dfs.
-
-    Spiegelt die Pfad-Logik aus fetch_songtext.main() (Datei/Album/rekursiv).
-    """
-    if root.is_file():
-        if root.suffix.lower() in fetch_songtext._AUDIO_EXTENSIONS:
-            return [root]
-        return []
-    if recursive:
-        return fetch_songtext._iter_audio_dfs(root)
-    return sorted(
-        p
-        for p in root.glob("*")
-        if p.suffix.lower() in fetch_songtext._AUDIO_EXTENSIONS
-    )
-
-
 def build_file_song_map(
     root: Path, recursive: bool, conn: sqlite3.Connection
 ) -> list[tuple[Path, str, str]]:
@@ -107,7 +88,7 @@ def build_file_song_map(
     jedem Lauf frisch berechnet.
     """
     mapping: list[tuple[Path, str, str]] = []
-    for audio_path in _iter_audio_files(root, recursive):
+    for audio_path in scan_songs._iter_audio_files(root, recursive):
         artist, title, _genre = fetch_songtext._read_audio_tags(audio_path)
         if not artist and not title:
             continue
@@ -122,11 +103,6 @@ def build_file_song_map(
             continue
         mapping.append((audio_path, artist_key, titel_key))
     return mapping
-
-
-def scan_songs() -> None:
-    """Platzhalter für Phase 1 -- kommt in Meilenstein 1 (scan_songs.py)."""
-    print("Phase 1 (scan_songs) würde hier laufen.")
 
 
 def fetch_providers(mode: str) -> None:
@@ -150,7 +126,6 @@ def write_lrc() -> None:
 
 
 _PHASE_DISPATCH = {
-    1: scan_songs,
     2: lambda: fetch_providers("normal"),
     3: lambda: fetch_providers("nachhol"),
     4: evaluate_lyrics,
@@ -197,22 +172,36 @@ def main() -> None:
     phases = args.phase if args.phase is not None else list(_ALL_PHASES)
 
     # PFAD fehlt, aber eine gewählte Phase bräuchte eigentlich eine Datei:
-    # kein Fehler -- die Datei-Zuordnung wird einfach nicht versucht (siehe
-    # Design-Dokument, Abschnitt 3, Randfall b).
+    # kein Fehler -- die Datei-Zuordnung/der Scan wird einfach nicht versucht
+    # (siehe Design-Dokument, Abschnitt 3, Randfall b). Die Verbindung bleibt
+    # über die gesamte Phasen-Schleife offen, damit Phase 1 sie fürs Scannen
+    # mitbenutzen kann (statt einer zweiten Connection).
+    root: Path | None = None
+    conn: sqlite3.Connection | None = None
     if args.path and any(p in _PHASES_NEEDING_FILE for p in phases):
         root = Path(args.path).resolve()
         conn = cache_store.open_cache(_default_db_path())
-        try:
-            file_song_map = build_file_song_map(root, args.recursive, conn)
-        finally:
-            conn.close()
+        file_song_map = build_file_song_map(root, args.recursive, conn)
         print(
             f"Datei-Zuordnung: {len(file_song_map)} Datei(en) einem Song in "
             "der DB zugeordnet."
         )
 
-    for phase in phases:
-        _PHASE_DISPATCH[phase]()
+    try:
+        for phase in phases:
+            if phase == 1:
+                if root is None or conn is None:
+                    print(
+                        "Phase 1 (scan_songs): kein PFAD angegeben, nichts zu scannen."
+                    )
+                    continue
+                count = scan_songs.scan(root, args.recursive, conn)
+                print(f"Phase 1 (scan_songs): {count} Song(s) gescannt/aktualisiert.")
+            else:
+                _PHASE_DISPATCH[phase]()
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":

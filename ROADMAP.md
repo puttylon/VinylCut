@@ -1,6 +1,6 @@
 # VinylCut Roadmap
 
-## Geplant: Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (Meilenstein 0 von 5 erledigt)
+## Geplant: Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (Meilenstein 1 von 5 erledigt)
 
 **Auslöser:** Nach dem lrclib-Dump-Bugfix (v1.13.1) und dem Fund, dass der
 Dump falsch verknüpfte Songtexte enthalten kann (Art Blakey „Blues March"
@@ -88,13 +88,17 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   mit der committeten Version 177/177 grün) — separates, offenes Thema,
   nicht Teil dieses Umbaus.
 
-**Nächster Schritt: Meilenstein 1 — Phase 1 (`scan_songs.py`)**
+**✓ Meilenstein 1 — erledigt — Phase 1 (`scan_songs.py`)**
 - Baut: aktiver Scan-Schritt, der Audiodateien im Umfang durchgeht, Tags
-  (Künstler/Titel/Genre) + Dauer liest und die Song-Identität in `songs`
-  einträgt.
+  (Künstler/Titel/Genre) liest und die Song-Identität in `songs` einträgt.
 - Übernehmen: `_read_audio_tags` (Zeile 256), `_clean_query_title` (Zeile
-  272), `_load_release` (Zeile 1610) für die Dauer aus `release.json`,
-  `cache_store._get_or_create_song` (bereits vorhanden, unverändert nutzbar).
+  272), `cache_store._get_or_create_song` (bereits vorhanden, unverändert
+  nutzbar).
+- Dauer: KEINE Dauer-Speicherung — `_load_release`/`release.json` wird
+  hierfür nicht genutzt. Die `songs`-Tabelle hat keine Dauer-Spalte; das
+  wäre eine Schema-Änderung gewesen, die vorher nicht abgesegnet war. Der
+  Nutzer wurde dazu gezielt gefragt und hat entschieden: „Songdauer
+  benötigen wir erst einmal nicht." Damit erledigt, keine Schema-Änderung.
 - Neu: der aktive Scan-Schritt selbst als eigener Durchlauf — heute wird die
   Song-Identität nur als Nebeneffekt von `put_provider` beim Abfragen
   angelegt, nicht vorab.
@@ -107,8 +111,22 @@ Meilenstein muss lauffähig und geprüft sein, bevor der nächste beginnt
   `TestLoadRelease`, als Vorlage/Wiederverwendung prüfen).
 - Abhängigkeit: keine Vorbedingung, direkt gegen echte Testdateien
   entwickelbar.
+- **Umgesetzt und verifiziert:** `scan_songs.py` (Funktion
+  `scan(root, recursive, conn) -> int`, liest Tags über
+  `fetch_songtext._read_audio_tags`, normalisiert wie
+  `songtext_pipeline.build_file_song_map`, trägt Song via
+  `cache_store._get_or_create_song` ein, Dateien ohne Tags werden
+  übersprungen) + `test_scan_songs.py` (8 Tests) neu angelegt.
+  `_iter_audio_files` ist von `songtext_pipeline.py` nach `scan_songs.py`
+  gewandert (vermeidet Zirkelimport). `songtext_pipeline.py`: `--phase 1`
+  ruft jetzt echt `scan_songs.scan()` auf, DB-Connection bleibt über die
+  ganze Phasen-Schleife offen statt zweimal geöffnet. `pytest
+  test_scan_songs.py test_songtext_pipeline.py` 27/27 grün, volle Suite 394
+  grün + dieselben 13 vorbestehenden, unabhängigen Fehlschläge wie bei
+  Meilenstein 0 (keine Verschiebung). `ruff check`/`ruff format` sauber.
+  Code-Diff gegengelesen.
 
-**Meilenstein 2 — Phase 2 + Nachhol-Modus (`fetch_providers.py`)**
+**Nächster Schritt: Meilenstein 2 — Phase 2 + Nachhol-Modus (`fetch_providers.py`)**
 - Baut: Normal-Modus (alle Anbieter für jeden Song aus `songs` abfragen)
   und Nachhol-Modus (nur `status IN (nichts, fehlschlag)` erneut abfragen)
   in einem Skript, per Flag umschaltbar.

@@ -89,6 +89,23 @@ In `_whisper_best` wird VOR der Fenster-Schleife geprüft, ob für den Song bere
 - **Älter, oder Fehlschlag** → gilt als nicht vorhanden → live neu holen (= automatischer „Verbesser-Rhythmus").
 - Schalter: `--refresh-cache` UND `--force` erzwingen beide eine frische Live-Abfrage (umgehen den Provider-Cache vollständig — `--force` bedeutet „wirklich alles neu", nicht nur den alten Track-Speicher). `--cache-ttl <tage>` stellt die Gültigkeitsdauer ein. `--no-cache` ignoriert den Cache komplett (belegt zugleich das Grundprinzip). `--cache-only` ist das Gegenstück zu `--refresh-cache`/`--force`: statt eine frische Live-Abfrage zu erzwingen, verhindert es JEDE Live-Abfrage — auch für Provider, deren letzter Versuch als `status="fehlschlag"` im Cache steht (die sonst, s.o., nie als Treffer zählen und deshalb normalerweise sofort einen erneuten Live-Versuch auslösen).
 
+## Lokaler LRCLib-Datenbank-Abzug (Beschleuniger VOR der lrclib-Live-Abfrage)
+
+Seit v1.13.0 gibt es zusätzlich zur eigenen Cache-DB einen **externen, read-only geöffneten** Abzug der kompletten LRCLib-Datenbank (`/Volumes/music/db.sqlite3`, SMB-Netzlaufwerk, ca. 112 GB, per litestream repliziert, aktuell nicht mehr aktiv befüllt). `cache_store.lookup_lrclib_dump(conn, artist_key, title_key)` durchsucht ihn — als reiner Beschleuniger VOR einer echten Live-Abfrage bei der `lrclib`-Quelle, in `fetch_songtext._query_provider` zwischen dem eigenen Cache-Lookup und dem `--cache-only`-Guard eingehängt. Das Grundprinzip gilt auch hier: fehlt der Abzug (Mount nicht vorhanden, Datei weg, sonstiger Öffnungsfehler), degradiert das Programm still auf reines Live-Fragen — kein Absturz, keine störende Meldung.
+
+**Fremdes Schema, nur gelesen:** Anders als die eigene, selbst verwaltete Cache-DB ist der Abzug das **Original-LRCLib-Schema** (Tabellen `tracks`/`lyrics`, u. a. `tracks.artist_name_lower`/`tracks.name_lower` sowie `lyrics.has_synced_lyrics`/`has_plain_lyrics`/`synced_lyrics`/`plain_lyrics`, verknüpft über `tracks.last_lyrics_id`) — `cache_store.py` legt dafür nichts an und schreibt nie hinein, nur Lesezugriff.
+
+**Exakter Text-Match, keine Dauer, keine Fuzzy-Ähnlichkeit:** Eine Recherche im echten `syncedlyrics`-Quellcode (`syncedlyrics/providers/lrclib.py`) zeigte, dass die echte Live-Suche bei lrclib selbst **keine Songdauer** zum Abgleichen nutzt, sondern nur Text-Ähnlichkeit von „Künstler - Titel". Der Abzug bildet das nach — aber bewusst noch einfacher: exakter Abgleich auf `artist_name_lower = ?` und `name_lower = ?` mit denselben normalisierten Schlüsseln wie beim eigenen Cache (`cache_store.normalize_key`), statt Fuzzy-Scoring nachzubauen.
+
+**Mehrfachtreffer:** Mehrere Tracks zu exakt demselben Künstler+Titel sind normal (unterschiedliche Alben/Versionen, z. B. „queen"/„bohemian rhapsody" mit 4 Treffern). Ohne Dauer-Angabe und ohne Fuzzy-Matching wird pragmatisch ausgewählt: zuerst ein Track mit `synced_lyrics`, sonst mit `plain_lyrics`, sonst gilt „kein Songtext". Bei mehreren gleichwertigen Kandidaten gewinnt deterministisch die kleinste `tracks.id`.
+
+**SMB-Falle:** `sqlite3.connect("file:...?mode=ro", uri=True)` scheitert auf dem SMB-Mount mit „unable to open database file" — SMB unterstützt die von SQLite fürs Locking benötigten Dateisperren nicht. Nötig ist zusätzlich `immutable=1` (`sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)`), das jegliches Locking überspringt — setzt voraus, dass sich die Datei während des Zugriffs nicht ändert (hier unproblematisch, der Abzug wird aktuell nicht mehr aktiv befüllt).
+
+**Zusammenspiel mit den Cache-Schaltern:** ein Treffer im Abzug (mit oder ohne Songtext) wird genau wie ein Live-Treffer über `put_provider` in der eigenen Cache-DB abgelegt.
+- `--no-cache` schaltet den Abzug **ebenfalls** ab (nicht nur den eigenen Cache) — konsistent zum Grundprinzip weiter oben: `_lrclib_dump_conn` wird dann gar nicht erst geöffnet.
+- `--refresh-cache`/`--force` umgehen den Abzug genauso wie den eigenen Cache-Lookup — beide erzwingen eine wirklich frische Live-Abfrage.
+- `--cache-only` nutzt den Abzug weiterhin: ein Treffer dort ist keine Live-Abfrage, sondern ein Nachschlagen in einer bereits vorhandenen Datei — das verbietet `--cache-only` nicht, es verbietet nur echte Netzanfragen.
+
 ## Normalisierung (Fallstrick vermeiden)
 
 `künstler_key`/`titel_key` werden **exakt so** gebildet wie bei der echten Live-Abfrage: `unicodedata.normalize("NFC", …)`, klein geschrieben, gleiche Titel-Bereinigung (`_clean_query_title`). Sonst findet der Cache Treffer nicht wieder (vgl. früherer NFC/NFD-Bug).

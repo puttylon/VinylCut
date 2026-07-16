@@ -17,6 +17,11 @@ Ein Fehlschlag (Timeout/Rate-Limit/Captcha) wird IMMER festgehalten (Status
 "fehlschlag" + Grund) — nie stillschweigend verworfen. Er zählt aber nie als
 gültiger Cache-Treffer: get_provider() liefert für "fehlschlag" immer None,
 damit der Aufrufer beim nächsten Lauf erneut live fragt.
+
+lookup_lrclib_dump() ist ein Sonderfall: liest NICHT die eigene Cache-DB,
+sondern einen externen, read-only geöffneten LRCLib-Datenbank-Abzug (eigenes
+Schema, siehe Docstring dort) — als Beschleuniger VOR einer echten Live-
+Abfrage bei lrclib (siehe fetch_songtext._query_provider).
 """
 
 from __future__ import annotations
@@ -349,6 +354,65 @@ def get_transcript(
         "no_speech_prob": no_speech_prob,
         "avg_logprob": avg_logprob,
     }
+
+
+def lookup_lrclib_dump(
+    conn: sqlite3.Connection, artist_key: str, title_key: str
+) -> dict | None:
+    """Sucht (artist_key, title_key) im lokalen LRCLib-Datenbank-Abzug (Original-
+    LRCLib-Schema, Tabellen `tracks`/`lyrics` — siehe fetch_songtext._query_provider).
+
+    Exakter Abgleich auf `tracks.artist_name_lower`/`tracks.name_lower` — KEINE
+    Dauer, KEINE Fuzzy-Ähnlichkeit: die echte lrclib-Live-Suche matcht laut
+    ihrem eigenen Quellcode ebenfalls nur Text, nicht Dauer, und ein exakter
+    Abgleich ist hier einfacher als Fuzzy-Scoring nachzubauen.
+
+    `conn` muss der Aufrufer bereits offen übergeben — üblicherweise mit
+    `sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)`: der Abzug
+    liegt typischerweise auf einem SMB-Netzlaufwerk, das die von SQLite fürs
+    Locking benötigten Dateisperren nicht unterstützt (`mode=ro` allein scheitert
+    dort mit "unable to open database file"). `immutable=1` überspringt jegliches
+    Locking — setzt voraus, dass sich die Datei während des Zugriffs nicht ändert.
+
+    Gibt None zurück, wenn zu (artist_key, title_key) GAR KEIN Track existiert
+    (0 Zeilen) — dann soll der Aufrufer wie bisher live nachfragen. Existiert
+    mindestens ein Track, wird IMMER ein Dict geliefert (gleiche Form wie
+    get_provider): {"status": "treffer", "content": str} wenn ein Songtext
+    gefunden wurde, sonst {"status": "nichts", "content": None}.
+
+    Mehrfachtreffer (z.B. mehrere Alben/Versionen desselben Songs) sind normal.
+    Da keine Dauer-Angabe zum Abgleichen zur Verfügung steht und Fuzzy-Matching
+    bewusst nicht gewünscht ist, wird pragmatisch ausgewählt: zuerst ein Track
+    mit synced_lyrics, sonst einer mit plain_lyrics, sonst gilt "kein Songtext".
+    Bei mehreren gleichwertigen Kandidaten gewinnt deterministisch die kleinste
+    tracks.id.
+    """
+    rows = conn.execute(
+        "SELECT t.id, l.has_synced_lyrics, l.has_plain_lyrics, "
+        "l.synced_lyrics, l.plain_lyrics "
+        "FROM tracks t LEFT JOIN lyrics l ON t.last_lyrics_id = l.id "
+        "WHERE t.artist_name_lower = ? AND t.name_lower = ?",
+        (artist_key, title_key),
+    ).fetchall()
+    if not rows:
+        return None  # kein Track zu Künstler+Titel überhaupt — Aufrufer fragt live
+
+    def _rank(row: tuple) -> tuple[int, int]:
+        track_id, has_synced, has_plain, synced, plain = row
+        if has_synced and synced:
+            tier = 0
+        elif has_plain and plain:
+            tier = 1
+        else:
+            tier = 2
+        return (tier, track_id)
+
+    _track_id, has_synced, has_plain, synced, plain = min(rows, key=_rank)
+    if has_synced and synced:
+        return {"status": "treffer", "content": synced}
+    if has_plain and plain:
+        return {"status": "treffer", "content": plain}
+    return {"status": "nichts", "content": None}
 
 
 def put_transcript(

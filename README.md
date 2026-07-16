@@ -141,6 +141,8 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 ### `fetch_songtext.py`
 Sucht für jede Audiodatei synchronisierte Songtexte (`.lrc`) bei vier Anbietern, prüft das Ergebnis mit Whisper und speichert die beste passende Datei. Wird von `cut.py` automatisch aufgerufen; kann auch manuell verwendet werden.
 
+Für die lrclib-Quelle wird vor jeder echten Live-Abfrage zuerst ein lokaler LRCLib-Datenbank-Abzug durchsucht (`/Volumes/music/db.sqlite3`, falls erreichbar) — nur bei 0 Treffern dort UND ohne `--cache-only` wird wie bisher live gefragt. Kein eigenes Flag nötig; fehlt der Abzug (Mount nicht vorhanden), degradiert das Skript automatisch auf reines Live-Fragen.
+
 ```bash
 python3 fetch_songtext.py "Artist - Album/"                    # einzelnes Album
 python3 fetch_songtext.py "/Pfad/zur/Datei.flac"              # einzelne Datei
@@ -150,6 +152,9 @@ python3 fetch_songtext.py --no-whisper --recursive "/Musik/"   # ohne Whisper-Ve
 python3 fetch_songtext.py --fast --recursive "/Musik/"          # Phase 1: schneller Lauf, Whisper-Fälle aufgeschoben
 python3 fetch_songtext.py --cache-only --recursive "/Musik/"   # Phase 2 ohne jede Live-Provider-Abfrage
 python3 fetch_songtext.py --recursive "/Musik/"                 # Phase 2: normaler Lauf, füllt die Lücken
+python3 fetch_songtext.py --retry-missing lrclib                # ganze Cache-DB: lrclib erneut fragen, wo nichts/fehlschlag steht
+python3 fetch_songtext.py --retry-missing all --artist "Nina Hagen" --title "Naturträne"  # nur dieser eine Song, alle vier Provider
+python3 fetch_songtext.py --retry-missing lrclib --artist "Nina Hagen"                    # alle Songs dieses Künstlers, nur lrclib
 ```
 
 **Optionen:**
@@ -164,6 +169,9 @@ python3 fetch_songtext.py --recursive "/Musik/"                 # Phase 2: norma
 | `--refresh-cache` | Cache-Treffer überspringen (frisch von Anbieter holen / neu anhören), Ergebnis wird trotzdem neu in den Cache geschrieben. |
 | `--cache-ttl TAGE` | Cache-Gültigkeit für Provider-Treffer in Tagen (Default 30). |
 | `--cache-only` | Keine Live-Provider-Abfragen — auch gecachte Fehlschläge werden nicht erneut live geprüft. Betrifft NUR Provider-Abfragen, nicht Whisper (seit v1.10.1): ohne gecachtes Transkript wird trotzdem live transkribiert. Schließt sich mit `--force`/`--refresh-cache`/`--no-cache` aus. |
+| `--retry-missing NAME\|all` | Fragt Cache-Einträge mit `status='nichts'` oder `status='fehlschlag'` für den angegebenen Provider (`lrclib`/`musixmatch`/`netease`/`genius`) oder alle vier (`all`) erneut live ab — z.B. nachdem ein Provider fälschlich als gesperrt galt, obwohl er längst wieder funktioniert. Reine Cache-DB-Operation: kein Whisper, keine `.lrc`-Datei wird gelesen oder geschrieben. Braucht KEINEN `path`. Schließt sich mit `--no-cache`/`--cache-only` aus. Mit `--artist` auf einen Künstler (alle seine Songs) oder mit `--artist`+`--title` auf einen einzelnen Song beschränkbar, sonst betrifft es die gesamte Cache-DB. Ergebnisse laufen sortiert nach Artist/Titel. Die Konsolenausgabe unterscheidet ein bestätigtes „weiterhin kein Treffer" von „weiterhin Fehler (‹grund›) — später erneut versuchen" (erneuter Timeout/Rate-Limit/Captcha während des Retry-Versuchs selbst) — nur Ersteres heißt wirklich „Provider hat den Song nicht". Bekannte Einschränkung: die Suchanfrage wird aus den in der Cache-DB gespeicherten normalisierten Schlüsseln gebaut (Kleinschreibung) — die Original-Groß-/Kleinschreibung ist dort nicht hinterlegt. |
+| `--artist NAME` | Nur zusammen mit `--retry-missing`: beschränkt auf diesen Künstler — ohne `--title` alle seine Songs, mit `--title` nur diesen einen Song. |
+| `--title NAME` | Nur zusammen mit `--retry-missing` UND `--artist`: beschränkt auf diesen einen Song. |
 | `-h`, `--help` | Hilfe anzeigen |
 | `-V`, `--version` | Versionsnummer ausgeben |
 
@@ -361,6 +369,19 @@ python3 whisper_analyse.py /Musik/
 python3 inspect_song.py --artist "Nina Hagen" --title "Naturträne"
 python3 inspect_song.py --artist "Nina Hagen" --title "Naturträne" --output custom_name.txt
 ```
+
+**`compare_whisper_models.py`** — rein manueller Qualitätsvergleich der Whisper-Modelle `small`/`medium`/`turbo` (kein automatisches Scoring): zieht Songs aus der Cache-Datenbank, die bereits ein gecachtes Whisper-Transkript haben, sprachlich stratifiziert ~80 % englisch / ~20 % deutsch, sucht die Audiodateien EINMALIG und gezielt in einem einzigen Bibliotheks-Durchlauf (bricht ab, sobald alle gesuchten Songs gefunden sind — kein Voll-Index der ganzen Bibliothek mehr) und transkribiert jeden gefundenen Song frisch mit allen drei Modellen:
+
+```bash
+python3 compare_whisper_models.py
+python3 compare_whisper_models.py --n 10 --seed 42
+python3 compare_whisper_models.py --library /Volumes/music/musik --output-dir whisper_modellvergleich
+python3 compare_whisper_models.py --include "Kraftwerk:Autobahn" --include "Nina Hagen:Naturträne"
+```
+
+Die drei Modelle werden NACHEINANDER geladen (nicht gleichzeitig im Speicher — spart RAM, siehe ROADMAP.md): jedes Modell läuft einmal durch alle gefundenen Songs und wird danach wieder entladen, bevor das nächste Modell geladen wird. Die Sprache jedes stratifiziert ausgewählten Songs wird bereits bei der Auswahl aus den gecachten Provider-Kandidatentexten ermittelt (wie im Produktivbetrieb) und direkt als identischer Sprach-Hint an alle drei Modelle übergeben — für einen fairen Vergleich. Pflicht-Songs (siehe unten) bekommen ihren Sprach-Hint separat nach der Bibliotheksauflösung.
+
+Pro Song eine TXT-Datei (`<Artist>_<Titel>_modellvergleich.txt`, Kopf mit `Sprache (Hint):`, Abschnitte `=== small ===`/`=== medium ===`/`=== turbo ===`) plus eine `modellvergleich_index.txt` mit bearbeiteten (inkl. Sprach-Kürzel je Song) und übersprungenen Songs. Songs ohne Bibliothekstreffer werden übersprungen; jeder Sprachpool enthält von vornherein Ersatzkandidaten, damit die 80/20-Quote auch dann noch stimmt, wenn ein Primärkandidat keinen Treffer hat (reicht ein Pool trotzdem nicht aus, läuft das Skript mit weniger als `--n` Songs weiter, kein Abbruch). "Nina Hagen Band"/"Rangehn" ist immer zusätzlich zur Auswahl dabei (Dedupe falls ohnehin gezogen); mit `--include ARTIST:TITEL` (wiederholbar) lassen sich weitere Pflicht-Songs ergänzen — fehlt deren Audiodatei in der Bibliothek, wird das klar in Konsole und Index-Datei vermerkt.
 
 **Genius-Token:** Datei `genius_token` im Skript-Verzeichnis ablegen oder `GENIUS_ACCESS_TOKEN` als Umgebungsvariable setzen.
 

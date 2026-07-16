@@ -398,3 +398,149 @@ class TestMigrationTranskripteV1ZuV2:
         conn2 = cs.open_cache(db_path)
         cached = cs.get_transcript(conn2, "idempotent artist", "idempotent song")
         assert cached["transcript"] == "text"
+
+
+def _make_dump_db(tmp_path) -> sqlite3.Connection:
+    """Synthetische Mini-Version des externen LRCLib-Datenbank-Abzugs (Original-
+    LRCLib-Schema, Tabellen `tracks`/`lyrics`) -- NICHT die echte 112GB-Datei,
+    die auf CI/anderen Rechnern gar nicht erreichbar ist (siehe
+    cache_store.lookup_lrclib_dump-Docstring)."""
+    conn = sqlite3.connect(str(tmp_path / "dump.db"))
+    conn.executescript(
+        """
+        CREATE TABLE tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT, name_lower TEXT,
+            artist_name TEXT, artist_name_lower TEXT,
+            album_name TEXT, album_name_lower TEXT,
+            duration FLOAT,
+            last_lyrics_id INTEGER,
+            created_at DATETIME, updated_at DATETIME,
+            FOREIGN KEY (last_lyrics_id) REFERENCES lyrics (id)
+        );
+        CREATE TABLE lyrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plain_lyrics TEXT, synced_lyrics TEXT,
+            track_id INTEGER,
+            has_plain_lyrics BOOLEAN, has_synced_lyrics BOOLEAN, instrumental BOOLEAN,
+            source TEXT,
+            created_at DATETIME, updated_at DATETIME,
+            lyricsfile TEXT, has_lyricsfile BOOLEAN NOT NULL DEFAULT FALSE
+        );
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def _insert_track(
+    conn: sqlite3.Connection,
+    artist_lower: str,
+    name_lower: str,
+    *,
+    synced: str | None = None,
+    plain: str | None = None,
+    no_lyrics_row: bool = False,
+) -> int:
+    """Legt einen Track an, optional mit verknüpfter lyrics-Zeile.
+
+    no_lyrics_row=True simuliert einen Track ganz ohne last_lyrics_id (z.B.
+    noch nie gecrawlt) -- anders als has_synced/has_plain=False mit leerem
+    Text, was ein festgestelltes Instrumental simuliert.
+    """
+    cur = conn.execute(
+        "INSERT INTO tracks (name, name_lower, artist_name, artist_name_lower) "
+        "VALUES (?, ?, ?, ?)",
+        (name_lower, name_lower, artist_lower, artist_lower),
+    )
+    track_id = cur.lastrowid
+    if not no_lyrics_row:
+        cur2 = conn.execute(
+            "INSERT INTO lyrics (plain_lyrics, synced_lyrics, track_id, "
+            "has_plain_lyrics, has_synced_lyrics, instrumental) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                plain,
+                synced,
+                track_id,
+                bool(plain),
+                bool(synced),
+                not plain and not synced,
+            ),
+        )
+        conn.execute(
+            "UPDATE tracks SET last_lyrics_id=? WHERE id=?", (cur2.lastrowid, track_id)
+        )
+    conn.commit()
+    return track_id
+
+
+class TestLookupLrclibDump:
+    """lookup_lrclib_dump: Lookup gegen den externen LRCLib-Datenbank-Abzug."""
+
+    def test_kein_treffer_gibt_none(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        assert cs.lookup_lrclib_dump(conn, "unknown artist", "unknown title") is None
+
+    def test_treffer_mit_synced_lyrics(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        lrc = "[ti:Bohemian Rhapsody]\n[00:01.00]Is this the real life"
+        _insert_track(conn, "queen", "bohemian rhapsody", synced=lrc)
+        ergebnis = cs.lookup_lrclib_dump(conn, "queen", "bohemian rhapsody")
+        assert ergebnis == {"status": "treffer", "content": lrc}
+
+    def test_treffer_nur_mit_plain_lyrics(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "artist a", "title a", plain="Is this the real life")
+        ergebnis = cs.lookup_lrclib_dump(conn, "artist a", "title a")
+        assert ergebnis == {"status": "treffer", "content": "Is this the real life"}
+
+    def test_treffer_ohne_jeglichen_songtext_gilt_als_nichts(self, tmp_path):
+        """z.B. Instrumental: lyrics-Zeile existiert, aber ohne Text."""
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "artist a", "instrumental track")
+        ergebnis = cs.lookup_lrclib_dump(conn, "artist a", "instrumental track")
+        assert ergebnis == {"status": "nichts", "content": None}
+
+    def test_track_ohne_lyrics_zeile_gilt_als_nichts(self, tmp_path):
+        """Track existiert, aber last_lyrics_id ist NULL (noch nie gecrawlt)."""
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "artist a", "title a", no_lyrics_row=True)
+        ergebnis = cs.lookup_lrclib_dump(conn, "artist a", "title a")
+        assert ergebnis == {"status": "nichts", "content": None}
+
+    def test_mehrfachtreffer_bevorzugt_synced_ueber_plain(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "queen", "bohemian rhapsody", plain="nur plain text")
+        _insert_track(
+            conn, "queen", "bohemian rhapsody", synced="[00:01.00]synced text"
+        )
+        ergebnis = cs.lookup_lrclib_dump(conn, "queen", "bohemian rhapsody")
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]synced text"}
+
+    def test_mehrfachtreffer_gleichwertig_nimmt_kleinste_track_id(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(
+            conn, "queen", "bohemian rhapsody", synced="[00:01.00]erste version"
+        )
+        _insert_track(
+            conn, "queen", "bohemian rhapsody", synced="[00:01.00]zweite version"
+        )
+        ergebnis = cs.lookup_lrclib_dump(conn, "queen", "bohemian rhapsody")
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]erste version"}
+
+    def test_mehrfachtreffer_ohne_jeglichen_text_faellt_auf_nichts_zurueck(
+        self, tmp_path
+    ):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "artist a", "title a", no_lyrics_row=True)
+        _insert_track(conn, "artist a", "title a")
+        ergebnis = cs.lookup_lrclib_dump(conn, "artist a", "title a")
+        assert ergebnis == {"status": "nichts", "content": None}
+
+    def test_case_sensitive_lookup_erwartet_bereits_normalisierte_keys(self, tmp_path):
+        """lookup_lrclib_dump macht selbst KEINE Normalisierung -- der Aufrufer
+        (fetch_songtext._query_provider) übergibt bereits über
+        cache_store.normalize_key normalisierte Schlüssel."""
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "queen", "bohemian rhapsody", synced="[00:01.00]text")
+        assert cs.lookup_lrclib_dump(conn, "Queen", "Bohemian Rhapsody") is None

@@ -1,6 +1,7 @@
 """Unit-Tests für fetch_songtext.py — reine Logikfunktionen."""
 
 import errno
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -1070,6 +1071,89 @@ class TestFastFlagMain:
         assert "1 aufgeschoben für Whisper" in out
 
 
+class TestNoCacheDisablesLrclibDumpMain:
+    """--no-cache muss auch den lokalen LRCLib-Datenbank-Abzug abschalten,
+    nicht nur den eigenen Cache (CACHE_DESIGN.md: "--no-cache ignoriert den
+    Cache komplett") -- main() öffnet _lrclib_dump_conn seit diesem Fix nur
+    noch, wenn args.no_cache nicht gesetzt ist (siehe _cache_conn-Block
+    direkt darüber, der dieselbe Bedingung schon vorher hatte)."""
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._lrclib_dump_conn = None
+
+    def _make_dump_file(self, tmp_path) -> Path:
+        """Ein valider (leerer) Dump unter einem tmp-Pfad -- ohne den Fix
+        würde main() ihn trotz --no-cache erfolgreich öffnen, da die Datei
+        ja tatsächlich existiert und lesbar ist."""
+        dump_path = tmp_path / "dump.db"
+        conn = sqlite3.connect(str(dump_path))
+        conn.executescript(
+            "CREATE TABLE tracks (id INTEGER); CREATE TABLE lyrics (id INTEGER);"
+        )
+        conn.commit()
+        conn.close()
+        return dump_path
+
+    def _make_album(self, tmp_path) -> Path:
+        album = tmp_path / "Artist - Album"
+        album.mkdir()
+        audio = album / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+        lrc_path.write_bytes(b"[00:01.00]Zeile\n")
+        return album
+
+    def test_no_cache_verhindert_dump_conn_oeffnen(self, tmp_path, monkeypatch):
+        dump_path = self._make_dump_file(tmp_path)
+        monkeypatch.setattr(fetch_songtext, "_LRCLIB_DUMP_PATH", dump_path)
+        album = self._make_album(tmp_path)
+
+        monkeypatch.setattr(
+            fetch_songtext, "_read_audio_tags", lambda p: ("Artist", "Song", "")
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+
+        # --no-cache: main() würde ohne diesen Guard sonst zusätzlich die ECHTE
+        # fetch_songtext_cache.db öffnen (siehe TestFastFlagMain-Kommentar) --
+        # hier irrelevant, weil --no-cache genau das verhindert.
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fetch_songtext.py", str(album), "--no-cache", "--no-whisper"],
+        )
+        fetch_songtext.main()
+
+        assert fetch_songtext._cache_conn is None
+        assert fetch_songtext._lrclib_dump_conn is None
+
+    def test_dump_conn_wird_ohne_no_cache_geoeffnet(self, tmp_path, monkeypatch):
+        """Gegenprobe: ein erreichbarer Dump wird ohne --no-cache geöffnet."""
+        dump_path = self._make_dump_file(tmp_path)
+        monkeypatch.setattr(fetch_songtext, "_LRCLIB_DUMP_PATH", dump_path)
+        album = self._make_album(tmp_path)
+
+        monkeypatch.setattr(
+            fetch_songtext, "_read_audio_tags", lambda p: ("Artist", "Song", "")
+        )
+        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider({}))
+        # Eigene Cache-DB in ein tmp-Verzeichnis umlenken, damit main() nicht
+        # die echte Produktions-DB neben dem Skript anfasst (siehe
+        # TestFastFlagMain-Kommentar zum selben Problem).
+        original_open_cache = cache_store.open_cache
+        monkeypatch.setattr(
+            cache_store,
+            "open_cache",
+            lambda path: original_open_cache(tmp_path / "redirected_cache.db"),
+        )
+
+        monkeypatch.setattr(
+            "sys.argv", ["fetch_songtext.py", str(album), "--no-whisper"]
+        )
+        fetch_songtext.main()
+
+        assert fetch_songtext._lrclib_dump_conn is not None
+
+
 class TestProviderCache:
     """_query_provider mit echtem cache_store (siehe CACHE_DESIGN.md)."""
 
@@ -1326,6 +1410,278 @@ class TestProviderCache:
             "a b", "lrclib", {}, artist="a", title="b"
         )
         assert (provider, path) == ("lrclib", None)
+
+
+def _make_dump_conn(
+    synced: dict[tuple[str, str], str] | None = None,
+) -> sqlite3.Connection:
+    """In-memory-Nachbau des externen LRCLib-Datenbank-Abzugs (Tabellen
+    `tracks`/`lyrics`, siehe cache_store.lookup_lrclib_dump) für Tests von
+    _query_provider — NICHT die echte 112GB-Netzwerk-Datei."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name_lower TEXT, artist_name_lower TEXT,
+            last_lyrics_id INTEGER
+        );
+        CREATE TABLE lyrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plain_lyrics TEXT, synced_lyrics TEXT,
+            has_plain_lyrics BOOLEAN, has_synced_lyrics BOOLEAN
+        );
+        """
+    )
+    for (artist_lower, title_lower), content in (synced or {}).items():
+        cur = conn.execute(
+            "INSERT INTO lyrics (synced_lyrics, has_synced_lyrics, has_plain_lyrics) "
+            "VALUES (?, 1, 0)",
+            (content,),
+        )
+        conn.execute(
+            "INSERT INTO tracks (name_lower, artist_name_lower, last_lyrics_id) "
+            "VALUES (?, ?, ?)",
+            (title_lower, artist_lower, cur.lastrowid),
+        )
+    conn.commit()
+    return conn
+
+
+def _make_dump_conn_instrumental(
+    artist_lower: str, title_lower: str
+) -> sqlite3.Connection:
+    """Track im Dump gefunden, aber ohne jeglichen Songtext (Instrumental)."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name_lower TEXT, artist_name_lower TEXT,
+            last_lyrics_id INTEGER
+        );
+        CREATE TABLE lyrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plain_lyrics TEXT, synced_lyrics TEXT,
+            has_plain_lyrics BOOLEAN, has_synced_lyrics BOOLEAN
+        );
+        """
+    )
+    cur = conn.execute(
+        "INSERT INTO lyrics (synced_lyrics, plain_lyrics, has_synced_lyrics, has_plain_lyrics) "
+        "VALUES (NULL, NULL, 0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO tracks (name_lower, artist_name_lower, last_lyrics_id) VALUES (?, ?, ?)",
+        (title_lower, artist_lower, cur.lastrowid),
+    )
+    conn.commit()
+    return conn
+
+
+class TestLrclibDumpLookup:
+    """_query_provider mit dem lokalen LRCLib-Datenbank-Abzug (_lrclib_dump_conn,
+    siehe cache_store.lookup_lrclib_dump) — Beschleuniger VOR der echten
+    Live-Abfrage bei der lrclib-Quelle."""
+
+    def _open(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_ttl_days = 30
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+        fetch_songtext._lrclib_dump_conn = None
+        return conn
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+        fetch_songtext._lrclib_dump_conn = None
+
+    def _fail_if_called(self, *a, **k):
+        pytest.fail("Live-Abfrage darf bei einem Dump-Treffer nicht laufen")
+
+    def test_dump_treffer_mit_songtext_wird_zurueckgegeben_und_gecacht(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn(
+            {("the artist", "the title"): "[00:01.00]Hallo Welt"}
+        )
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", self._fail_if_called)
+
+        provider, path = fetch_songtext._query_provider(
+            "the artist the title", "lrclib", {}, artist="the artist", title="the title"
+        )
+        assert path is not None
+        assert "Hallo Welt" in path.read_text(encoding="utf-8")
+
+        # Genau wie ein Live-Treffer im eigenen Cache abgelegt.
+        cached = cache_store.get_provider(conn, "lrclib", "the artist", "the title")
+        assert cached == {"status": "treffer", "content": "[00:01.00]Hallo Welt"}
+
+    def test_dump_treffer_ohne_songtext_gilt_als_nichts_und_wird_gecacht(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn_instrumental("a", "b")
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", self._fail_if_called)
+
+        provider, path = fetch_songtext._query_provider(
+            "a b", "lrclib", {}, artist="a", title="b"
+        )
+        assert (provider, path) == ("lrclib", None)
+        assert cache_store.get_provider(conn, "lrclib", "a", "b") == {
+            "status": "nichts",
+            "content": None,
+        }
+
+    def test_dump_ohne_treffer_faellt_auf_live_abfrage_zurueck(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn()  # leer -- 0 Treffer
+
+        class _Result:
+            stderr = ""
+
+        called = []
+
+        def _fake_run(*a, **k):
+            called.append(1)
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
+        assert called, "0 Treffer im Dump muss weiterhin live nachfragen"
+        # Kein Cache-Eintrag allein durch den erfolglosen Dump-Blick (kein
+        # echter Versuch) -- der anschließende Live-Fall schreibt seinen
+        # eigenen Eintrag ("nichts", da _fake_run keinen Text liefert).
+        assert cache_store.get_provider(conn, "lrclib", "a", "b") == {
+            "status": "nichts",
+            "content": None,
+        }
+
+    def test_dump_conn_none_faellt_auf_live_abfrage_zurueck(
+        self, tmp_path, monkeypatch
+    ):
+        self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = None  # z.B. Mount nicht verfügbar
+
+        class _Result:
+            stderr = ""
+
+        called = []
+
+        def _fake_run(*a, **k):
+            called.append(1)
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
+        assert called, "Ohne Dump-Verbindung muss weiterhin live abgefragt werden"
+
+    def test_dump_wird_nur_fuer_lrclib_geprueft(self, tmp_path, monkeypatch):
+        """Andere Provider (musixmatch/netease/genius) ignorieren den Dump
+        komplett, auch wenn er zufällig einen passenden Eintrag hätte."""
+        self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn(
+            {("a", "b"): "[00:01.00]sollte nie verwendet werden"}
+        )
+
+        class _Result:
+            stderr = ""
+
+        called = []
+
+        def _fake_run(*a, **k):
+            called.append(1)
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "musixmatch", {}, artist="a", title="b")
+        assert called, "Nicht-lrclib-Provider müssen weiterhin live abgefragt werden"
+
+    def test_refresh_cache_umgeht_auch_den_dump(self, tmp_path, monkeypatch):
+        """--refresh-cache/--force erzwingen eine WIRKLICH frische Live-Abfrage
+        — genau wie beim eigenen Cache-Lookup wird auch der Dump übersprungen."""
+        self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn(
+            {("a", "b"): "[00:01.00]dump-inhalt"}
+        )
+        fetch_songtext._cache_refresh = True
+        try:
+
+            class _Result:
+                stderr = ""
+
+            called = []
+
+            def _fake_run(*a, **k):
+                called.append(1)
+                return _Result()
+
+            monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+            fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
+            assert called, "--refresh-cache/--force muss auch den Dump umgehen"
+        finally:
+            fetch_songtext._cache_refresh = False
+
+    def test_cache_only_mit_dump_treffer_wird_trotzdem_verwendet(
+        self, tmp_path, monkeypatch
+    ):
+        """--cache-only verbietet nur ECHTE Live-Abfragen -- der Dump ist keine
+        Live-Abfrage und darf daher auch unter --cache-only genutzt werden."""
+        self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn(
+            {("a", "b"): "[00:01.00]dump-inhalt"}
+        )
+        fetch_songtext._cache_only = True
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", self._fail_if_called)
+
+        provider, path = fetch_songtext._query_provider(
+            "a b", "lrclib", {}, artist="a", title="b"
+        )
+        assert path is not None
+        assert "dump-inhalt" in path.read_text(encoding="utf-8")
+
+    def test_cache_only_mit_dump_miss_liefert_none_ohne_live_versuch(
+        self, tmp_path, monkeypatch
+    ):
+        self._open(tmp_path)
+        fetch_songtext._lrclib_dump_conn = _make_dump_conn()  # 0 Treffer im Dump
+        fetch_songtext._cache_only = True
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", self._fail_if_called)
+
+        provider, path = fetch_songtext._query_provider(
+            "a b", "lrclib", {}, artist="a", title="b"
+        )
+        assert (provider, path) == ("lrclib", None)
+
+    def test_dump_fehler_stoert_den_lauf_nicht_und_faellt_auf_live_zurueck(
+        self, tmp_path, monkeypatch
+    ):
+        """Ein defekter/geschlossener Dump-Connection darf den Lauf nicht
+        stören — still degradieren, wie beim regulären Cache (siehe
+        CACHE_DESIGN.md)."""
+        self._open(tmp_path)
+        broken_conn = _make_dump_conn()
+        broken_conn.close()  # jede Abfrage wirft jetzt ProgrammingError
+        fetch_songtext._lrclib_dump_conn = broken_conn
+
+        class _Result:
+            stderr = ""
+
+        called = []
+
+        def _fake_run(*a, **k):
+            called.append(1)
+            return _Result()
+
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fake_run)
+        fetch_songtext._query_provider("a b", "lrclib", {}, artist="a", title="b")
+        assert called, "Ein Dump-Fehler muss auf die Live-Abfrage zurückfallen"
 
 
 class TestTranscriptCache:
@@ -2021,3 +2377,375 @@ class TestCacheCliFlags:
         )
         assert result.returncode == 2
         assert "--cache-only" in result.stderr
+
+
+class TestRetryMissing:
+    """--retry-missing: gezielte Live-Neuabfrage für Cache-Einträge mit
+    status='nichts'/'fehlschlag' (Auslöser: lrclib steckte einmal stundenlang
+    fälschlich in der "gesperrt"-Ruhephase, obwohl der Provider einwandfrei
+    funktionierte — siehe ROADMAP.md). Testet _retry_missing() direkt
+    (nicht über main()/subprocess): main() öffnet die Cache-DB immer relativ
+    zu __file__, ein Subprozess-Test würde also die ECHTE Produktions-
+    Cache-DB neben dem Skript öffnen und ggf. live abfragen (siehe
+    TestFastFlagMain-Kommentar zum selben Problem bei --fast) -- deshalb hier
+    stattdessen fetch_songtext._cache_conn direkt auf eine tmp_path-DB
+    gesetzt, wie bei TestProviderCache."""
+
+    def _open(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        fetch_songtext._cache_conn = conn
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+        return conn
+
+    def teardown_method(self):
+        fetch_songtext._cache_conn = None
+        fetch_songtext._cache_refresh = False
+        fetch_songtext._cache_only = False
+
+    @staticmethod
+    def _fake_run(
+        responses: dict[str, str], fail_needles: dict[str, str] | None = None
+    ):
+        """Ersetzt fetch_songtext.subprocess.run -- schreibt für Queries, die
+        einen der `responses`-Schlüssel enthalten, LRC-Inhalt in die Ziel-
+        datei, sonst bleibt sie leer (= kein Treffer, wie ein sauberer
+        Fehlschlag ohne Rate-Limit-Signal). `fail_needles` simuliert einen
+        TRANSIENTEN Fehler (z.B. Rate-Limit) statt eines echten "nichts
+        gefunden": liefert für Queries, die einen dieser Schlüssel enthalten,
+        das stderr-Signal, das _rate_limit_report als solchen erkennt (siehe
+        _rate_limit_report-Docstring in fetch_songtext.py)."""
+        fail_needles = fail_needles or {}
+
+        class _Result:
+            def __init__(self, stderr: str = ""):
+                self.stderr = stderr
+
+        calls: list[tuple[str, str]] = []
+
+        def _run(cmd, **kwargs):
+            query, provider = cmd[1], cmd[-1]
+            calls.append((query, provider))
+            out_path = Path(cmd[3])
+            for needle, content in responses.items():
+                if needle in query:
+                    out_path.write_text(content, encoding="utf-8")
+                    return _Result()
+            for needle, stderr in fail_needles.items():
+                if needle in query:
+                    return _Result(stderr=stderr)
+            return _Result()
+
+        _run.calls = calls
+        return _run
+
+    def test_nur_passende_song_provider_kombis_werden_retried(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+        cache_store.put_provider(
+            conn, "genius", "artist a", "title a", "treffer", "[00:01.00]hallo"
+        )
+        cache_store.put_provider(
+            conn,
+            "lrclib",
+            "artist b",
+            "title b",
+            "fehlschlag",
+            None,
+            fehlergrund="gesperrt",
+        )
+        cache_store.put_provider(
+            conn, "musixmatch", "artist c", "title c", "nichts", None
+        )
+
+        fake_run = self._fake_run({"artist a": "[00:01.00]neuer Text\n"})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], None, None)
+
+        # Nur die zwei lrclib-Zeilen mit status nichts/fehlschlag wurden angefragt --
+        # weder der genius-treffer noch der musixmatch-Eintrag eines anderen Providers.
+        assert len(fake_run.calls) == 2
+        assert {p for _, p in fake_run.calls} == {"lrclib"}
+
+        assert cache_store.get_provider(conn, "lrclib", "artist a", "title a") == {
+            "status": "treffer",
+            "content": "[00:01.00]neuer Text\n",
+        }
+        # weiterhin kein Treffer, aber neu als "nichts" geschrieben (kein
+        # "gesperrt"-Fehlschlag mehr, da diesmal ein echter Versuch stattfand)
+        row_b = conn.execute(
+            "SELECT status, fehlergrund FROM ergebnisse e JOIN songs s ON s.id=e.song_id "
+            "WHERE e.quelle='lrclib' AND s.artist_key='artist b' AND s.titel_key='title b'"
+        ).fetchone()
+        assert row_b == ("nichts", None)
+
+        # unberührte Einträge (schon treffer, oder anderer Provider) bleiben unverändert
+        row_genius = conn.execute(
+            "SELECT status FROM ergebnisse e JOIN songs s ON s.id=e.song_id "
+            "WHERE e.quelle='genius' AND s.artist_key='artist a' AND s.titel_key='title a'"
+        ).fetchone()
+        assert row_genius == ("treffer",)
+        row_musixmatch = conn.execute(
+            "SELECT status FROM ergebnisse e JOIN songs s ON s.id=e.song_id "
+            "WHERE e.quelle='musixmatch' AND s.artist_key='artist c' AND s.titel_key='title c'"
+        ).fetchone()
+        assert row_musixmatch == ("nichts",)
+
+    def test_artist_title_beschraenkt_auf_einen_song(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+        cache_store.put_provider(conn, "lrclib", "artist b", "title b", "nichts", None)
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], "Artist A", "Title A")
+
+        assert len(fake_run.calls) == 1
+        assert "artist a" in fake_run.calls[0][0]
+
+    def test_unbekannter_song_bei_artist_title_bricht_ab(self, tmp_path, capsys):
+        self._open(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            fetch_songtext._retry_missing(["lrclib"], "Nobody", "Nothing")
+        assert exc.value.code == 1
+        assert "nicht in der Cache-Datenbank gefunden" in capsys.readouterr().out
+
+    def test_nur_artist_beschraenkt_auf_alle_songs_dieses_kuenstlers(
+        self, tmp_path, monkeypatch
+    ):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title b", "nichts", None)
+        # anderer Künstler -- darf nicht mit angefragt werden
+        cache_store.put_provider(conn, "lrclib", "artist z", "title z", "nichts", None)
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], "Artist A", None)
+
+        assert len(fake_run.calls) == 2
+        assert {q for q, _ in fake_run.calls} == {
+            "artist a title a",
+            "artist a title b",
+        }
+
+    def test_unbekannter_artist_ohne_title_bricht_ab(self, tmp_path, capsys):
+        self._open(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            fetch_songtext._retry_missing(["lrclib"], "Nobody", None)
+        assert exc.value.code == 1
+        assert "Kein Song von Artist" in capsys.readouterr().out
+
+    def test_ergebnisse_sortiert_nach_artist_titel(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        # bewusst in "falscher" Einfügereihenfolge angelegt
+        cache_store.put_provider(conn, "lrclib", "zeta", "song", "nichts", None)
+        cache_store.put_provider(conn, "lrclib", "alpha", "zzz", "nichts", None)
+        cache_store.put_provider(conn, "lrclib", "alpha", "aaa", "nichts", None)
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], None, None)
+
+        assert [q for q, _ in fake_run.calls] == [
+            "alpha aaa",
+            "alpha zzz",
+            "zeta song",
+        ]
+
+    def test_all_fragt_alle_provider_ab(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        for provider in fetch_songtext._ALL_PROVIDERS:
+            cache_store.put_provider(
+                conn, provider, "artist a", "title a", "nichts", None
+            )
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(fetch_songtext._ALL_PROVIDERS, None, None)
+
+        assert {p for _, p in fake_run.calls} == set(fetch_songtext._ALL_PROVIDERS)
+
+    def test_leere_treffermenge_gibt_hinweis_ohne_fehler(self, tmp_path, capsys):
+        self._open(tmp_path)
+        fetch_songtext._retry_missing(["lrclib"], None, None)
+        assert "Keine passenden Cache-Einträge" in capsys.readouterr().out
+
+    def test_stellt_cache_refresh_nach_lauf_wieder_her(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+        fetch_songtext._cache_refresh = False
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], None, None)
+
+        assert fetch_songtext._cache_refresh is False
+
+    def test_transienter_fehlschlag_wird_von_echtem_nichttreffer_unterschieden(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Realer Fall (siehe ROADMAP.md): ein --retry-missing-Lauf für
+        Simon & Garfunkel / El Condor Pasa meldete "weiterhin kein Treffer",
+        obwohl der Song bei lrclib nachweislich existiert (manuell per
+        syncedlyrics live verifiziert) -- die Cache-DB zeigte hinterher
+        status='fehlschlag'/fehlergrund='rate_limit', nicht 'nichts'. Der
+        Bug: path is None wird bei EINEM transienten Fehler (erneutes
+        Rate-Limit/Timeout/Captcha während des Retry-Versuchs selbst) exakt
+        genauso gemeldet wie ein bestätigtes "gibt es nicht" -- obwohl genau
+        in diesem Fall ein weiterer Versuch am ehesten lohnt."""
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+
+        fake_run = self._fake_run(
+            {},
+            fail_needles={
+                "artist a": "An error occurred while searching for an LRC on Lrclib"
+            },
+        )
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], None, None)
+
+        out = capsys.readouterr().out
+        assert "weiterhin Fehler (rate_limit) — später erneut versuchen" in out
+        assert "1 weiterhin mit Fehler" in out
+        assert "0 weiterhin ohne Treffer" in out
+
+        row = conn.execute(
+            "SELECT status, fehlergrund FROM ergebnisse e JOIN songs s ON s.id=e.song_id "
+            "WHERE e.quelle='lrclib' AND s.artist_key='artist a' AND s.titel_key='title a'"
+        ).fetchone()
+        assert row == ("fehlschlag", "rate_limit")
+
+    def test_echtes_nichts_wird_weiterhin_als_kein_treffer_gemeldet(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+
+        fake_run = self._fake_run({})  # kein Treffer, kein Fehlersignal
+        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+
+        fetch_songtext._retry_missing(["lrclib"], None, None)
+
+        out = capsys.readouterr().out
+        assert "weiterhin kein Treffer" in out
+        assert "1 weiterhin ohne Treffer" in out
+        assert "0 weiterhin mit Fehler" in out
+
+        row = conn.execute(
+            "SELECT status, fehlergrund FROM ergebnisse e JOIN songs s ON s.id=e.song_id "
+            "WHERE e.quelle='lrclib' AND s.artist_key='artist a' AND s.titel_key='title a'"
+        ).fetchone()
+        assert row == ("nichts", None)
+
+
+class TestRetryMissingCli:
+    """Argparse-Ebene: nur Fehlerfälle, die vor jedem Cache-DB-Zugriff via
+    parser.error() abbrechen -- ein erfolgreicher --retry-missing-Lauf über
+    subprocess würde main()s fest verdrahteten Cache-DB-Pfad (relativ zu
+    __file__) treffen und damit die ECHTE Produktions-Cache-DB öffnen (siehe
+    TestRetryMissing-Klassendocstring). Der Erfolgsfall wird stattdessen
+    direkt über fetch_songtext._retry_missing() getestet."""
+
+    def test_ungueltiger_providername_ist_fehler(self):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--retry-missing", "bogus"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "lrclib" in result.stderr
+        assert "all" in result.stderr
+
+    def test_hilfe_listet_retry_missing_und_artist_title(self):
+        out = subprocess.run(
+            ["python3", "fetch_songtext.py", "--help"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "--retry-missing" in out
+        assert "--artist" in out
+        assert "--title" in out
+
+    def test_ohne_path_und_ohne_retry_missing_ist_fehler(self):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "path ist erforderlich" in result.stderr
+
+    def test_retry_missing_und_no_cache_schliessen_sich_aus(self):
+        result = subprocess.run(
+            ["python3", "fetch_songtext.py", "--retry-missing", "lrclib", "--no-cache"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--retry-missing" in result.stderr
+
+    def test_retry_missing_und_cache_only_schliessen_sich_aus(self):
+        result = subprocess.run(
+            [
+                "python3",
+                "fetch_songtext.py",
+                "--retry-missing",
+                "lrclib",
+                "--cache-only",
+            ],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--retry-missing" in result.stderr
+
+    def test_title_ohne_artist_ist_fehler(self):
+        result = subprocess.run(
+            [
+                "python3",
+                "fetch_songtext.py",
+                "--retry-missing",
+                "lrclib",
+                "--title",
+                "Y",
+            ],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--title erfordert --artist" in result.stderr
+
+    def test_artist_ohne_retry_missing_ist_fehler(self, tmp_path):
+        result = subprocess.run(
+            [
+                "python3",
+                "fetch_songtext.py",
+                "--artist",
+                "X",
+                "--title",
+                "Y",
+                str(tmp_path),
+            ],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "--artist/--title" in result.stderr

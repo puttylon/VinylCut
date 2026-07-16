@@ -1,5 +1,320 @@
 # VinylCut Roadmap
 
+## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
+
+**Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der
+kompletten LRCLib-Datenbank unter `/Volumes/music/db.sqlite3` (SMB-Netzlaufwerk,
+ca. 112 GB, Original-LRCLib-Schema mit Tabellen `tracks`/`lyrics`, per litestream
+repliziert, aktuell nicht mehr aktiv befüllt). Bevor die lrclib-Quelle LIVE
+gefragt wird, lohnt es sich, zuerst diesen Abzug zu durchsuchen — spart eine
+echte Netzabfrage, wenn der Song dort bereits steht.
+
+**Lösung:** Neue Funktion `cache_store.lookup_lrclib_dump(conn, artist_key,
+title_key)` (liegt im Cache-Modul, kennt aber weiterhin keine Provider-/
+Whisper-Logik — reiner zusätzlicher Lookup gegen eine zweite, extern verwaltete
+SQLite-Datei). Exakter Abgleich auf `tracks.artist_name_lower`/`tracks.name_lower`
+— bewusst KEINE Songdauer, KEINE Fuzzy-Ähnlichkeit: eine Recherche im echten
+`syncedlyrics`-Quellcode (`syncedlyrics/providers/lrclib.py`) zeigte, dass die
+echte Live-Suche selbst auch nur Text vergleicht ("Künstler - Titel"), nicht
+Dauer — ein exakter Abgleich auf die bereits normalisierten Schlüssel
+(`cache_store.normalize_key`, wie beim eigenen Cache) ist hier einfacher als
+Fuzzy-Scoring nachzubauen. Mehrfachtreffer (mehrere Alben/Versionen desselben
+Songs, z.B. "queen"/"bohemian rhapsody" mit 4 exakten Treffern) werden
+pragmatisch aufgelöst: zuerst ein Track mit `synced_lyrics`, sonst mit
+`plain_lyrics`, sonst gilt "kein Songtext" — bei mehreren gleichwertigen
+Kandidaten gewinnt deterministisch die kleinste `tracks.id` (keine Dauer-Angabe
+zum Abgleichen verfügbar, Fuzzy-Matching bewusst abgelehnt).
+
+Eingehängt in `fetch_songtext._query_provider`, genau zwischen dem eigenen
+Cache-Lookup und dem `--cache-only`-Guard, nur für `provider == "lrclib"` und
+nur wenn `not _cache_refresh` (`--refresh-cache`/`--force` erzwingen weiterhin
+eine wirklich frische Live-Abfrage und umgehen daher auch den Dump, genau wie
+den eigenen Cache). Ablauf: 0 Treffer im Dump → weiter wie bisher (Schritt
+2/3, kein Cache-Schreibvorgang — kein echter Versuch, analog zum
+`--cache-only`-Guard). Treffer mit Songtext → genau wie ein Live-Treffer über
+`cache_store.put_provider(..., "treffer", content)` im eigenen Cache
+abgelegt und sofort zurückgegeben, kein `subprocess.run` mehr nötig. Treffer
+ohne Songtext (Instrumental, oder kein `lyrics`-Eintrag verknüpft) → als
+`"nichts"` gewertet und ebenso gecacht, ohne Live-Nachfrage. `--cache-only`
+ist hier irrelevant (der Dump ist keine Live-Abfrage) — ein Dump-Treffer wird
+also auch unter `--cache-only` verwendet.
+
+**Verbindungsmanagement:** `_lrclib_dump_conn` wird EINMAL pro Lauf in
+`main()` geöffnet (`sqlite3.connect(f"file:{path}?mode=ro&immutable=1",
+uri=True, check_same_thread=False)`) und über den bestehenden `_cache_lock`
+serialisiert — kein eigenes Lock-Objekt, die Lookups sind kurz. Scheitert das
+Öffnen (Mount fehlt, Datei fehlt, sonstiger Fehler), bleibt `_lrclib_dump_conn`
+`None` — still degradieren, kein Absturz, keine störende Meldung (Cache ist
+nur Beschleuniger, kein Fundament, siehe `CACHE_DESIGN.md`). Genauso bei
+jedem Fehler während eines einzelnen Lookups.
+
+**SMB-Falle (verifiziert):** `sqlite3.connect("file:...?mode=ro", uri=True)`
+scheitert auf dem SMB-Mount mit "unable to open database file" — SMB
+unterstützt die von SQLite fürs Locking benötigten Dateisperren nicht. Erst
+`immutable=1` (überspringt jegliches Locking, setzt voraus, dass sich die
+Datei während des Zugriffs nicht ändert — hier unproblematisch, der Abzug
+wird aktuell nicht mehr aktiv befüllt) behebt das.
+
+`--retry-missing` (siehe oben) profitiert automatisch mit, ohne Zusatzarbeit:
+es setzt `_cache_refresh` für die Dauer des Laufs auf `True`, und der
+Dump-Lookup ist wie der eigene Cache-Lookup an `not _cache_refresh` gebunden
+— ein `--retry-missing`-Lauf fragt also, wie beabsichtigt, immer wirklich
+live nach, nie aus dem Dump.
+
+Kein neues CLI-Flag (YAGNI).
+
+Version: `1.13.0` (Minor — neue Funktionalität, kein reiner Bugfix).
+
+Tests: `test_cache_store.py::TestLookupLrclibDump` (synthetische Mini-SQLite-DB
+mit `tracks`/`lyrics`-Tabellen als Fixture, NICHT die echte 112GB-Datei — auf
+CI/anderen Rechnern nicht erreichbar): Treffer mit `synced_lyrics`, Treffer nur
+mit `plain_lyrics`, Mehrfachtreffer (synced schlägt plain, gleichwertige
+Kandidaten → kleinste `tracks.id`), Treffer ganz ohne Songtext (auch bei
+Mehrfachtreffer), Track ohne verknüpfte `lyrics`-Zeile, kein Treffer
+überhaupt, sowie dass die Funktion selbst nicht normalisiert (Aufrufer muss
+bereits normalisierte Schlüssel übergeben). `test_fetch_songtext.py::
+TestLrclibDumpLookup` (Integration in `_query_provider`, In-Memory-SQLite
+statt echter Datei): Dump-Treffer mit Songtext wird zurückgegeben und in den
+eigenen Cache geschrieben, Dump-Treffer ohne Songtext wird als "nichts"
+gecacht, 0 Treffer im Dump fällt auf die Live-Abfrage zurück, fehlende
+Dump-Verbindung (`None`) fällt auf Live zurück, Nicht-lrclib-Provider
+ignorieren den Dump komplett, `--refresh-cache`/`--force` umgehen auch den
+Dump, `--cache-only` + Dump-Treffer wird trotzdem verwendet, `--cache-only` +
+Dump-Miss liefert weiterhin `None` ohne Live-Versuch, ein Fehler bei der
+Dump-Abfrage (z.B. geschlossene Verbindung) stört den Lauf nicht und fällt
+auf Live zurück.
+
+## ✓ fetch_songtext.py v1.12.0 — `--retry-missing NAME|all`: gezielte Cache-Neuabfrage
+
+**Auslöser:** In einer Session wurde entdeckt, dass lrclib stundenlang
+fälschlich in der langen "gesperrt"-Ruhephase steckte (`_rate_limit_state`/
+`_RATE_LIMIT_LONG_PAUSE_SEC`, siehe `_rate_limit_wait`/`_rate_limit_report`),
+obwohl ein direkter Live-Test zeigte, dass der Provider einwandfrei
+funktionierte. Dadurch stehen in der Cache-DB vermutlich etliche
+(Song, Provider)-Kombinationen mit `status='nichts'` oder `status='fehlschlag'`,
+bei denen ein erneuter Versuch heute erfolgreich wäre — ein kompletter
+`--force`-Lauf über die ganze Bibliothek wäre dafür unnötig teuer (jeder
+Provider für jeden Song erneut, nicht nur die betroffenen Lücken).
+
+**Lösung:** Neues Flag `--retry-missing lrclib|musixmatch|netease|genius|all`
+(ungültiger Wert -> `parser.error()` via argparse `choices`). Reine
+Cache-DB-Operation: kein Whisper, keine `.lrc`-Datei wird gelesen oder
+geschrieben, keine Änderung an der Musikbibliothek. Der positionale `path`-
+Parameter ist dafür nicht mehr zwingend (`nargs="?"`, aber weiterhin
+Pflicht für den normalen Betrieb — geprüft per `parser.error()`, falls
+weder `path` noch `--retry-missing` angegeben ist).
+
+Neue Funktion `_retry_missing()`: sucht in `ergebnisse` alle Zeilen mit
+`status IN ('nichts', 'fehlschlag')` für die betroffenen Provider (optional
+eingeschränkt via `--artist`/`--title`: beides zusammen -> genau ein Song
+(Lookup wie in `inspect_song.py` — unbekannter Song -> Fehlermeldung,
+Exit-Code 1), `--artist` allein -> alle Songs dieses Künstlers in der
+Cache-DB (unbekannter Künstler -> ebenfalls Fehlermeldung, Exit-Code 1),
+keins von beiden -> keine Eingrenzung, ganze Cache-DB), baut je Zeile die
+Suchanfrage aus den in der Cache-DB gespeicherten `artist_key`/`titel_key`
+und ruft `_query_provider()` unverändert erneut auf (inkl. Rate-Limit-
+Handling und Cache-Schreiblogik über `cache_store.put_provider`, die den
+alten Eintrag automatisch überschreibt). Die Zeilen werden dabei immer
+sortiert nach `artist_key`, `titel_key` (unabhängig von der Eingrenzung)
+abgearbeitet — vorher war die Reihenfolge zufällig (SQLite-Rowscan-
+Reihenfolge ohne `ORDER BY`), was bei einer Künstler-weiten Neuabfrage
+unnötig unübersichtlich in der Konsolenausgabe war. Dafür wird
+`_cache_refresh` für die Dauer des Laufs auf `True` gesetzt und danach
+zurückgesetzt — ohne das würde `_query_provider` ein gecachtes `"nichts"`
+als gültigen, nicht abgelaufenen Cache-Treffer werten und nie live
+nachfragen (nur `status='fehlschlag'` erzwingt dort von sich aus einen
+Live-Versuch). Schließt sich mit `--no-cache` (braucht die Cache-DB) und
+`--cache-only` (verbietet jede Live-Abfrage) aus.
+
+**Bekannte Einschränkung:** Die Cache-DB speichert nur normalisierte
+Schlüssel (NFC, gestrippt, kleingeschrieben — siehe `cache_store.
+normalize_key`), nicht die Original-Groß-/Kleinschreibung von Künstler/Titel.
+Die erneute Suchanfrage nutzt daher zwangsläufig die kleingeschriebene Form,
+was die Trefferquote gegenüber der ursprünglichen Live-Abfrage in seltenen
+Fällen leicht verschlechtern könnte.
+
+**Rate-Limit-Ruhephase:** `_rate_limit_state` lebt rein im Prozessspeicher,
+nicht in der Cache-DB — ein separat gestarteter `--retry-missing`-Lauf
+beginnt automatisch mit leerem Zustand, unabhängig davon, ob ein früherer
+(anderer) Lauf gerade "gesperrt" war. Der zugrundeliegende Stuck-Bug selbst
+(fälschliche lange Ruhephase trotz funktionierendem Provider) wird hier
+NICHT behoben — nur festgestellt, dass er `--retry-missing` in der Praxis
+nicht blockiert.
+
+**Bugfix — "weiterhin kein Treffer" verwechselte echtes Fehlen mit erneutem
+transienten Fehler:** Beim ersten echten Testlauf (`--retry-missing lrclib
+--artist "Simon & Garfunkel" --title "El Condor Pasa"`) meldete das Skript
+"weiterhin kein Treffer", obwohl der Song bei lrclib nachweislich existiert
+(manuell per direktem `syncedlyrics`-Aufruf verifiziert — sofortiger
+Treffer). Ursache: die Cache-DB zeigte für diese Zeile hinterher
+`status='fehlschlag'`/`fehlergrund='rate_limit'`, nicht `status='nichts'` —
+`_query_provider()` gibt bei EINEM erneuten transienten Fehler (Timeout/
+Rate-Limit/Captcha, hier ausgelöst durch `syncedlyrics`' generische
+"An error occurred while searching for an LRC on …"-Meldung, die entgegen
+dem bisherigen Docstring-Kommentar NICHT nur bei NetEase auftritt, sondern
+bei jedem Provider, dessen `get_lrc()` eine Exception wirft — siehe
+`syncedlyrics/__init__.py`) exakt denselben Rückgabewert `(provider, None)`
+zurück wie bei einem echten, bestätigten "nichts gefunden". `_retry_missing()`
+konnte daraus bisher nicht unterscheiden. Fix: nach jedem `path is None`-Fall
+wird die soeben von `_query_provider()` geschriebene Zeile in `ergebnisse`
+nachgeschlagen (`status`/`fehlergrund`) — bei `status='fehlschlag'` heißt es
+jetzt „weiterhin Fehler (‹grund›) — später erneut versuchen" statt „weiterhin
+kein Treffer", und die Abschlusszeile zählt beide Fälle getrennt
+(`N weiterhin ohne Treffer, M weiterhin mit Fehler`). Am realen Fall
+bestätigt: ein erneuter Lauf direkt danach fand den Song sofort.
+
+Version: `1.12.0` (Minor — neues Flag mit eigenem Verhalten, kein reiner Bugfix).
+
+```bash
+python3 fetch_songtext.py --retry-missing lrclib
+python3 fetch_songtext.py --retry-missing all --artist "Nina Hagen" --title "Naturträne"
+python3 fetch_songtext.py --retry-missing lrclib --artist "Nina Hagen"
+```
+
+Tests: neue Klassen `TestRetryMissing` (Cache mit gemischten Status,
+`_retry_missing()` direkt aufgerufen — nur passende (Song, Provider)-Zeilen
+werden angefragt, unberührte Einträge bleiben unverändert, `--artist`+
+`--title` beschränkt auf einen Song, `--artist` allein beschränkt auf alle
+Songs dieses Künstlers (ein anderer Künstler in der Cache-DB bleibt
+unberührt), unbekannter Song bzw. unbekannter Künstler bricht mit
+Exit-Code 1 ab, `all` fragt alle vier Provider ab, leere Treffermenge nur
+ein Hinweis, Ergebnisse laufen sortiert nach Artist/Titel unabhängig von
+der Einfügereihenfolge, ein simulierter transienter Fehlschlag wird als
+„weiterhin Fehler (‹grund›)" gemeldet und getrennt gezählt, ein echtes
+„nichts" weiterhin als „weiterhin kein Treffer") und `TestRetryMissingCli`
+(nur Argparse-Fehlerfälle vor jedem Cache-DB-Zugriff: ungültiger
+Providername, fehlender `path`, `--no-cache`/`--cache-only`-Ausschluss,
+`--title` ohne `--artist`, `--artist` ohne `--retry-missing`). Bewusst KEIN
+Subprozess-Test für den Erfolgsfall: `main()` öffnet die Cache-DB immer
+relativ zu `__file__`, ein `--retry-missing`-Lauf über
+`subprocess.run(["python3", "fetch_songtext.py", ...])` würde also die ECHTE
+Produktions-`fetch_songtext_cache.db` öffnen und live abfragen (gleiches
+Problem wie bei `--fast`, siehe `TestFastFlagMain`).
+
+## ✓ compare_whisper_models.py — Modellqualitätsvergleich small/medium/turbo
+
+**Motivation:** v1.7.0 hatte bei einem einzelnen Testfall (Rheingold
+„Dreiklangsdimensionen") einen deutlichen Qualitätsunterschied zwischen den
+Whisper-Modellen gemessen (`base` 19 %, `small` 53 %, `medium` 61 %) — Anlass
+für die Frage, ob `medium` oder ein Turbo-Modell (`large-v3-turbo`) das
+produktiv genutzte `small` auf einer breiteren Stichprobe schlagen. Da es hier
+rein um Transkriptionsqualität geht (Geschwindigkeit ist ausdrücklich
+irrelevant), gibt es KEIN automatisches Scoring — nur nebeneinandergestellte
+Transkripte zum manuellen Lesevergleich.
+
+Neues eigenständiges Skript (nach dem Vorbild von `inspect_song.py`/
+`lrc_recheck.py`): zieht `--n` (Standard 20) Songs aus der Cache-Datenbank,
+die dort mindestens einen Provider-Treffer haben (`songs JOIN ergebnisse`,
+`status='treffer'`), sprachlich stratifiziert ~80 % englisch / ~20 % deutsch
+(`round(n * 0.8)` / Rest), und transkribiert jeden gefundenen Song FRISCH mit
+allen drei Modellen (`small`, `medium`, `turbo`; Turbo-Modellname mit der
+installierten `faster-whisper`-Version 1.2.1 live verifiziert — `"turbo"`
+funktioniert direkt, kein `"large-v3-turbo"` nötig). Ob für einen Song
+bereits ein Whisper-Transkript im Cache existiert, ist für die Auswahl
+bewusst KEIN Kriterium (`select_all_candidate_pairs()`, ursprünglich
+`songs JOIN transkripte`) — jeder gefundene Song wird ohnehin frisch
+transkribiert, ein Provider-Treffer wird nur gebraucht, damit die Sprache
+klassifizierbar ist.
+
+**Sprachstratifizierung 80/20 (v2):** Ein erster echter Testlauf zog die
+Stichprobe rein zufällig, ohne Sprachbezug — bei einer überwiegend
+englischsprachigen Bibliothek verzerrt das den Modellvergleich unnötig. Vor
+der finalen Auswahl ermittelt `select_language_pools()` für die (zufällig
+gemischten) Kandidaten aus der Cache-DB die Sprache (`detect_language_hint()`,
+Provider-Kandidatentexte + `fetch_songtext._detect_lrc_language`, wie im
+Produktivbetrieb) und sortiert sie in einen "en"- und einen "de"-Pool ein —
+Kandidaten mit anderer/nicht erkennbarer Sprache zählen zu keinem Pool und
+werden übersprungen. Jeder Pool enthält neben der Zielquote (`round(n*0.8)`
+bzw. Rest) einen Puffer (Standard das 3-fache) als Ersatzkandidaten für den
+Fall, dass ein Primärkandidat später keinen Bibliothekstreffer hat — die
+Klassifizierung bricht ab, sobald beide Puffer voll sind oder die
+Kandidatenliste erschöpft ist (nicht die komplette Cache-DB muss klassifiziert
+werden). Die dabei bereits ermittelte Sprache wird direkt als
+Whisper-Sprach-Hint weiterverwendet — ein zweiter `detect_language_hint`-
+Aufruf nach der Bibliotheksauflösung entfällt für diese Songs (nur
+Pflicht-Songs, die nicht stratifiziert werden, brauchen ihn weiterhin
+separat nach der Auflösung).
+
+**Gezielte Ein-Durchlauf-Suche mit Früh-Abbruch statt Voll-Index (v2):**
+Vorher baute das Skript IMMER zuerst einen kompletten Index über die gesamte
+Bibliothek auf (`build_library_index()`, jede der ~19.000 Dateien einzeln mit
+`mutagen` gelesen), bevor es die paar gesuchten Songs nachschlug (`resolve_
+songs()`) — unnötige Arbeit, denn die gesuchten `(artist_key, titel_key)`-
+Paare stehen bereits vorher aus der Cache-DB-Auswahl fest. Zusätzlich lief ein
+echter Testlauf gegen die auf SMB liegende Bibliothek in einen Hänger — je
+mehr Dateien angefasst werden, desto größer das Risiko. `build_library_
+index()`/`resolve_songs()`/`resolve_forced_songs()` wurden deshalb zu einer
+Funktion `resolve_all_songs()` verschmolzen, die Pflicht-Songs UND die
+sprachlich stratifizierten Zufallskandidaten (inkl. Ersatzkandidaten aus
+demselben Sprachpool) in EINEM Bibliotheksdurchlauf sucht und sofort
+abbricht, sobald alle gesuchten Songs gefunden wurden. Songs ohne
+Bibliothekstreffer werden übersprungen; reicht ein Sprachpool trotz Puffer
+nicht aus, läuft das Skript mit weniger als `--n` Songs weiter (kein
+Abbruch).
+
+```bash
+python3 compare_whisper_models.py
+python3 compare_whisper_models.py --n 10 --seed 42
+python3 compare_whisper_models.py --library /Volumes/music/musik --output-dir whisper_modellvergleich
+python3 compare_whisper_models.py --include "Kraftwerk:Autobahn" --include "Nina Hagen:Naturträne"
+```
+
+Pro Song eine TXT-Datei (`<Artist>_<Titel>_modellvergleich.txt`) mit
+`Artist:`/`Titel:`/`Sprache (Hint):`-Kopf und drei Abschnitten (`=== small
+===`, `=== medium ===`, `=== turbo ===`) — die Transkripte kommen aus
+`fetch_songtext._transcribe()` und sind daher tokenisiert (klein geschrieben,
+ohne Satzzeichen), nicht Fließtext mit Original-Zeichensetzung. Zusätzlich
+eine `modellvergleich_index.txt` mit der Liste aller bearbeiteten und
+übersprungenen Songs. Reiner Lesezugriff auf Cache-DB und Bibliothek, keine
+Schreibzugriffe außer den neuen Ausgabedateien im `--output-dir`.
+
+**Speicherschonung (Modell-für-Modell statt Song-für-Song):** Ein erster
+Testlauf auf einer 8-GB-Maschine zeigte, dass alle drei Modelle gleichzeitig
+im Speicher (small+medium+turbo ≈ 3,6 GB) zu Swapping führen konnten — ein
+Song brauchte über 20 Minuten statt der erwarteten Sekunden bis wenigen
+Minuten. Deshalb läuft die äußere Schleife jetzt über die drei Modelle statt
+über die Songs: jedes Modell wird EINMAL geladen, transkribiert ALLE
+gefundenen Songs, wird danach wieder aus dem Speicher entfernt (`del` aus
+`fetch_songtext._whisper_models` + `gc.collect()`), bevor das nächste Modell
+geladen wird. Nie mehr als ein Modell gleichzeitig resident.
+
+**Ausgabe so schnell wie möglich, nicht erst am Ende (v2):** Vorher wurden
+alle Transkripte aller drei Modelle im Speicher gesammelt und die
+Pro-Song-TXT-Dateien erst geschrieben, nachdem `turbo` als letztes Modell
+komplett durchgelaufen war — bei einer größeren Stichprobe blieb die
+Ausgabe damit unnötig lange komplett unsichtbar, und ein Abbruch mitten in
+`medium`/`turbo` hätte auch die längst fertigen `small`-Ergebnisse verloren.
+Jetzt legt `write_song_header()` jede Song-Datei SOFORT mit Kopf an (noch
+vor dem ersten Modell-Durchlauf), und `append_model_transcript()` hängt
+direkt nach jeder einzelnen Transkription den jeweiligen Modell-Abschnitt an
+die Datei an — nichts wird mehr im Speicher zwischengehalten. Nach dem
+`small`-Durchlauf sind damit bereits alle Song-Dateien mit diesem Abschnitt
+vollständig auf der Platte, unabhängig davon, ob `medium`/`turbo` noch
+laufen. Format der fertigen Datei unverändert. `write_song_report()`
+(schrieb alle drei Abschnitte auf einmal) ist damit entfallen.
+
+**Sprach-Hint für einen fairen Vergleich:** Im Produktivbetrieb
+(`fetch_songtext.py`) bekommt Whisper immer einen Sprach-Hint aus den
+Provider-Kandidatentexten (`_detect_lrc_language`) — ohne Hint wäre der
+Modellvergleich nicht repräsentativ für die echte Nutzung, und größere
+Modelle sind bei der Selbst-Erkennung der Sprache erfahrungsgemäß robuster
+als `small`, was `small` unfair benachteiligen könnte. Deshalb ermittelt das
+Skript vor der Transkription pro Song EINMAL einen Sprach-Hint aus den
+gecachten Provider-Kandidatentexten (`ergebnisse` JOIN `texte`,
+`status='treffer'`) und übergibt ihn identisch an alle drei Modelle. Ohne
+Provider-Treffer im Cache bleibt der Hint `None` (Produktiv-Fallback). Die
+erkannte Sprache erscheint in der TXT-Datei als `Sprache (Hint): de` bzw.
+`Sprache (Hint): nicht erkannt`.
+
+**Pflicht-Songs (`--include`):** "Nina Hagen Band" / "Rangehn" ist fest
+verdrahtet immer zusätzlich zur Zufallsauswahl in der Stichprobe (unabhängig
+von `--n`/`--seed`) — war der Song ohnehin unter den zufällig gezogenen, wird
+er dedupliziert statt doppelt verarbeitet. Mit `--include ARTIST:TITEL`
+(wiederholbar) lassen sich weitere Pflicht-Songs ergänzen; sie brauchen dafür
+keinen Cache-Eintrag, nur einen Treffer im Bibliotheks-Scan. Fehlt die
+Audiodatei in der Bibliothek, erscheint das als klarer Hinweis in der
+Konsolenausgabe und als eigener Abschnitt in `modellvergleich_index.txt`.
+
 ## ✓ inspect_song.py — Diagnose-Werkzeug für einzelne Songs
 
 Neues eigenständiges Skript (nach dem Vorbild von `lrc_recheck.py`): fragt die

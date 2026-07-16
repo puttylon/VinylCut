@@ -7,6 +7,7 @@ import random
 import re
 import os
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,15 @@ except ImportError:
     cache_store = None
 
 # Rückbau: lokal-Cache-Feature entfernt, wieder reiner Provider-Cache
-__version__ = "1.11.0"
+# v1.12.0: --retry-missing NAME|all -- gecachte "nichts"/"fehlschlag"-Einträge
+# gezielt erneut live abfragen (Cache-DB-Operation, kein Whisper).
+# --artist ohne --title beschränkt auf alle Songs eines Künstlers, Ergebnisse
+# laufen sortiert nach Artist/Titel.
+# v1.13.0: lokaler LRCLib-Datenbank-Abzug (_LRCLIB_DUMP_PATH) wird bei der
+# lrclib-Quelle VOR einer echten Live-Abfrage durchsucht (siehe
+# _query_provider) -- nur bei 0 Treffern dort UND ohne --cache-only wird wie
+# bisher live gefragt. Kein neues CLI-Flag.
+__version__ = "1.13.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -161,6 +170,17 @@ _cache_ttl_days = 30
 _cache_refresh = False
 _cache_only = False
 _cache_lock = threading.Lock()
+
+# Lokaler LRCLib-Datenbank-Abzug (SMB-Netzlaufwerk, Original-LRCLib-Schema,
+# aktuell nicht mehr aktiv befüllt): wird in _query_provider bei der lrclib-
+# Quelle VOR einer echten Live-Abfrage durchsucht (cache_store.lookup_lrclib_dump),
+# um wiederholte Live-Anfragen zu sparen. _lrclib_dump_conn wird EINMAL pro Lauf
+# in main() geöffnet (None = nicht verfügbar: Mount fehlt, Datei fehlt, sonstiger
+# Fehler beim Öffnen -- still degradieren, kein Absturz, wie beim regulären
+# Cache). Denselben _cache_lock wie _cache_conn mitbenutzen (kurze Lookups,
+# kein eigenes Lock-Objekt nötig).
+_LRCLIB_DUMP_PATH = Path("/Volumes/music/db.sqlite3")
+_lrclib_dump_conn = None
 
 # Kontrastive Marge (seit v1.10.0 Standardverfahren der Whisper-Verifikation,
 # vormals --contrastive-experiment). Ersetzt die ABSOLUTE Whisper-
@@ -440,34 +460,97 @@ def _query_provider(
     "fehlschlag"-Eintrag wäre hier fachlich falsch). Der Guard greift auch
     ohne offene Cache-Verbindung (use_cache=False), damit --cache-only
     garantiert nie live fragt, egal ob die Cache-DB verfügbar ist.
+
+    Lokaler LRCLib-Dump (nur provider == "lrclib", nur wenn not _cache_refresh
+    — genau wie beim eigenen Cache-Lookup oben): zwischen dem eigenen Cache-
+    Lookup und dem --cache-only-Guard wird zuerst cache_store.lookup_lrclib_dump
+    gegen _lrclib_dump_conn geprüft (Beschleuniger, spart eine echte Live-
+    Abfrage). Ist der Dump nicht verfügbar (_lrclib_dump_conn None, z.B. Mount
+    fehlt) oder liefert er 0 Treffer zu Künstler+Titel, läuft der Ablauf
+    unverändert weiter (Schritt 2/3 unten). Liefert der Dump einen Treffer
+    (mit oder ohne Songtext), wird das Ergebnis GENAU WIE ein Live-Treffer im
+    eigenen Cache abgelegt (sofern use_cache) und sofort zurückgegeben — kein
+    subprocess.run mehr nötig. --cache-only ist hier irrelevant: der Dump ist
+    keine Live-Abfrage, sein Ergebnis darf also auch unter --cache-only
+    verwendet werden.
     """
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = title_key = None
-    if use_cache:
+    if cache_store is not None:
         artist_key = cache_store.normalize_key(artist)
         title_key = cache_store.normalize_key(title)
-        if not _cache_refresh:
-            cached = None
-            try:
-                with _cache_lock:
-                    cached = cache_store.get_provider(
-                        _cache_conn,
-                        provider,
-                        artist_key,
-                        title_key,
-                        ttl_days=_cache_ttl_days,
-                    )
-            except Exception:
-                cached = None  # Cache-Fehler dürfen den Lauf nie stören — einfach live abfragen
-            if cached is not None:
-                if cached["status"] == "treffer" and cached["content"]:
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".lrc", delete=False, mode="w", encoding="utf-8"
-                    ) as tmp:
-                        tmp.write(cached["content"])
-                        tmp_path = Path(tmp.name)
-                    return provider, tmp_path
-                return provider, None  # "nichts" gecacht
+
+    if use_cache and not _cache_refresh:
+        cached = None
+        try:
+            with _cache_lock:
+                cached = cache_store.get_provider(
+                    _cache_conn,
+                    provider,
+                    artist_key,
+                    title_key,
+                    ttl_days=_cache_ttl_days,
+                )
+        except Exception:
+            cached = (
+                None  # Cache-Fehler dürfen den Lauf nie stören — einfach live abfragen
+            )
+        if cached is not None:
+            if cached["status"] == "treffer" and cached["content"]:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".lrc", delete=False, mode="w", encoding="utf-8"
+                ) as tmp:
+                    tmp.write(cached["content"])
+                    tmp_path = Path(tmp.name)
+                return provider, tmp_path
+            return provider, None  # "nichts" gecacht
+
+    if (
+        provider == "lrclib"
+        and not _cache_refresh
+        and cache_store is not None
+        and _lrclib_dump_conn is not None
+    ):
+        try:
+            with _cache_lock:
+                dump_result = cache_store.lookup_lrclib_dump(
+                    _lrclib_dump_conn, artist_key, title_key
+                )
+        except Exception:
+            dump_result = (
+                None  # Dump-Fehler dürfen den Lauf nie stören — weiter wie bisher
+            )
+        if dump_result is not None:
+            if dump_result["status"] == "treffer" and dump_result["content"]:
+                if use_cache:
+                    try:
+                        with _cache_lock:
+                            cache_store.put_provider(
+                                _cache_conn,
+                                provider,
+                                artist_key,
+                                title_key,
+                                "treffer",
+                                dump_result["content"],
+                            )
+                    except Exception:
+                        pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+                with tempfile.NamedTemporaryFile(
+                    suffix=".lrc", delete=False, mode="w", encoding="utf-8"
+                ) as tmp:
+                    tmp.write(dump_result["content"])
+                    tmp_path = Path(tmp.name)
+                return provider, tmp_path
+            # Track im Dump gefunden, aber ohne Songtext ("nichts")
+            if use_cache:
+                try:
+                    with _cache_lock:
+                        cache_store.put_provider(
+                            _cache_conn, provider, artist_key, title_key, "nichts", None
+                        )
+                except Exception:
+                    pass  # Cache-Schreibfehler dürfen den Lauf nie stören
+            return provider, None
 
     if _cache_only:
         return provider, None
@@ -1714,13 +1797,171 @@ def _iter_audio_dfs(root: Path) -> "Iterator[Path]":
     yield from _recurse(root)
 
 
+def _retry_missing(providers: list[str], artist: str | None, title: str | None) -> None:
+    """--retry-missing: fragt `providers` live erneut ab, wo die Cache-DB
+    aktuell status='nichts' ODER status='fehlschlag' zeigt (Motivation:
+    lrclib steckte einmal stundenlang fälschlich in der "gesperrt"-
+    Ruhephase, siehe ROADMAP.md).
+
+    Reine Cache-DB-Operation: kein Whisper, keine .lrc-Datei wird gelesen
+    oder geschrieben. Nutzt _query_provider unverändert wieder (inkl.
+    Rate-Limit-Handling und Cache-Schreiblogik) -- dafür wird _cache_refresh
+    für die Dauer dieses Laufs auf True gesetzt, sonst würde ein gecachtes
+    "nichts" von _query_provider als gültiger (nicht abgelaufener) Cache-
+    Treffer behandelt und NIE live nachgefragt (siehe get_provider: nur
+    status='fehlschlag' erzwingt dort von sich aus einen Live-Versuch).
+
+    Query-String: da die Cache-DB nur normalisierte artist_key/titel_key
+    speichert (NFC, gestrippt, kleingeschrieben -- siehe cache_store.py),
+    nicht die Original-Schreibweise, wird die Suchanfrage aus genau diesen
+    normalisierten Schlüsseln gebaut. Bekannte Einschränkung: geht Groß-/
+    Kleinschreibung für einen Provider verloren, kann das die Trefferquote
+    gegenüber der ursprünglichen Live-Abfrage (mit Original-Schreibweise)
+    leicht verschlechtern.
+
+    Rate-Limit-Ruhephase (_rate_limit_state): rein In-Memory, pro Prozess-
+    lauf neu (kein Cache-DB-Bezug) -- ein separat gestarteter
+    --retry-missing-Lauf beginnt daher automatisch mit einem leeren
+    Zustand, unabhängig davon, ob ein früherer (anderer) Lauf gerade
+    "gesperrt" war. Das eigentliche Stuck-Bug-Verhalten selbst wird hier
+    NICHT behoben.
+
+    Eingrenzung über artist/title: beide zusammen -> genau ein Song. Nur
+    artist (title=None) -> alle Songs dieses Künstlers in der Cache-DB.
+    Weder artist noch title -> keine Eingrenzung, ganze Cache-DB.
+
+    Ergebniszeilen werden immer nach Artist, Titel (Cache-DB-Schlüssel)
+    sortiert abgearbeitet -- unabhängig von der Eingrenzung.
+    """
+    assert _cache_conn is not None  # von main() vor dem Aufruf sichergestellt
+
+    scope_song_ids: list[int] | None = None
+    if artist is not None:
+        artist_key = cache_store.normalize_key(artist)
+        if title is not None:
+            title_key = cache_store.normalize_key(title)
+            row = _cache_conn.execute(
+                "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+                (artist_key, title_key),
+            ).fetchone()
+            if row is None:
+                print(
+                    f"FEHLER: Song nicht in der Cache-Datenbank gefunden: "
+                    f"Artist={artist!r}, Titel={title!r}"
+                )
+                sys.exit(1)
+            scope_song_ids = [row[0]]
+        else:
+            song_rows = _cache_conn.execute(
+                "SELECT id FROM songs WHERE artist_key=?", (artist_key,)
+            ).fetchall()
+            if not song_rows:
+                print(
+                    f"FEHLER: Kein Song von Artist={artist!r} in der Cache-Datenbank gefunden."
+                )
+                sys.exit(1)
+            scope_song_ids = [r[0] for r in song_rows]
+
+    placeholders = ",".join("?" for _ in providers)
+    sql = (
+        "SELECT e.song_id, e.quelle, s.artist_key, s.titel_key "
+        "FROM ergebnisse e JOIN songs s ON s.id = e.song_id "
+        f"WHERE e.status IN ('nichts', 'fehlschlag') AND e.quelle IN ({placeholders})"
+    )
+    params: list = list(providers)
+    if scope_song_ids is not None:
+        id_placeholders = ",".join("?" for _ in scope_song_ids)
+        sql += f" AND e.song_id IN ({id_placeholders})"
+        params.extend(scope_song_ids)
+    sql += " ORDER BY s.artist_key, s.titel_key, e.quelle"
+
+    rows = _cache_conn.execute(sql, params).fetchall()
+
+    if not rows:
+        print(
+            "Keine passenden Cache-Einträge gefunden (status='nichts'/'fehlschlag' "
+            f"für {', '.join(providers)})."
+        )
+        return
+
+    env = _load_env()
+    global _cache_refresh
+    prev_refresh = _cache_refresh
+    # Erzwingt bei _query_provider den Live-Versuch, statt ein gecachtes
+    # "nichts" als gültigen (nicht abgelaufenen) Cache-Treffer zu werten.
+    _cache_refresh = True
+    checked = now_found = still_missing = still_failing = 0
+    try:
+        for song_id, provider, song_artist_key, song_title_key in rows:
+            query = f"{song_artist_key} {song_title_key}".strip()
+            checked += 1
+            _print_status(
+                f"  Retry {provider}: {song_artist_key} / {song_title_key} ..."
+            )
+            _, path = _query_provider(
+                query, provider, env, artist=song_artist_key, title=song_title_key
+            )
+            if path is not None:
+                now_found += 1
+                path.unlink(missing_ok=True)
+                _tprint(
+                    f"{_ts()}  {provider}: {song_artist_key} / {song_title_key}  "
+                    "✓ jetzt gefunden"
+                )
+                continue
+
+            # path is None heißt NICHT zwangsläufig "wirklich nichts gefunden"
+            # -- _query_provider schreibt bei einem transienten Fehler
+            # (Timeout/Rate-Limit/Captcha) genauso status="fehlschlag" und
+            # gibt ebenfalls None zurück. Ohne diese Unterscheidung sähe ein
+            # erneuter transienter Fehler (der beim nächsten --retry-missing
+            # wieder aufgegriffen würde) genauso aus wie ein bestätigtes
+            # "gibt es nicht" -- irreführend, gerade in dem Moment, wo ein
+            # weiterer Versuch am ehesten lohnt.
+            row = _cache_conn.execute(
+                "SELECT status, fehlergrund FROM ergebnisse WHERE song_id=? AND quelle=?",
+                (song_id, provider),
+            ).fetchone()
+            status, fehlergrund = row if row else (None, None)
+            if status == "fehlschlag":
+                still_failing += 1
+                _tprint(
+                    f"{_ts()}  {provider}: {song_artist_key} / {song_title_key}  "
+                    f"weiterhin Fehler ({fehlergrund}) — später erneut versuchen"
+                )
+            else:
+                still_missing += 1
+                _tprint(
+                    f"{_ts()}  {provider}: {song_artist_key} / {song_title_key}  "
+                    "weiterhin kein Treffer"
+                )
+    finally:
+        _cache_refresh = prev_refresh
+
+    print(
+        f"\n--retry-missing fertig — {checked} (Song, Provider)-Kombinationen geprüft, "
+        f"{now_found} jetzt gefunden, {still_missing} weiterhin ohne Treffer, "
+        f"{still_failing} weiterhin mit Fehler (später erneut versuchen)."
+    )
+
+
 def main() -> None:
     import argparse
+
+    global _cache_conn, _cache_ttl_days, _cache_refresh, _cache_only, _lrclib_dump_conn
 
     parser = argparse.ArgumentParser(
         description="Songtexte laden via syncedlyrics + Whisper-Verifikation"
     )
-    parser.add_argument("path", help="Albumordner (oder Wurzelordner mit --recursive)")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help=(
+            "Albumordner (oder Wurzelordner mit --recursive). Nicht nötig "
+            "zusammen mit --retry-missing (reine Cache-DB-Operation)."
+        ),
+    )
     parser.add_argument(
         "--recursive",
         "-r",
@@ -1791,9 +2032,52 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--retry-missing",
+        metavar="NAME|all",
+        choices=[*_ALL_PROVIDERS, "all"],
+        help=(
+            "Cache-Einträge mit status='nichts' oder 'fehlschlag' für den "
+            "angegebenen Provider (oder alle vier bei 'all') erneut live "
+            "abfragen -- z.B. nachdem ein Provider fälschlich als gesperrt "
+            "galt. Reine Cache-DB-Operation: kein Whisper, keine .lrc-Datei "
+            "wird gelesen oder geschrieben. Mit --artist (+ optional --title) "
+            "auf einen einzelnen Künstler oder Song beschränkbar, sonst "
+            "betrifft es die gesamte Cache-DB. Ergebnisse laufen sortiert "
+            "nach Artist/Titel. Braucht keinen path."
+        ),
+    )
+    parser.add_argument(
+        "--artist",
+        help=(
+            "Nur zusammen mit --retry-missing: auf diesen Künstler beschränken -- "
+            "ohne --title alle seine Songs, mit --title nur diesen einen Song."
+        ),
+    )
+    parser.add_argument(
+        "--title",
+        help="Nur zusammen mit --retry-missing UND --artist: auf diesen einen Song beschränken.",
+    )
+    parser.add_argument(
         "-V", "--version", action="version", version=f"fetch_songtext {__version__}"
     )
     args = parser.parse_args()
+
+    if args.title and not args.artist:
+        parser.error("--title erfordert --artist.")
+    if (args.artist or args.title) and not args.retry_missing:
+        parser.error("--artist/--title sind nur zusammen mit --retry-missing sinnvoll.")
+    if args.retry_missing:
+        if args.no_cache:
+            parser.error(
+                "--retry-missing braucht die Cache-DB, nicht mit --no-cache kombinierbar."
+            )
+        if args.cache_only:
+            parser.error(
+                "--retry-missing und --cache-only schließen sich aus (--cache-only "
+                "verbietet jede Live-Abfrage, --retry-missing braucht sie aber)."
+            )
+    elif args.path is None:
+        parser.error("path ist erforderlich (außer zusammen mit --retry-missing).")
 
     if args.cache_only and args.no_cache:
         parser.error(
@@ -1809,6 +2093,27 @@ def main() -> None:
             "Verifikation (kontrastive Marge) braucht die Cache-DB immer als "
             "Hintergrund-Pool (siehe _build_contrastive_context)."
         )
+
+    if args.retry_missing:
+        _cache_ttl_days = args.cache_ttl
+        if cache_store is None:
+            print(
+                "FEHLER: cache_store-Modul nicht verfügbar -- --retry-missing "
+                "braucht die Cache-DB."
+            )
+            sys.exit(1)
+        try:
+            _cache_conn = cache_store.open_cache(
+                Path(__file__).parent / "fetch_songtext_cache.db"
+            )
+        except Exception as e:
+            print(f"FEHLER: Cache-Datenbank konnte nicht geöffnet werden ({e}).")
+            sys.exit(1)
+        providers = (
+            _ALL_PROVIDERS if args.retry_missing == "all" else [args.retry_missing]
+        )
+        _retry_missing(providers, args.artist, args.title)
+        return
 
     root = Path(args.path).resolve()
     if root.is_file() and root.suffix.lower() in _AUDIO_EXTENSIONS:
@@ -1832,7 +2137,6 @@ def main() -> None:
     else:
         print(f"\n=== SONGTEXTE ({mode}, {len(audio_files)} Dateien) — {_ts()} ===\n")  # type: ignore[arg-type]
 
-    global _cache_conn, _cache_ttl_days, _cache_refresh, _cache_only
     _cache_ttl_days = args.cache_ttl
     # --force soll wirklich alles frisch abfragen (nicht nur den alten
     # Track-Speicher umgehen) — sonst würde --force stillschweigend
@@ -1850,6 +2154,25 @@ def main() -> None:
                 f"Warnung: Cache-Datenbank konnte nicht geöffnet werden ({e}) — Cache inaktiv."
             )
             _cache_conn = None
+
+    # Lokaler LRCLib-Datenbank-Abzug (siehe _query_provider): still degradieren
+    # bei jedem Fehler (Mount fehlt, Datei fehlt, sonstiger Öffnungsfehler) —
+    # kein Absturz, keine Meldung, die den Lauf stört (reiner Beschleuniger).
+    # immutable=1 ist auf dem SMB-Mount nötig (siehe cache_store.lookup_lrclib_dump-
+    # Docstring): SMB unterstützt kein SQLite-Locking, mode=ro allein scheitert.
+    # --no-cache schaltet auch diesen Abzug ab (CACHE_DESIGN.md: "--no-cache
+    # ignoriert den Cache komplett") — dieselbe Bedingung wie beim _cache_conn-
+    # Block oben.
+    _lrclib_dump_conn = None
+    if cache_store is not None and not args.no_cache:
+        try:
+            _lrclib_dump_conn = sqlite3.connect(
+                f"file:{_LRCLIB_DUMP_PATH}?mode=ro&immutable=1",
+                uri=True,
+                check_same_thread=False,
+            )
+        except Exception:
+            _lrclib_dump_conn = None
 
     env = _load_env()
     if not args.no_whisper and not args.fast:

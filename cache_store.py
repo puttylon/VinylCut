@@ -27,6 +27,7 @@ Abfrage bei lrclib (siehe fetch_songtext._query_provider).
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -356,6 +357,41 @@ def get_transcript(
     }
 
 
+_PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _strip_punctuation_for_lrclib_dump(text: str) -> str:
+    """Entfernt Satzzeichen und kollabiert Mehrfach-Leerzeichen -- NUR für den
+    Abgleich gegen den externen LRCLib-Datenbank-Abzug (siehe
+    lookup_lrclib_dump), NICHT Teil von normalize_key() selbst.
+
+    Root Cause (gegen den echten lokalen Dump verifiziert, nicht geraten):
+    LRCLib speichert `name_lower`/`artist_name_lower` bereits ohne
+    Satzzeichen, z.B. "Stayin' Alive" -> "stayin alive" (Apostroph weg),
+    "Dusk Till Dawn (Radio Edit)" -> "dusk till dawn radio edit" (Klammern
+    weg, Inhalt bleibt als Wort), "Arthas, My Son (Cinematic Intro)" ->
+    "arthas my son cinematic intro" (Komma + Klammern weg). Unsere eigene
+    normalize_key() (NFC + strip + lower) lässt Satzzeichen dagegen
+    unangetastet -- ein Song mit Apostroph/Klammern/Komma/Bindestrich im
+    Titel fand im Dump deshalb keinen Treffer, obwohl er dort vorhanden war.
+
+    Bekannter, NICHT behobener Rest-Fall: mindestens ein Beleg zeigte auch
+    eine Diakritika-Umschrift im Dump (z.B. "Eivør Pálsdóttir" ->
+    "eivor palsdottir", ø->o, á->a, ö->o). Das wird hier bewusst NICHT
+    nachgebildet -- ein einzelner Beleg reicht nicht, um den zugrunde
+    liegenden Algorithmus (z.B. vollständige Transliteration vs. nur
+    bestimmte Zeichen) sicher zu kennen. Songs mit akzentuierten Buchstaben
+    können deshalb weiterhin am Dump vorbeigehen und fallen dann auf die
+    normale Live-Abfrage zurück -- kein Datenverlust, nur ein verpasster
+    Beschleuniger.
+
+    Regel: alles außer Wortzeichen (\\w, Unicode-bewusst) und Leerraum
+    entfernen, dann Mehrfach-Leerzeichen zu einem kollabieren und trimmen.
+    """
+    return _WHITESPACE_RE.sub(" ", _PUNCTUATION_RE.sub("", text)).strip()
+
+
 def lookup_lrclib_dump(
     conn: sqlite3.Connection, artist_key: str, title_key: str
 ) -> dict | None:
@@ -366,6 +402,14 @@ def lookup_lrclib_dump(
     Dauer, KEINE Fuzzy-Ähnlichkeit: die echte lrclib-Live-Suche matcht laut
     ihrem eigenen Quellcode ebenfalls nur Text, nicht Dauer, und ein exakter
     Abgleich ist hier einfacher als Fuzzy-Scoring nachzubauen.
+
+    artist_key/title_key kommen vom Aufrufer bereits normalize_key()-
+    normalisiert (NFC + strip + lower), wie im Rest des Moduls üblich. Für den
+    SQL-Vergleich wird intern zusätzlich _strip_punctuation_for_lrclib_dump
+    angewendet (siehe dortiger Docstring) -- NUR hier, NICHT als Änderung an
+    normalize_key() selbst (das würde jeden bestehenden songs/ergebnisse-
+    Eintrag betreffen, viel zu großer Blast-Radius für einen reinen
+    Dump-Abgleichs-Fix).
 
     `conn` muss der Aufrufer bereits offen übergeben — üblicherweise mit
     `sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)`: der Abzug
@@ -387,12 +431,14 @@ def lookup_lrclib_dump(
     Bei mehreren gleichwertigen Kandidaten gewinnt deterministisch die kleinste
     tracks.id.
     """
+    artist_lookup = _strip_punctuation_for_lrclib_dump(artist_key)
+    title_lookup = _strip_punctuation_for_lrclib_dump(title_key)
     rows = conn.execute(
         "SELECT t.id, l.has_synced_lyrics, l.has_plain_lyrics, "
         "l.synced_lyrics, l.plain_lyrics "
         "FROM tracks t LEFT JOIN lyrics l ON t.last_lyrics_id = l.id "
         "WHERE t.artist_name_lower = ? AND t.name_lower = ?",
-        (artist_key, title_key),
+        (artist_lookup, title_lookup),
     ).fetchall()
     if not rows:
         return None  # kein Track zu Künstler+Titel überhaupt — Aufrufer fragt live

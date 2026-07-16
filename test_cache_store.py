@@ -538,9 +538,105 @@ class TestLookupLrclibDump:
         assert ergebnis == {"status": "nichts", "content": None}
 
     def test_case_sensitive_lookup_erwartet_bereits_normalisierte_keys(self, tmp_path):
-        """lookup_lrclib_dump macht selbst KEINE Normalisierung -- der Aufrufer
-        (fetch_songtext._query_provider) übergibt bereits über
-        cache_store.normalize_key normalisierte Schlüssel."""
+        """lookup_lrclib_dump macht selbst KEINE Groß-/Kleinschreibungs-
+        Normalisierung -- der Aufrufer (fetch_songtext._query_provider)
+        übergibt bereits über cache_store.normalize_key normalisierte
+        Schlüssel. Die Satzzeichen-Bereinigung (siehe Tests unten) passiert
+        zusätzlich intern, ändert daran nichts."""
         conn = _make_dump_db(tmp_path)
         _insert_track(conn, "queen", "bohemian rhapsody", synced="[00:01.00]text")
         assert cs.lookup_lrclib_dump(conn, "Queen", "Bohemian Rhapsody") is None
+
+    # --- Satzzeichen-Bereinigung (Regressionstests, siehe ROADMAP.md) ------
+    #
+    # Root Cause (gegen den echten lokalen Dump verifiziert): LRCLib speichert
+    # name_lower/artist_name_lower bereits ohne Satzzeichen. normalize_key()
+    # (NFC + strip + lower) lässt Satzzeichen dagegen unangetastet -- ein
+    # Song mit Apostroph/Klammern/Komma/Bindestrich im Titel fand im Dump
+    # deshalb keinen Treffer, obwohl er dort vorhanden war (z.B. Bee Gees
+    # "Stayin' Alive").
+
+    def test_apostroph_im_titel_findet_dump_ohne_apostroph(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "bee gees", "stayin alive", synced="[00:01.00]text")
+        ergebnis = cs.lookup_lrclib_dump(conn, "bee gees", "stayin' alive")
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]text"}
+
+    def test_apostroph_im_kuenstler_findet_dump_ohne_apostroph(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(conn, "assassins creed", "theme", synced="[00:01.00]text")
+        ergebnis = cs.lookup_lrclib_dump(conn, "assassin's creed", "theme")
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]text"}
+
+    def test_bindestrich_im_titel_findet_dump_ohne_bindestrich(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(
+            conn, "artist a", "dusk till dawn radio edit", synced="[00:01.00]text"
+        )
+        ergebnis = cs.lookup_lrclib_dump(
+            conn, "artist a", "dusk till dawn - radio edit"
+        )
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]text"}
+
+    def test_klammern_im_titel_finden_dump_ohne_klammern(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(
+            conn, "artist a", "dusk till dawn radio edit", synced="[00:01.00]text"
+        )
+        ergebnis = cs.lookup_lrclib_dump(
+            conn, "artist a", "dusk till dawn (radio edit)"
+        )
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]text"}
+
+    def test_komma_und_klammern_im_titel_finden_dump_ohne_satzzeichen(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(
+            conn,
+            "artist a",
+            "arthas my son cinematic intro",
+            synced="[00:01.00]text",
+        )
+        ergebnis = cs.lookup_lrclib_dump(
+            conn, "artist a", "arthas, my son (cinematic intro)"
+        )
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]text"}
+
+    def test_kein_treffer_bleibt_none_auch_nach_satzzeichen_bereinigung(self, tmp_path):
+        conn = _make_dump_db(tmp_path)
+        assert cs.lookup_lrclib_dump(conn, "bee gees", "stayin' alive") is None
+
+
+class TestStripPunctuationForLrclibDump:
+    """_strip_punctuation_for_lrclib_dump: die interne Zusatz-Normalisierung
+    für den Dump-Abgleich (siehe lookup_lrclib_dump-Docstring)."""
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("stayin' alive", "stayin alive"),
+            ("assassin's creed", "assassins creed"),
+            ("dusk till dawn - radio edit", "dusk till dawn radio edit"),
+            ("dusk till dawn (radio edit)", "dusk till dawn radio edit"),
+            (
+                "arthas, my son (cinematic intro)",
+                "arthas my son cinematic intro",
+            ),
+            ("bb's theme (from death stranding)", "bbs theme from death stranding"),
+            ("7th element (hd)", "7th element hd"),
+        ],
+    )
+    def test_bekannte_belege_aus_dem_echten_dump(self, text, expected):
+        assert cs._strip_punctuation_for_lrclib_dump(text) == expected
+
+    def test_diakritika_bleiben_unangetastet(self):
+        """Bewusst KEINE Diakritika-Transliteration (siehe Docstring: nur 1
+        Beleg gesehen, nicht genug um den Algorithmus sicher nachzubilden)."""
+        assert cs._strip_punctuation_for_lrclib_dump("café") == "café"
+        assert cs._strip_punctuation_for_lrclib_dump("Eivør Pálsdóttir") == (
+            "Eivør Pálsdóttir"
+        )
+
+    def test_bereits_sauberer_text_bleibt_unveraendert(self):
+        assert cs._strip_punctuation_for_lrclib_dump("bohemian rhapsody") == (
+            "bohemian rhapsody"
+        )

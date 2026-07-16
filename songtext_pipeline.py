@@ -12,12 +12,16 @@ Meilensteinen (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
-        Alle 5 Phasen nacheinander.
+        Alle 5 Phasen nacheinander -- Phase 3 (Nachhol-Modus) wird dabei
+        automatisch übersprungen, siehe unten.
     python3 songtext_pipeline.py PFAD --phase 2,4,5
         Nur die angegebenen Phasen.
     python3 songtext_pipeline.py --phase 3
-        Nur der Nachhol-Modus von fetch_providers -- reine Cache-DB-Operation,
-        PFAD wird komplett ignoriert (siehe Design-Dokument, Abschnitt 3).
+        Nur der Nachhol-Modus von fetch_providers -- reine Cache-DB-Operation
+        über die GANZE Bibliothek. Läuft NUR, wenn GAR KEIN PFAD angegeben
+        ist: wird trotzdem ein PFAD mitgegeben, wird Phase 3 komplett
+        übersprungen (nicht auf PFAD eingegrenzt) -- ist PFAD gesetzt, wird
+        NUR dieser PFAD verarbeitet, siehe main().
 """
 
 from __future__ import annotations
@@ -133,8 +137,10 @@ def fetch_providers_normal(
 def fetch_providers_nachhol(conn: sqlite3.Connection) -> None:
     """Phase 3: Nachhol-Modus von fetch_providers -- fragt gezielt nur
     (Song, Provider)-Kombinationen mit status 'nichts'/'fehlschlag' erneut ab
-    (siehe fetch_providers.retry_missing). Reine Cache-DB-Operation, PFAD
-    wird nicht gebraucht."""
+    (siehe fetch_providers.retry_missing), über die GANZE Cache-DB, kein
+    Scope-Parameter. Wird von main() nur aufgerufen, wenn kein PFAD gegeben
+    ist -- ist PFAD gesetzt, überspringt main() diese Phase komplett, bevor
+    diese Funktion je erreicht wird (siehe dortiger Kommentar)."""
     print("Phase 3 (fetch_providers, Nachhol-Modus):")
     fetch_providers.retry_missing(conn)
 
@@ -173,7 +179,9 @@ def main() -> None:
         metavar="PFAD",
         help=(
             "Audiodatei oder Ordner (mit --recursive für Unterordner). "
-            "Nicht nötig für --phase 3 (reine Cache-DB-Operation)."
+            "Nicht nötig für --phase 3 (reine Cache-DB-Operation über die "
+            "ganze Bibliothek) -- ist PFAD trotzdem gesetzt, wird Phase 3 "
+            "komplett übersprungen statt eingegrenzt."
         ),
     )
     parser.add_argument(
@@ -212,6 +220,27 @@ def main() -> None:
     # Ausgabe bleibt an ihre bisherige Bedingung (Phase 1/4 gewählt)
     # gebunden -- unverändert, eigener Zweck.
     root: Path | None = Path(args.path).resolve() if args.path else None
+
+    # Phase 3 (Nachhol-Modus) läuft bewusst nur, wenn GAR KEIN PFAD angegeben
+    # ist -- dann arbeitet sie über die ganze Bibliothek (bewusste "alle
+    # Tracks aktualisieren"-Absicht). Ist PFAD gesetzt, wird NUR dieser PFAD
+    # verarbeitet: Phase 3 wird komplett ausgelassen (nicht auf PFAD
+    # eingegrenzt -- fetch_providers.retry_missing() kennt gar keinen Scope-
+    # Parameter, siehe dortiger Docstring). Präzisierte Nutzer-Vorgabe nach
+    # einem echten Testlauf (ROADMAP.md) -- ursprünglich sollte --phase 3
+    # PFAD immer ignorieren, das war zu grob.
+    if root is not None and 3 in phases:
+        phases = [p for p in phases if p != 3]
+        print(
+            "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+            "(arbeitet über die ganze Bibliothek)."
+        )
+
+    if not phases:
+        print("Keine Phase auszuführen.")
+        conn.close()
+        return
+
     if root is not None and any(p in _PHASES_NEEDING_FILE for p in phases):
         file_song_map = build_file_song_map(root, args.recursive, conn)
         print(

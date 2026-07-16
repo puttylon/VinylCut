@@ -36,7 +36,13 @@ except ImportError:
 # v1.13.1: Bugfix -- --retry-missing nutzte den lokalen LRCLib-Dump nie (main()
 # öffnete _lrclib_dump_conn in diesem Zweig gar nicht, siehe
 # _open_lrclib_dump_conn/_retry_missing_active).
-__version__ = "1.13.1"
+# v1.13.2: Bugfix in cache_store.lookup_lrclib_dump -- Satzzeichen (Apostroph,
+# Klammern, Komma, Bindestrich) verhinderten Treffer im lokalen LRCLib-Dump,
+# obwohl der Track dort vorhanden war (LRCLib speichert name_lower/
+# artist_name_lower ohne Satzzeichen, unsere normalize_key() lässt sie aber
+# unangetastet). Fix lebt komplett in cache_store.py, siehe dortiger
+# Docstring bei _strip_punctuation_for_lrclib_dump.
+__version__ = "1.13.2"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage

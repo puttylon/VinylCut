@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import cache_store as cs
+import fetch_providers
 import fetch_songtext
 import songtext_pipeline
 
@@ -40,8 +41,11 @@ def test_parse_phase_list_ungueltiger_wert_wirft_value_error(spec):
 def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
     # eigene DB in tmp_path -- sonst würde main() die echte Produktions-Cache-DB
     # öffnen (siehe _default_db_path). Die DB ist leer (keine Songs, keine
-    # Ergebnisse), Phase 2/3 fragen daher real, aber ohne einen einzigen
-    # (Song, Provider) -- keine Live-Netzwerk-Abfrage findet statt.
+    # Ergebnisse), Phase 2 fragt daher real, aber ohne einen einzigen
+    # (Song, Provider) -- keine Live-Netzwerk-Abfrage findet statt. PFAD ist
+    # gesetzt (tmp_path) -- Phase 3 (Nachhol-Modus) wird deshalb übersprungen,
+    # nicht ausgeführt (siehe Fix B, ROADMAP.md: PFAD gesetzt -> nur PFAD
+    # verarbeiten, Phase 3 läuft nur ohne PFAD über die ganze Bibliothek).
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(tmp_path)])
@@ -51,8 +55,11 @@ def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
         out = capsys.readouterr().out
         assert "Phase 1 (scan_songs): 0 Song(s) gescannt/aktualisiert." in out
         assert "Phase 2 (fetch_providers, Normal-Modus): 0 Song(s) abgefragt." in out
-        assert "Phase 3 (fetch_providers, Nachhol-Modus):" in out
-        assert "Keine passenden Cache-Einträge gefunden" in out
+        assert (
+            "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+            "(arbeitet über die ganze Bibliothek)." in out
+        )
+        assert "Phase 3 (fetch_providers, Nachhol-Modus):" not in out
         assert "Phase 4 (evaluate_lyrics) würde hier laufen." in out
         assert "Phase 5 (write_lrc) würde hier laufen." in out
     finally:
@@ -469,5 +476,85 @@ def test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab(
         out = capsys.readouterr().out
         assert "Phase 2 (fetch_providers, Normal-Modus): 1 Song(s) abgefragt." in out
         assert any("andere band" in q for q, _p in fake_run.calls)
+    finally:
+        _reset_fetch_songtext_globals()
+
+
+# --- Fix B: Phase 3 wird bei gesetztem PFAD übersprungen, nicht eingegrenzt
+
+# Präzisierte Nutzer-Vorgabe nach einem echten Testlauf (siehe ROADMAP.md):
+# ist PFAD angegeben, wird NUR dieser PFAD verarbeitet -- Phase 3
+# (Nachhol-Modus, arbeitet immer über die GANZE Cache-DB, kein Scope-Begriff)
+# wird dann komplett ausgelassen statt (fälschlich) eingegrenzt. Nur ganz
+# ohne PFAD läuft Phase 3 wie bisher über die ganze Bibliothek.
+
+
+def test_main_pfad_plus_alle_phasen_ueberspringt_phase_3_und_ruft_retry_missing_nicht_auf(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(tmp_path)])
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError(
+            "retry_missing darf bei gesetztem PFAD gar nicht erst aufgerufen werden"
+        )
+
+    monkeypatch.setattr(fetch_providers, "retry_missing", _fail_if_called)
+
+    try:
+        songtext_pipeline.main()
+
+        out = capsys.readouterr().out
+        assert (
+            "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+            "(arbeitet über die ganze Bibliothek)." in out
+        )
+        assert "Phase 3 (fetch_providers, Nachhol-Modus):" not in out
+    finally:
+        _reset_fetch_songtext_globals()
+
+
+def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "3"]
+    )
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError(
+            "retry_missing darf bei gesetztem PFAD gar nicht erst aufgerufen werden"
+        )
+
+    # nur für DIESEN einen main()-Aufruf gemockt (monkeypatch.context()) --
+    # der zweite Aufruf weiter unten (ohne PFAD) soll retry_missing ganz
+    # normal, ungemockt ausführen.
+    with monkeypatch.context() as mp:
+        mp.setattr(fetch_providers, "retry_missing", _fail_if_called)
+        songtext_pipeline.main()  # darf nicht crashen
+
+    out = capsys.readouterr().out
+    assert (
+        "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+        "(arbeitet über die ganze Bibliothek)." in out
+    )
+    assert "Keine Phase auszuführen." in out
+    assert "Phase 1" not in out
+    assert "Phase 2" not in out
+    assert "Phase 4" not in out
+    assert "Phase 5" not in out
+
+    # conn wurde sauber geschlossen (kein Leck) -- ein zweiter main()-Aufruf
+    # mit derselben DB muss ganz normal funktionieren, kein "database is
+    # locked" o.ä. durch eine noch offene Connection aus dem ersten Aufruf.
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "3"])
+    try:
+        songtext_pipeline.main()
+        out2 = capsys.readouterr().out
+        assert "Keine passenden Cache-Einträge gefunden" in out2
     finally:
         _reset_fetch_songtext_globals()

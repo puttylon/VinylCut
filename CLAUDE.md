@@ -7,6 +7,7 @@ Dieses Dokument dient als Leitfaden für die KI-Unterstützung in diesem Reposit
 - **YAGNI (You Aren't Gonna Need It):** Implementiere nur das, was akut angefordert ist. Keine Vorbereitungen für hypothetische zukünftige Features.
 - **Direkte Lösungen:** Löse Probleme kompakt und effizient, nutze bevorzugt die Python-Standardbibliothek, es sei denn, externe Pakete bringen massiven Mehrwert.
 - **Evidenz vor Vermutung:** Bei technischer Unsicherheit (Bibliotheksverhalten, Bug-Ursache, Performance-Annahmen) nicht raten oder aus dem Gedächtnis behaupten — nachweisen: Quellcode der Bibliothek lesen, live testen/messen, recherchieren. Keine Zahlen oder Verhaltensweisen als Fakt hinstellen, die nicht durch einen Beleg gedeckt sind. Bei mehreren plausiblen Lösungsansätzen: Optionen mit Trade-offs vorlegen statt eine Wahl vorwegzunehmen.
+- **Token-Effizienz:** Tokens sind kein Fundgeld, das man einfach verbraucht — effizient einsetzen. Kein Wiederholen bereits bekannter Informationen, keine unnötig langen Recherchen/Dateilesungen, wenn ein gezielterer Weg reicht. Gilt für die KI-Arbeitsweise selbst, nicht für den produzierten Code.
 
 ## 2. Entwicklung & Testing
 - **Testpflicht vor Commit:** Bevor du (die KI) Code-Änderungen als abgeschlossen meldest oder committest, musst du selbstständig die Tests lokal ausführen.

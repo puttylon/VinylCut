@@ -33,7 +33,10 @@ except ImportError:
 # lrclib-Quelle VOR einer echten Live-Abfrage durchsucht (siehe
 # _query_provider) -- nur bei 0 Treffern dort UND ohne --cache-only wird wie
 # bisher live gefragt. Kein neues CLI-Flag.
-__version__ = "1.13.0"
+# v1.13.1: Bugfix -- --retry-missing nutzte den lokalen LRCLib-Dump nie (main()
+# öffnete _lrclib_dump_conn in diesem Zweig gar nicht, siehe
+# _open_lrclib_dump_conn/_retry_missing_active).
+__version__ = "1.13.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage

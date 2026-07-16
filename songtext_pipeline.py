@@ -8,14 +8,14 @@ inzwischen echt (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
-        Alle 5 Phasen nacheinander -- Phase 3 (Nachhol-Modus) wird dabei
-        automatisch übersprungen, siehe unten.
-    python3 songtext_pipeline.py PFAD --phase 2,4,5
+        Alle 5 Phasen nacheinander -- "nachholen" wird dabei automatisch
+        übersprungen, siehe unten.
+    python3 songtext_pipeline.py PFAD --phase abfragen,bewerten,schreiben
         Nur die angegebenen Phasen.
-    python3 songtext_pipeline.py --phase 3
+    python3 songtext_pipeline.py --phase nachholen
         Nur der Nachhol-Modus von fetch_providers -- reine Cache-DB-Operation
         über die GANZE Bibliothek. Läuft NUR, wenn GAR KEIN PFAD angegeben
-        ist: wird trotzdem ein PFAD mitgegeben, wird Phase 3 komplett
+        ist: wird trotzdem ein PFAD mitgegeben, wird "nachholen" komplett
         übersprungen (nicht auf PFAD eingegrenzt) -- ist PFAD gesetzt, wird
         NUR dieser PFAD verarbeitet, siehe main().
 """
@@ -33,37 +33,44 @@ import fetch_songtext
 import scan_songs
 import write_lrc
 
-_ALL_PHASES = (1, 2, 3, 4, 5)
+# Sprechende Namen statt Zahlen für --phase (Nutzer-Feedback: "phase" mit
+# Zahlen ist nicht sprechend) -- Werte spiegeln die Reihenfolge/Bedeutung aus
+# dem Architektur-Dokument ("scannen, Anbieter abfragen, Anbieter nachholen,
+# bewerten, .lrc schreiben"). Intern bleibt die Phase weiterhin eine Zahl
+# (1-5) -- nur die CLI-Schicht (Parsing/Fehlermeldungen/Hilfetexte) spricht
+# in Namen, main()s Dispatch-Logik (phase == 1/2/3/4/5) bleibt unverändert.
+_PHASE_NAMES: dict[str, int] = {
+    "scan": 1,
+    "abfragen": 2,
+    "nachholen": 3,
+    "bewerten": 4,
+    "schreiben": 5,
+}
+_ALL_PHASES = tuple(_PHASE_NAMES.values())
 # Phasen, die eine echte Audiodatei brauchen (siehe Design-Dokument, Abschnitt
-# 3 "PFAD und Audiodateien"): Phase 1 zum Scannen, Phase 4 nur wenn Whisper
-# den Song noch nie gehört hat, Phase 5 immer (schreibt .lrc-Dateien). Alle
-# anderen Phasen kommen ohne PFAD aus.
+# 3 "PFAD und Audiodateien"): Phase 1 (scan) zum Scannen, Phase 4 (bewerten)
+# nur wenn Whisper den Song noch nie gehört hat, Phase 5 (schreiben) immer
+# (schreibt .lrc-Dateien). Alle anderen Phasen kommen ohne PFAD aus.
 _PHASES_NEEDING_FILE = frozenset({1, 4, 5})
 
 
 def _parse_phase_list(spec: str) -> list[int]:
-    """Parst z.B. "2,4,5" oder "3" zu einer sortierten, eindeutigen Liste.
+    """Parst z.B. "abfragen,bewerten,schreiben" oder "nachholen" zu einer
+    sortierten, eindeutigen Liste von Phasen-Zahlen (siehe _PHASE_NAMES).
 
-    Wirft ValueError mit einer sprechenden Meldung bei leeren, nicht-
-    numerischen oder außerhalb 1-5 liegenden Werten.
+    Wirft ValueError mit einer sprechenden Meldung bei leeren oder
+    unbekannten Namen.
     """
     phases: list[int] = []
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
-        try:
-            phase = int(part)
-        except ValueError:
+        if part not in _PHASE_NAMES:
             raise ValueError(
-                f"Ungültiger Phase-Wert: {part!r} (muss eine Zahl sein)"
-            ) from None
-        if phase not in _ALL_PHASES:
-            raise ValueError(
-                f"Ungültige Phase: {phase} (gültig: "
-                f"{', '.join(str(p) for p in _ALL_PHASES)})"
+                f"Ungültige Phase: {part!r} (gültig: {', '.join(_PHASE_NAMES)})"
             )
-        phases.append(phase)
+        phases.append(_PHASE_NAMES[part])
     if not phases:
         raise ValueError("--phase braucht mindestens einen Wert")
     return sorted(set(phases))
@@ -195,9 +202,9 @@ def main() -> None:
         metavar="PFAD",
         help=(
             "Audiodatei oder Ordner (mit --recursive für Unterordner). "
-            "Nicht nötig für --phase 3 (reine Cache-DB-Operation über die "
-            "ganze Bibliothek) -- ist PFAD trotzdem gesetzt, wird Phase 3 "
-            "komplett übersprungen statt eingegrenzt."
+            "Nicht nötig für --phase nachholen (reine Cache-DB-Operation "
+            "über die ganze Bibliothek) -- ist PFAD trotzdem gesetzt, wird "
+            "'nachholen' komplett übersprungen statt eingegrenzt."
         ),
     )
     parser.add_argument(
@@ -212,8 +219,10 @@ def main() -> None:
         default=None,
         metavar="LISTE",
         help=(
-            "Kommagetrennte Phasen-Auswahl, z.B. '2,4,5' oder '3' (gültig: "
-            "1-5). Ohne --phase laufen alle 5 Phasen nacheinander."
+            "Kommagetrennte Phasen-Auswahl, z.B. 'abfragen,bewerten,"
+            "schreiben' oder 'nachholen' (gültig: "
+            f"{', '.join(_PHASE_NAMES)}). Ohne --phase laufen alle 5 "
+            "Phasen nacheinander."
         ),
     )
     args = parser.parse_args()
@@ -237,18 +246,18 @@ def main() -> None:
     # gebunden -- unverändert, eigener Zweck.
     root: Path | None = Path(args.path).resolve() if args.path else None
 
-    # Phase 3 (Nachhol-Modus) läuft bewusst nur, wenn GAR KEIN PFAD angegeben
+    # Phase "nachholen" (3) läuft bewusst nur, wenn GAR KEIN PFAD angegeben
     # ist -- dann arbeitet sie über die ganze Bibliothek (bewusste "alle
     # Tracks aktualisieren"-Absicht). Ist PFAD gesetzt, wird NUR dieser PFAD
-    # verarbeitet: Phase 3 wird komplett ausgelassen (nicht auf PFAD
+    # verarbeitet: "nachholen" wird komplett ausgelassen (nicht auf PFAD
     # eingegrenzt -- fetch_providers.retry_missing() kennt gar keinen Scope-
     # Parameter, siehe dortiger Docstring). Präzisierte Nutzer-Vorgabe nach
-    # einem echten Testlauf (ROADMAP.md) -- ursprünglich sollte --phase 3
+    # einem echten Testlauf (ROADMAP.md) -- ursprünglich sollte "nachholen"
     # PFAD immer ignorieren, das war zu grob.
     if root is not None and 3 in phases:
         phases = [p for p in phases if p != 3]
         print(
-            "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+            "Phase 'nachholen' übersprungen: läuft nur ohne PFAD "
             "(arbeitet über die ganze Bibliothek)."
         )
 

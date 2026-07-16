@@ -317,6 +317,23 @@ bleibt: eine Entscheidung, was mit `fetch_songtext.py` selbst passiert
 (behalten/löschen/parallel betreiben, siehe Hinweis oben) — bewusst nicht
 Teil dieses Umbaus.
 
+**✓ Nachtrag — `--phase` spricht jetzt Namen statt Zahlen:** Nutzer-Feedback
+nach dem ersten echten Test: „phase ist nichtsprechend" — `--phase 2,4,5`
+zwingt dazu, sich zu merken, welche Zahl welche Phase meint. Umbenannt auf
+`_PHASE_NAMES` (`scan`=1, `abfragen`=2, `nachholen`=3, `bewerten`=4,
+`schreiben`=5 — Reihenfolge/Wortwahl direkt aus dem Architektur-Dokument
+übernommen: „scannen, Anbieter abfragen, Anbieter nachholen, bewerten, .lrc
+schreiben"). Intern bleibt die Phase weiterhin eine Zahl (1-5) — nur die
+CLI-Schicht (`_parse_phase_list`, Hilfetexte, Fehlermeldungen) spricht jetzt
+in Namen, `main()`s Dispatch-Logik (`phase == 1/2/3/4/5`) blieb unverändert,
+um das Risiko in bereits getesteter Logik gering zu halten. Beispiel:
+`songtext_pipeline.py PFAD --phase abfragen,bewerten,schreiben` statt vorher
+`--phase 2,4,5`. Alle betroffenen Tests in `test_songtext_pipeline.py` sowie
+die CLI-Beispiele in `README.md` wurden auf die neue Syntax umgestellt.
+`pytest test_songtext_pipeline.py`: 27/27 grün. Volle Suite: 458 grün +
+dieselben 13 bekannten, unabhängigen Fehlschläge. `ruff check`/`ruff format`
+sauber.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

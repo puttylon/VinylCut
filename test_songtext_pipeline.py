@@ -14,22 +14,30 @@ import songtext_pipeline
 
 
 def test_parse_phase_list_einzelwert():
-    assert songtext_pipeline._parse_phase_list("3") == [3]
+    assert songtext_pipeline._parse_phase_list("nachholen") == [3]
 
 
 def test_parse_phase_list_mehrfachauswahl():
-    assert songtext_pipeline._parse_phase_list("2,4,5") == [2, 4, 5]
+    assert songtext_pipeline._parse_phase_list("abfragen,bewerten,schreiben") == [
+        2,
+        4,
+        5,
+    ]
 
 
 def test_parse_phase_list_unsortiert_und_leerzeichen():
-    assert songtext_pipeline._parse_phase_list(" 5, 2 ,4") == [2, 4, 5]
+    assert songtext_pipeline._parse_phase_list(" schreiben, abfragen ,bewerten") == [
+        2,
+        4,
+        5,
+    ]
 
 
 def test_parse_phase_list_dedupliziert():
-    assert songtext_pipeline._parse_phase_list("2,2,4") == [2, 4]
+    assert songtext_pipeline._parse_phase_list("abfragen,abfragen,bewerten") == [2, 4]
 
 
-@pytest.mark.parametrize("spec", ["0", "6", "abc", "", "2,9", "-1"])
+@pytest.mark.parametrize("spec", ["0", "6", "abc", "", "abfragen,unbekannt", "-1"])
 def test_parse_phase_list_ungueltiger_wert_wirft_value_error(spec):
     with pytest.raises(ValueError):
         songtext_pipeline._parse_phase_list(spec)
@@ -59,7 +67,7 @@ def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
         assert "Phase 1 (scan_songs): 0 Song(s) gescannt/aktualisiert." in out
         assert "Phase 2 (fetch_providers, Normal-Modus): 0 Song(s) abgefragt." in out
         assert (
-            "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+            "Phase 'nachholen' übersprungen: läuft nur ohne PFAD "
             "(arbeitet über die ganze Bibliothek)." in out
         )
         assert "Phase 3 (fetch_providers, Nachhol-Modus):" not in out
@@ -80,7 +88,7 @@ def test_main_phase_3_funktioniert_ohne_pfad(tmp_path, monkeypatch, capsys):
     # öffnen und fetch_providers.retry_missing() könnte live abfragen.
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
-    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "3"])
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "nachholen"])
     try:
         songtext_pipeline.main()
 
@@ -100,7 +108,13 @@ def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, 
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr(
-        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "2,4,5"]
+        "sys.argv",
+        [
+            "songtext_pipeline.py",
+            str(tmp_path),
+            "--phase",
+            "abfragen,bewerten,schreiben",
+        ],
     )
     try:
         songtext_pipeline.main()
@@ -124,7 +138,7 @@ def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, 
 def test_main_phase_1_ohne_pfad_meldet_und_ueberspringt(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
-    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "1"])
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "scan"])
     songtext_pipeline.main()
 
     out = capsys.readouterr().out
@@ -149,7 +163,7 @@ def test_main_phase_1_end_to_end_song_landet_in_songs_tabelle(
         lambda path: ("Nina Hagen", "Naturtraene", "Punk"),
     )
     monkeypatch.setattr(
-        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "1"]
+        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "scan"]
     )
 
     songtext_pipeline.main()
@@ -168,7 +182,7 @@ def test_main_phase_1_end_to_end_song_landet_in_songs_tabelle(
 
 def test_main_phase_ungueltiger_wert_exit_2(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
-        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "9"]
+        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "unbekannt"]
     )
     with pytest.raises(SystemExit) as exc_info:
         songtext_pipeline.main()
@@ -332,7 +346,7 @@ def test_main_phase_2_fragt_songs_ab_und_schreibt_in_cache_db(
     monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({"artist a": "[00:01.00]hallo"})
     monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
-    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "2"])
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "abfragen"])
 
     try:
         songtext_pipeline.main()
@@ -368,7 +382,7 @@ def test_main_phase_3_holt_nur_nichts_fehlschlag_kombis_nach(
     monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({"artist a": "[00:01.00]neu"})
     monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
-    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "3"])
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "nachholen"])
 
     try:
         songtext_pipeline.main()
@@ -436,7 +450,7 @@ def test_main_phase_1_2_fragt_nur_pfad_songs_ab_nicht_die_ganze_db(
     fake_run = _fake_subprocess_run({})
     monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "sys.argv", ["songtext_pipeline.py", str(album_dir), "--phase", "1,2"]
+        "sys.argv", ["songtext_pipeline.py", str(album_dir), "--phase", "scan,abfragen"]
     )
 
     try:
@@ -484,7 +498,7 @@ def test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab(
     monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({})
     monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
-    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "2"])
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "abfragen"])
 
     try:
         songtext_pipeline.main()
@@ -524,7 +538,7 @@ def test_main_pfad_plus_alle_phasen_ueberspringt_phase_3_und_ruft_retry_missing_
 
         out = capsys.readouterr().out
         assert (
-            "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+            "Phase 'nachholen' übersprungen: läuft nur ohne PFAD "
             "(arbeitet über die ganze Bibliothek)." in out
         )
         assert "Phase 3 (fetch_providers, Nachhol-Modus):" not in out
@@ -538,7 +552,7 @@ def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     monkeypatch.setattr(
-        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "3"]
+        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--phase", "nachholen"]
     )
 
     def _fail_if_called(*a, **k):
@@ -555,7 +569,7 @@ def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
 
     out = capsys.readouterr().out
     assert (
-        "Phase 3 (Nachhol-Modus) übersprungen: läuft nur ohne PFAD "
+        "Phase 'nachholen' übersprungen: läuft nur ohne PFAD "
         "(arbeitet über die ganze Bibliothek)." in out
     )
     assert "Keine Phase auszuführen." in out
@@ -567,7 +581,7 @@ def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
     # conn wurde sauber geschlossen (kein Leck) -- ein zweiter main()-Aufruf
     # mit derselben DB muss ganz normal funktionieren, kein "database is
     # locked" o.ä. durch eine noch offene Connection aus dem ersten Aufruf.
-    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "3"])
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "nachholen"])
     try:
         songtext_pipeline.main()
         out2 = capsys.readouterr().out

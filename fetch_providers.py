@@ -91,6 +91,19 @@ def fetch_all(
     und überspringt dafür die Live-Abfrage (kein doppelter Netzwerk-Aufwand,
     siehe dortiger Docstring).
 
+    Anbieter mit bereits gecachtem status="fehlschlag" für diesen Song werden
+    HIER NICHT erneut live abgefragt (siehe ROADMAP.md, Nachtrag "Phase 2
+    soll fehlschlag-Einträge nicht automatisch mit-retryen"): lyrics_core.
+    get_provider() wertet "fehlschlag" nie als gültigen Cache-Treffer (siehe
+    dortiger Docstring), _query_provider würde also bei jedem Phase-2-Lauf
+    erneut live nachfragen -- das ist exklusiv die Aufgabe von retry_missing
+    (Phase 3, "nachholen"). Die Prüfung läuft pro (Song, Provider) einzeln:
+    ein Song mit z.B. 3 Treffern und 1 Fehlschlag bekommt weiterhin nur den
+    einen fehlgeschlagenen Anbieter nicht erneut angefragt, die anderen 3
+    laufen normal durch den bestehenden Cache-Lookup in _query_provider.
+    Sind für einen Song ALLE 4 Anbieter bereits als Fehlschlag markiert, wird
+    der Song komplett übersprungen (kein ThreadPoolExecutor mit 0 Workern).
+
     Genre-Filter (übernommen aus dem früheren fetch_songtext.main(), siehe
     Git-Historie): ein Song, dessen gespeichertes Genre eines der
     lyrics_core._SKIP_GENRE_KEYWORDS enthält (Hörbuch, Hörspiel,
@@ -122,18 +135,18 @@ def fetch_all(
     _prepare_lyrics_core_globals(conn)
     env = lyrics_core._load_env()
     rows = conn.execute(
-        "SELECT artist_key, titel_key, genre FROM songs ORDER BY artist_key, titel_key"
+        "SELECT id, artist_key, titel_key, genre FROM songs ORDER BY artist_key, titel_key"
     ).fetchall()
 
-    to_query: list[tuple[str, str]] = []
+    to_query: list[tuple[int, str, str]] = []
     skipped = 0
-    for artist_key, titel_key, genre in rows:
+    for song_id, artist_key, titel_key, genre in rows:
         if scope is not None and (artist_key, titel_key) not in scope:
             continue
         if genre and lyrics_core._is_skip_genre(genre):
             skipped += 1
             continue
-        to_query.append((artist_key, titel_key))
+        to_query.append((song_id, artist_key, titel_key))
 
     total = len(to_query)
     if total:
@@ -143,26 +156,39 @@ def fetch_all(
         )
 
     queried = 0
-    for i, (artist_key, titel_key) in enumerate(to_query, start=1):
+    for i, (song_id, artist_key, titel_key) in enumerate(to_query, start=1):
         queried += 1
         lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
         query = f"{artist_key} {titel_key}".strip()
+
+        failed_providers = {
+            quelle
+            for (quelle,) in conn.execute(
+                "SELECT quelle FROM ergebnisse WHERE song_id=? AND status='fehlschlag'",
+                (song_id,),
+            ).fetchall()
+        }
+        providers_to_ask = [
+            p for p in lyrics_core._ALL_PROVIDERS if p not in failed_providers
+        ]
+
         results = {}
-        with ThreadPoolExecutor(max_workers=len(lyrics_core._ALL_PROVIDERS)) as pool:
-            futures = [
-                pool.submit(
-                    lyrics_core._query_provider,
-                    query,
-                    provider,
-                    env,
-                    artist=artist_key,
-                    title=titel_key,
-                )
-                for provider in lyrics_core._ALL_PROVIDERS
-            ]
-            for future in as_completed(futures):
-                provider, path = future.result()
-                results[provider] = path
+        if providers_to_ask:
+            with ThreadPoolExecutor(max_workers=len(providers_to_ask)) as pool:
+                futures = [
+                    pool.submit(
+                        lyrics_core._query_provider,
+                        query,
+                        provider,
+                        env,
+                        artist=artist_key,
+                        title=titel_key,
+                    )
+                    for provider in providers_to_ask
+                ]
+                for future in as_completed(futures):
+                    provider, path = future.result()
+                    results[provider] = path
 
         provider_hits = []
         for provider in lyrics_core._ALL_PROVIDERS:  # Reihenfolge beibehalten
@@ -171,7 +197,10 @@ def fetch_all(
                 provider_hits.append(provider)
                 path.unlink(missing_ok=True)
 
-        hit_str = ", ".join(provider_hits) if provider_hits else "—"
+        if not providers_to_ask:
+            hit_str = "bereits alle Anbieter fehlgeschlagen -- siehe --phase nachholen"
+        else:
+            hit_str = ", ".join(provider_hits) if provider_hits else "—"
         lyrics_core._tprint(
             f"{lyrics_core._ts()}  {artist_key} / {titel_key}  "
             f"{len(provider_hits)}/{len(lyrics_core._ALL_PROVIDERS)}: {hit_str}"

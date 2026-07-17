@@ -394,6 +394,54 @@ Volle Suite: 441/441 grün (13 vorbestehende Fehlschläge durch den
 Hack-Fund vollständig aufgelöst, keine übrig). `ruff check` auf allen
 geänderten/neuen Dateien sauber.
 
+**✓ Nachtrag — Phase 2 ("abfragen") retryt fehlgeschlagene Anbieter nicht
+mehr automatisch mit:** Bug, der bei einem echten Testlauf über
+`/Volumes/music/musik/_aktuell` auffiel: der Nutzer bemerkte, dass Songs bei
+einem zweiten Lauf erneut bei den Providern angefragt wurden statt den
+gecachten Eintrag zu nutzen — „aber genau dafür gibt es doch Phase 3 =
+Provider neu anfragen. das bremst doch aus." Wurde bewusst auf die
+To-do-Liste gesetzt statt sofort mitgelöst (parallel lief noch die
+`fetch_songtext.py`-Löschung) — jetzt nachgeholt.
+
+**Ursache:** `lyrics_core.get_provider()` (der Cache-Lookup, den
+`_query_provider` vor jeder Live-Abfrage macht) wertet `status="fehlschlag"`
+absichtlich NIE als gültigen Cache-Treffer (siehe `CACHE_DESIGN.md` — ein
+Fehlschlag soll ja beim nächsten Lauf grundsätzlich erneut versucht werden
+dürfen, sonst würde ein gedrosselter Lauf einen Song fälschlich 30 Tage lang
+als „hat keinen Text" abstempeln). `fetch_providers.fetch_all()` (Phase 2)
+rief für JEDEN Song ausnahmslos alle 4 Anbieter live über `_query_provider`
+auf — ein Anbieter mit gecachtem Fehlschlag wurde dadurch bei jedem
+Phase-2-Lauf erneut live angefragt, obwohl genau das exklusiv die Aufgabe
+von `retry_missing()` (Phase 3, „nachholen") sein soll. Das bremste jeden
+Normal-Lauf unnötig aus (unnötige Live-Anfragen, potenziell erneute
+Rate-Limit-Wartezeit) und unterlief die eigentliche Trennung der beiden
+Phasen aus dem Architektur-Dokument.
+
+**Fix:** `fetch_all()` liest jetzt vor der Provider-Abfrage eines Songs
+dessen bereits gecachte `status='fehlschlag'`-Zeilen aus `ergebnisse`
+(`SELECT quelle FROM ergebnisse WHERE song_id=? AND status='fehlschlag'`)
+und lässt genau diese Anbieter beim `ThreadPoolExecutor`-Aufruf aus — pro
+(Song, Anbieter) einzeln, nicht pro Song: ein Song mit z.B. 3 Treffern und 1
+Fehlschlag bekommt weiterhin nur den einen fehlgeschlagenen Anbieter nicht
+erneut angefragt, die anderen 3 laufen unverändert durch `_query_provider`s
+eigenen Cache-Lookup (der `treffer`/`nichts` weiterhin normal
+TTL-respektierend behandelt — daran ändert dieser Fix nichts). Sind für
+einen Song ausnahmsweise alle 4 Anbieter bereits als Fehlschlag markiert,
+wird der `ThreadPoolExecutor`-Aufruf für diesen Song ganz übersprungen
+(0 Worker wären ein Fehler) und stattdessen eine eigene Ergebniszeile
+ausgegeben (`bereits alle Anbieter fehlgeschlagen -- siehe --phase
+nachholen`). `retry_missing()` (Phase 3) selbst ist unverändert — sie deckt
+genau diese übersprungenen (Song, Anbieter)-Kombinationen weiterhin ab.
+
+Fünf neue Tests in `test_fetch_providers.py` (`TestFetchAll`): ein gecachter
+Fehlschlag bei einem von vier Anbietern wird nicht live nachgefragt (nur 3
+`subprocess.run`-Aufrufe statt 4), die anderen 3 Anbieter desselben Songs
+werden davon nicht beeinträchtigt, ein Song mit allen 4 Anbietern als
+Fehlschlag wird komplett ohne Live-Aufruf übersprungen, und als Kehrseite:
+`retry_missing()` fragt genau so einen gecachten Fehlschlag weiterhin ab.
+`pytest test_fetch_providers.py`: 21/21 grün. Volle Suite: 445/445 grün.
+`ruff check`/`ruff format` sauber.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

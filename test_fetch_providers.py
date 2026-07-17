@@ -390,6 +390,121 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         for path in written_paths:
             assert not path.exists()
 
+    def test_provider_mit_gecachtem_fehlschlag_wird_nicht_erneut_live_gefragt(
+        self, tmp_path, monkeypatch
+    ):
+        """Regressionstest für ROADMAP.md-Nachtrag "Phase 2 soll
+        fehlschlag-Einträge nicht automatisch mit-retryen": lyrics_core.
+        get_provider() wertet "fehlschlag" nie als gültigen Cache-Treffer --
+        ohne den Skip in fetch_all() selbst würde _query_provider also bei
+        JEDEM Phase-2-Lauf erneut live nachfragen. Das ist exklusiv die
+        Aufgabe von retry_missing() (Phase 3, "nachholen")."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs.put_provider(
+            conn, "lrclib", "artist a", "title a", "fehlschlag", None, "timeout"
+        )
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+        fake_run = _fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        queried, skipped = fetch_providers.fetch_all(conn)
+
+        assert (queried, skipped) == (1, 0)
+        # nur die 3 NICHT fehlgeschlagenen Anbieter wurden live gefragt
+        assert len(fake_run.calls) == 3
+        assert {p for _, p in fake_run.calls} == set(lyrics_core._ALL_PROVIDERS) - {
+            "lrclib"
+        }
+        # der gecachte Fehlschlag blieb unverändert stehen
+        assert cs.get_provider(conn, "lrclib", "artist a", "title a") is None
+
+    def test_andere_provider_desselben_songs_werden_trotzdem_gefragt(
+        self, tmp_path, monkeypatch
+    ):
+        """Der Skip greift pro (Song, Provider), nicht pro Song: ein
+        gecachter Fehlschlag bei EINEM Anbieter darf die anderen 3 nicht
+        mit blockieren."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs.put_provider(
+            conn, "musixmatch", "artist a", "title a", "fehlschlag", None, "captcha"
+        )
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+        fake_run = _fake_run({"artist a": "[00:01.00]hallo"})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        fetch_providers.fetch_all(conn)
+
+        assert cs.get_provider(conn, "lrclib", "artist a", "title a") == {
+            "status": "treffer",
+            "content": "[00:01.00]hallo",
+        }
+
+    def test_song_mit_allen_vier_providern_fehlgeschlagen_wird_ganz_uebersprungen(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        for provider in lyrics_core._ALL_PROVIDERS:
+            cs.put_provider(
+                conn, provider, "artist a", "title a", "fehlschlag", None, "timeout"
+            )
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "kein Anbieter darf live gefragt werden, wenn alle 4 bereits "
+                "als Fehlschlag gecacht sind"
+            )
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+
+        queried, skipped = fetch_providers.fetch_all(conn)
+
+        assert (queried, skipped) == (1, 0)
+
+    def test_retry_missing_fragt_gecachten_fehlschlag_trotzdem_ab(
+        self, tmp_path, monkeypatch
+    ):
+        """Kehrseite des Skips in fetch_all(): retry_missing() (Phase 3,
+        "nachholen") ist weiterhin dafür zuständig, genau solche
+        Fehlschlag-Einträge erneut live zu prüfen."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs.put_provider(
+            conn, "lrclib", "artist a", "title a", "fehlschlag", None, "timeout"
+        )
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        fake_run = _fake_run({"artist a": "[00:01.00]hallo"})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        fetch_providers.retry_missing(conn)
+
+        assert any(p == "lrclib" for _, p in fake_run.calls)
+        assert cs.get_provider(conn, "lrclib", "artist a", "title a") == {
+            "status": "treffer",
+            "content": "[00:01.00]hallo",
+        }
+
 
 class TestRetryMissing(_CacheGlobalsResetMixin):
     def test_ohne_providers_arg_werden_alle_4_anbieter_angefragt(

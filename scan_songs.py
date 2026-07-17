@@ -18,7 +18,7 @@ Wird von songtext_pipeline.py für --scan aufgerufen (siehe dort, main()).
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import cache_store
@@ -45,9 +45,13 @@ def _iter_audio_files(root: Path, recursive: bool) -> Iterable[Path]:
     )
 
 
-def _read_tagged_files(root: Path, recursive: bool) -> list[tuple[Path, str, str, str]]:
-    """Liest EINMAL alle Audiodateien unter root ein: Pfad + rohe
-    Artist/Titel/Genre-Tags (lyrics_core._read_audio_tags).
+def _read_tagged_files(
+    root: Path, recursive: bool
+) -> Iterator[tuple[Path, str, str, str]]:
+    """Liest Audiodateien unter root PRO DATEI ein: Pfad + rohe
+    Artist/Titel/Genre-Tags (lyrics_core._read_audio_tags) -- als Generator,
+    liefert also die erste Datei, sobald sie gefunden ist, statt erst den
+    ganzen Baum fertig einzulesen.
 
     Der Verzeichnis-Walk + das Tag-Lesen sind bei einer großen (insbesondere
     netzwerk-gemounteten) Bibliothek der eigentlich teure Teil -- teurer als
@@ -57,14 +61,22 @@ def _read_tagged_files(root: Path, recursive: bool) -> list[tuple[Path, str, str
     zusätzlich mehrfach für scan/abfragen/bewerten/schreiben -- macht bis zu
     sechs volle Durchläufe desselben Baums in einem einzigen Lauf (siehe
     ROADMAP.md). Diese Funktion wird jetzt GENAU EINMAL pro
-    songtext_pipeline.py-Lauf aufgerufen, das Ergebnis an scan()/
-    build_file_song_map() durchgereicht (deren `files`-Parameter) statt
-    erneut zu scannen.
+    songtext_pipeline.py-Lauf aufgerufen (jede Datei wird dabei trotzdem nur
+    einmal getaggt), das Ergebnis an scan()/build_file_song_map()
+    durchgereicht (deren `files`-Parameter) statt erneut zu scannen.
+
+    War bis zum Datei-für-Datei-Umbau (siehe ROADMAP.md) eine Liste --
+    songtext_pipeline.main() sammelte den kompletten Baum VOR dem ersten
+    verarbeiteten Track ein, das wirkte bei einer großen Bibliothek wie ein
+    Hänger (Nutzer-Feedback: "Programm startet trotzdem mit einem großen
+    Scan über alle Verzeichnisse. Muss das sein?"). Als Generator beginnt
+    die Verarbeitung stattdessen sofort bei der ersten gefundenen Datei --
+    bewusster Trade-off: die Gesamtzahl der Dateien ist vor Laufende nicht
+    mehr bekannt, es gibt deshalb keine "N Datei(en) gefunden."-Zeile vorab
+    mehr (siehe songtext_pipeline.main()).
     """
-    return [
-        (audio_path, *lyrics_core._read_audio_tags(audio_path))
-        for audio_path in _iter_audio_files(root, recursive)
-    ]
+    for audio_path in _iter_audio_files(root, recursive):
+        yield (audio_path, *lyrics_core._read_audio_tags(audio_path))
 
 
 def scan(

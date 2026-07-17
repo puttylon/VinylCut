@@ -992,6 +992,55 @@ Suite: 474/474 grün. `ruff check`/`format` sauber (verbleibende
 vorbestehend, nicht von diesem Nachtrag). `lyrics_core.__version__` auf
 `1.13.14` erhöht.
 
+**✓ Nachtrag — Verzeichnis-Walk + Tag-Read laufen jetzt lazy statt den
+kompletten Baum vorab einzusammeln.** Live-Test gegen
+`/Volumes/music/musik/_aktuell --recursive`: Nutzer sah nach dem Start
+nur `  Scanne: Will Smith/Big Willie Style` (transiente Statuszeile) und
+fragte "Programm startet trotzdem mit einem großen Scan über alle
+Verzeichnisse. Muss das sein?" -- berechtigter Einwand. Ursache:
+`scan_songs._read_tagged_files()` (siehe Nachtrag weiter oben, "GENAU
+EINMAL pro Lauf") war eine List Comprehension -- las beim Aufruf ALLE Tags
+im GESAMTEN Baum ein, bevor `songtext_pipeline.main()`s neue Datei-für-
+Datei-Schleife (siehe Nachtrag "Phasen laufen jetzt Datei für Datei") auch
+nur den ersten Track verarbeiten konnte. Bei einer großen, netzwerk-
+gemounteten Bibliothek genau die lange, stille Anfangsphase, die der
+Datei-für-Datei-Umbau eigentlich vermeiden sollte.
+
+Vor der Umsetzung Trade-off mit AskUserQuestion geklärt: die bisherige
+Vorab-Zeile "N Datei(en) gefunden." kennt die Gesamtzahl nur, wenn der ganze
+Baum vorher gezählt wird (entweder weiterhin voll vorab, oder über einen
+zusätzlichen, aber immerhin billigeren Nur-Pfade-Walk). Nutzer-Entscheidung:
+ganz weglassen -- kein zusätzlicher Walk, Verarbeitung beginnt sofort bei
+der ersten gefundenen Datei, exakt wie beim alten fetch_songtext.py (das
+zeigte ebenfalls keine Vorab-Gesamtzahl).
+
+**Umbau:** `scan_songs._read_tagged_files()` von einer Liste auf einen
+Generator umgestellt (`yield` statt Listen-Comprehension) -- jede Datei wird
+weiterhin nur EINMAL getaggt (kein Rückfall auf die alten bis zu sechs
+Durchläufe), aber die erste Datei ist verfügbar, sobald sie gefunden ist,
+statt erst nach dem kompletten Baum. `songtext_pipeline.main()`s
+Datei-Schleife iteriert jetzt direkt über diesen Generator (kein
+`all_files`-Zwischenspeicher mehr, kein `len()`/keine "N Datei(en)
+gefunden."-Zeile); der Leer-Verzeichnis-Fallback (`_run_selected_steps(root,
+[])`) läuft über ein `any_file`-Flag, das beim ersten Schleifendurchlauf
+gesetzt wird, statt über eine vorab bekannte Listenlänge. Sowohl `scan()`
+als auch `build_file_song_map()` nutzen `_read_tagged_files()` intern
+weiterhin nur als Fallback, wenn kein `files`-Parameter übergeben wird --
+beide iterieren ihre `entries` nur EINMAL in einer `for`-Schleife, ein
+Generator funktioniert dort unverändert.
+
+Manuell verifiziert (Live-Skript, zwei Alben mit je einem Song, Tag-Lese-
+Spy): "Scanne: album2" erscheint jetzt erst NACH der fertigen Ergebniszeile
+für album1s Song -- der Walk ist also tatsächlich mit der Verarbeitung
+verzahnt, nicht mehr vorgelagert.
+
+3 Tests angepasst (die jetzt fehlende "N Datei(en) gefunden."-Zeile war
+Teil ihrer Assertions), einer davon (`test_main_ohne_audiodateien_unter_
+pfad_laeuft_trotzdem_einmal_durch`) auf einen `scan()`-Spy umgestellt --
+ohne die Zeile lässt sich der Leer-Verzeichnis-Fallback nicht mehr über
+Konsolentext belegen. Volle Suite: 474/474 grün. `ruff check`/`format`
+sauber. `lyrics_core.__version__` auf `1.13.15` erhöht.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

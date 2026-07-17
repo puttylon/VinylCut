@@ -42,8 +42,11 @@ def test_main_ohne_flags_aktiviert_scan_abfragen_bewerten_schreiben(
         out = capsys.readouterr().out
         # --schreiben laeuft mit -> quiet-Modus (siehe ROADMAP.md, Nachtrag
         # "pro Track eine Zeile"): keine Kopf-/Zusammenfassungszeilen der
-        # Einzelschritte, nur die (hier leere) "Datei(en) gefunden"-Zeile.
-        assert "0 Datei(en) gefunden." in out
+        # Einzelschritte. Leeres PFAD-Verzeichnis + lazy Walk (siehe
+        # scan_songs._read_tagged_files) -> keine Datei gefunden, keine
+        # "N Datei(en) gefunden."-Zeile mehr und keine Track-Zeile -- nur
+        # noch die überschreibbare "Scanne: ..."-Statuszeile (transient,
+        # kein echter Inhalt).
         assert "scan:" not in out
         assert "abfragen:" not in out
         assert "nachholen:" not in out
@@ -101,7 +104,6 @@ def test_main_einzelne_flags_nur_diese_schritte(tmp_path, monkeypatch, capsys):
 
         out = capsys.readouterr().out
         # --schreiben laeuft mit -> quiet-Modus (siehe oben).
-        assert "0 Datei(en) gefunden." in out
         assert "scan:" not in out
         assert "abfragen:" not in out
         assert "nachholen:" not in out
@@ -740,7 +742,6 @@ def test_main_verarbeitet_dateien_ueber_ordnergrenzen_hinweg_einzeln(
         _reset_lyrics_core_globals()
 
     out = capsys.readouterr().out
-    assert "2 Datei(en) gefunden." in out
     assert "── album1" in out
     assert "── album2" in out
     assert "01 - Song A.flac" in out  # je eine Ergebniszeile pro Track
@@ -806,7 +807,6 @@ def test_main_verarbeitet_dateien_im_selben_ordner_ebenfalls_einzeln(
         _reset_lyrics_core_globals()
 
     out = capsys.readouterr().out
-    assert "2 Datei(en) gefunden." in out
     assert out.count("── album") == 1  # EIN Ordner-Wechsel, nicht pro Datei
     assert "01 - Song A.flac" in out
     assert "02 - Song B.flac" in out
@@ -821,12 +821,15 @@ def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
 ):
     """Kein Ordner mit Audiodateien unter PFAD gefunden (leeres
     Verzeichnis) -- die Schritte laufen trotzdem EINMAL mit leerer
-    Datei-Liste, statt komplett stillzubleiben (z.B. damit --nachholen
-    seine gewohnte "nichts gefunden"-Meldung zeigt). "0 Datei(en)
-    gefunden." wird IMMER ausgegeben (auch bei 0 Dateien) -- das ist
-    unabhängig vom quiet-Modus (siehe ROADMAP.md, Nachtrag "pro Track eine
-    Zeile") die einzige garantierte Rückmeldung, wenn nichts gefunden
-    wurde."""
+    Datei-Liste, statt komplett übersprungen zu werden (z.B. damit
+    --nachholen seine gewohnte "nichts gefunden"-Meldung zeigt). Der
+    Verzeichnis-Walk ist inzwischen lazy (siehe scan_songs._read_tagged_
+    files-Docstring, ROADMAP.md) -- es gibt daher keine "N Datei(en)
+    gefunden."-Zeile mehr, die diesen Fallback belegen könnte; stattdessen
+    wird über einen scan()-Spy geprüft, dass der EINE Fallback-Aufruf mit
+    leerer Datei-Liste tatsächlich passiert (kombiniert mit --schreiben ist
+    der Lauf hier bewusst quiet, siehe dortiger Docstring -- Stille bei 0
+    Dateien ist gewollt, kein Hänger)."""
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     empty_dir = tmp_path / "leer"
@@ -837,10 +840,18 @@ def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
         "sys.argv", ["songtext_pipeline.py", str(empty_dir), "--recursive"]
     )
 
+    scan_calls: list[list | None] = []
+    real_scan = songtext_pipeline.scan_songs.scan
+
+    def _counting_scan(root, recursive, conn, files=None):
+        scan_calls.append(files)
+        return real_scan(root, recursive, conn, files=files)
+
+    monkeypatch.setattr(songtext_pipeline.scan_songs, "scan", _counting_scan)
+
     songtext_pipeline.main()
 
-    out = capsys.readouterr().out
-    assert "0 Datei(en) gefunden." in out
+    assert scan_calls == [[]]
 
 
 # --- Voller Pipeline-Lauf: scan -> abfragen -> bewerten -> schreiben ------

@@ -384,55 +384,58 @@ def main() -> None:
             # --bewerten ohne PFAD, siehe Verwendung oben).
             _run_selected_steps(None, None)
         else:
-            # Verzeichnis-Walk + Tag-Read passieren GENAU EINMAL pro Lauf
-            # (siehe scan_songs._read_tagged_files-Docstring -- bei einer
-            # großen, ggf. netzwerk-gemounteten Bibliothek der eigentlich
-            # teure Teil, nicht die anschließenden reinen DB-Abgleiche).
-            # Danach DATEI FÜR DATEI durchlaufen, nicht mehr Ordner für
-            # Ordner (Nutzer-Feedback: "ich will, dass die phasen für jeden
-            # einzelne datei laufen. dadurch haben die provider auch wieder
-            # länger leerlauf und wir fallen nicht in rate-limit") -- jede
-            # Datei durchläuft alle gewählten Schritte (inkl. --bewerten mit
-            # ggf. mehrminütiger Live-Whisper-Transkription), BEVOR die
-            # nächste --abfragen überhaupt startet. Das schiebt von selbst
-            # genug Abstand zwischen zwei Anbieter-Abfragen, ganz ohne
-            # eigene Sleep-/Throttling-Logik (siehe ROADMAP.md). Reihenfolge
-            # weiterhin Datei-/Verzeichnisreihenfolge (siehe vorheriger
-            # Nachtrag "Dateinamen-Reihenfolge") -- `all_files` liefert das
-            # bereits (_iter_audio_dfs: pro Ebene alphabetisch).
-            all_files = scan_songs._read_tagged_files(root, args.recursive)
-            # Immer ausgeben, auch bei 0 Dateien -- sonst wirkt ein leeres
-            # PFAD-Verzeichnis (oder ein quiet-geschalteter Lauf, siehe
-            # _run_selected_steps-Docstring) komplett still, wie ein Hänger.
-            print(f"{len(all_files)} Datei(en) gefunden.")
-            if not all_files:
+            # Verzeichnis-Walk + Tag-Read laufen LAZY, Datei für Datei (siehe
+            # scan_songs._read_tagged_files-Docstring) -- jede Datei wird
+            # verarbeitet, SOBALD sie gefunden ist, statt erst den ganzen
+            # Baum fertig einzulesen. Ein vorheriger Versuch sammelte den
+            # kompletten Baum vorab in einer Liste (ein Walk statt bis zu
+            # sechs) -- bei einer großen, netzwerk-gemounteten Bibliothek
+            # wirkte das wie ein Hänger, bevor der erste Track überhaupt
+            # verarbeitet wurde (Nutzer-Feedback: "Programm startet trotzdem
+            # mit einem großen Scan über alle Verzeichnisse. Muss das
+            # sein?", siehe ROADMAP.md). Bewusster Trade-off: jede Datei wird
+            # weiterhin nur EINMAL getaggt (kein Rückfall auf die alten bis
+            # zu sechs Durchläufe), aber die Gesamtzahl ist vor Laufende
+            # nicht mehr bekannt -- deshalb KEINE "N Datei(en) gefunden."-
+            # Zeile mehr vorab. Jede Datei durchläuft alle gewählten
+            # Schritte (inkl. --bewerten mit ggf. mehrminütiger Live-
+            # Whisper-Transkription), BEVOR die nächste --abfragen
+            # überhaupt startet -- das schiebt von selbst genug Abstand
+            # zwischen zwei Anbieter-Abfragen, ganz ohne eigene Sleep-/
+            # Throttling-Logik (Nutzer-Feedback: "ich will, dass die phasen
+            # für jeden einzelne datei laufen [...] dadurch haben die
+            # provider auch wieder länger leerlauf"). Reihenfolge weiterhin
+            # Datei-/Verzeichnisreihenfolge (_iter_audio_dfs: pro Ebene
+            # alphabetisch).
+            current_folder: Path | None = None
+            any_file = False
+            for entry in scan_songs._read_tagged_files(root, args.recursive):
+                any_file = True
+                audio_path = entry[0]
+                if audio_path.parent != current_folder:
+                    current_folder = audio_path.parent
+                    try:
+                        rel = current_folder.relative_to(root)
+                        label = str(rel) if str(rel) != "." else current_folder.name
+                    except ValueError:
+                        label = str(current_folder)
+                    # Ordner-Kopfzeile im Stil des frueheren
+                    # fetch_songtext.py (siehe Git-Historie, main(): dort
+                    # `print(f"{_ts()}  ── {rel_dir}")`) -- EIN Marker pro
+                    # Ordnerwechsel, kein "i/N"-Zaehler: darunter steht
+                    # direkt die eine Ergebniszeile pro Track (siehe
+                    # write_lrc.write_all), keine weitere Zwischenzeile
+                    # noetig (Nutzer-Feedback: "zeig auf trackebene [...]
+                    # pro track eine zeile [...] schau dir das bei dem alten
+                    # programm ab").
+                    print(f"{lyrics_core._ts()}  ── {label}")
+                _run_selected_steps(audio_path.parent, [entry])
+            if not any_file:
                 # Keine Audiodatei unter PFAD gefunden -- trotzdem EINMAL
                 # mit leerer Datei-Liste ausführen, damit z.B. --nachholen/
                 # --abfragen ihre gewohnte "nichts gefunden/nichts zu
                 # tun"-Rückmeldung geben, statt komplett stillzubleiben.
                 _run_selected_steps(root, [])
-            else:
-                current_folder: Path | None = None
-                for entry in all_files:
-                    audio_path = entry[0]
-                    if audio_path.parent != current_folder:
-                        current_folder = audio_path.parent
-                        try:
-                            rel = current_folder.relative_to(root)
-                            label = str(rel) if str(rel) != "." else current_folder.name
-                        except ValueError:
-                            label = str(current_folder)
-                        # Ordner-Kopfzeile im Stil des frueheren
-                        # fetch_songtext.py (siehe Git-Historie, main(): dort
-                        # `print(f"{_ts()}  ── {rel_dir}")`) -- EIN Marker
-                        # pro Ordnerwechsel, kein "i/N"-Zaehler: darunter
-                        # steht direkt die eine Ergebniszeile pro Track
-                        # (siehe write_lrc.write_all), keine weitere
-                        # Zwischenzeile noetig (Nutzer-Feedback: "zeig auf
-                        # trackebene [...] pro track eine zeile [...] schau
-                        # dir das bei dem alten programm ab").
-                        print(f"{lyrics_core._ts()}  ── {label}")
-                    _run_selected_steps(audio_path.parent, [entry])
     finally:
         conn.close()
 

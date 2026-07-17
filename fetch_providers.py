@@ -63,7 +63,7 @@ def _prepare_lyrics_core_globals(conn: sqlite3.Connection) -> None:
 
 def fetch_all(
     conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Normal-Modus (--abfragen): fragt Songs aus "songs" bei allen 4 Anbietern
     gleichzeitig ab (ThreadPoolExecutor, analog zum früheren Provider-Block
     im alten fetch_songtext.fetch_lrc, siehe Git-Historie).
@@ -86,23 +86,23 @@ def fetch_all(
     temporären .lrc-Pfade werden hier nur gelöscht, nicht weiterverwendet
     (Phase 2 speichert nur; Phase 4 entscheidet später anhand der DB).
 
-    Songs mit bereits gültigem (nicht abgelaufenem) Cache-Ergebnis werden
-    trotzdem angefragt -- _query_provider selbst erkennt den Cache-Treffer
-    und überspringt dafür die Live-Abfrage (kein doppelter Netzwerk-Aufwand,
-    siehe dortiger Docstring).
-
-    Anbieter mit bereits gecachtem status="fehlschlag" für diesen Song werden
-    HIER NICHT erneut live abgefragt (siehe ROADMAP.md, Nachtrag "Phase 2
-    soll fehlschlag-Einträge nicht automatisch mit-retryen"): lyrics_core.
-    get_provider() wertet "fehlschlag" nie als gültigen Cache-Treffer (siehe
-    dortiger Docstring), _query_provider würde also bei jedem Phase-2-Lauf
-    erneut live nachfragen -- das ist exklusiv die Aufgabe von retry_missing
-    (Phase 3, "nachholen"). Die Prüfung läuft pro (Song, Provider) einzeln:
-    ein Song mit z.B. 3 Treffern und 1 Fehlschlag bekommt weiterhin nur den
-    einen fehlgeschlagenen Anbieter nicht erneut angefragt, die anderen 3
-    laufen normal durch den bestehenden Cache-Lookup in _query_provider.
-    Sind für einen Song ALLE 4 Anbieter bereits als Fehlschlag markiert, wird
-    der Song komplett übersprungen (kein ThreadPoolExecutor mit 0 Workern).
+    Pro Song werden NUR die Anbieter tatsächlich angefragt (submitted an den
+    ThreadPoolExecutor), die WEDER einen gecachten status="fehlschlag" (siehe
+    ROADMAP.md, Nachtrag "Phase 2 soll fehlschlag-Einträge nicht automatisch
+    mit-retryen" -- das ist exklusiv die Aufgabe von retry_missing, "--nachholen")
+    NOCH einen noch gültigen (nicht abgelaufenen) Treffer/Nichts-Eintrag haben
+    (cache_store.get_provider() prüft TTL und Fehlschlag-Status in einem Zug).
+    Vorher wurde HIER zwar der Fehlschlag-Fall schon ausgefiltert, ein noch
+    gültiger Treffer/Nichts-Eintrag aber trotzdem an _query_provider
+    weitergereicht -- kein doppelter Netzwerk-Aufwand (der interne
+    Cache-Lookup dort griff ja), aber ein IRREFÜHRENDER Konsolen-Auftritt:
+    ein reiner Wiederholungslauf über eine bereits vollständig gecachte
+    Bibliothek zeigte "Frage N Song(s) bei 4 Anbietern ab ..." und pro Song
+    eine Treffer-Zeile, obwohl buchstäblich keine einzige Live-Anfrage
+    stattfand (live an einem echten Wiederholungslauf bestätigt, siehe
+    ROADMAP.md). Songs, für die dadurch KEIN Anbieter mehr übrig bleibt,
+    werden jetzt komplett übersprungen -- weder Executor-Aufruf noch
+    Konsolenzeile, gezählt in der neuen dritten Rückgabe (siehe unten).
 
     Genre-Filter (übernommen aus dem früheren fetch_songtext.main(), siehe
     Git-Historie): ein Song, dessen gespeichertes Genre eines der
@@ -129,8 +129,9 @@ def fetch_all(
     bekommen keine eigene Zeile (stehen schon in der Abschluss-
     Zusammenfassung des Aufrufers), nur tatsächlich abgefragte.
 
-    Gibt (Anzahl abgefragter Songs, Anzahl wegen Genre übersprungener Songs)
-    zurück -- Songs außerhalb von scope zählen in keinem der beiden.
+    Gibt (Anzahl tatsächlich abgefragter Songs, Anzahl wegen Genre
+    übersprungener Songs, Anzahl bereits vollständig aktueller Songs) zurück
+    -- Songs außerhalb von scope zählen in keinem der drei.
     """
     _prepare_lyrics_core_globals(conn)
     env = lyrics_core._load_env()
@@ -138,28 +139,19 @@ def fetch_all(
         "SELECT id, artist_key, titel_key, genre FROM songs ORDER BY artist_key, titel_key"
     ).fetchall()
 
-    to_query: list[tuple[int, str, str]] = []
-    skipped = 0
+    # Erster Durchgang: pro Song die Anbieter bestimmen, die WIRKLICH
+    # angefragt werden müssen (siehe Docstring oben) -- schon HIER, nicht
+    # erst in der Schleife, damit "Frage N Song(s) ab" von vornherein nur
+    # Songs mit echtem Anfragebedarf zählt, statt hinterher falsch zu wirken.
+    to_query: list[tuple[int, str, str, list[str]]] = []
+    skipped_genre = 0
+    skipped_up_to_date = 0
     for song_id, artist_key, titel_key, genre in rows:
         if scope is not None and (artist_key, titel_key) not in scope:
             continue
         if genre and lyrics_core._is_skip_genre(genre):
-            skipped += 1
+            skipped_genre += 1
             continue
-        to_query.append((song_id, artist_key, titel_key))
-
-    total = len(to_query)
-    if total:
-        print(
-            f"Frage {total} Song(s) bei {len(lyrics_core._ALL_PROVIDERS)} "
-            "Anbietern ab ..."
-        )
-
-    queried = 0
-    for i, (song_id, artist_key, titel_key) in enumerate(to_query, start=1):
-        queried += 1
-        lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
-        query = f"{artist_key} {titel_key}".strip()
 
         failed_providers = {
             quelle
@@ -169,26 +161,48 @@ def fetch_all(
             ).fetchall()
         }
         providers_to_ask = [
-            p for p in lyrics_core._ALL_PROVIDERS if p not in failed_providers
+            p
+            for p in lyrics_core._ALL_PROVIDERS
+            if p not in failed_providers
+            and cache_store.get_provider(
+                conn, p, artist_key, titel_key, ttl_days=lyrics_core._cache_ttl_days
+            )
+            is None
         ]
+        if not providers_to_ask:
+            skipped_up_to_date += 1
+            continue
+        to_query.append((song_id, artist_key, titel_key, providers_to_ask))
+
+    total = len(to_query)
+    if total:
+        print(
+            f"Frage {total} Song(s) bei {len(lyrics_core._ALL_PROVIDERS)} "
+            "Anbietern ab ..."
+        )
+
+    for i, (song_id, artist_key, titel_key, providers_to_ask) in enumerate(
+        to_query, start=1
+    ):
+        lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
+        query = f"{artist_key} {titel_key}".strip()
 
         results = {}
-        if providers_to_ask:
-            with ThreadPoolExecutor(max_workers=len(providers_to_ask)) as pool:
-                futures = [
-                    pool.submit(
-                        lyrics_core._query_provider,
-                        query,
-                        provider,
-                        env,
-                        artist=artist_key,
-                        title=titel_key,
-                    )
-                    for provider in providers_to_ask
-                ]
-                for future in as_completed(futures):
-                    provider, path = future.result()
-                    results[provider] = path
+        with ThreadPoolExecutor(max_workers=len(providers_to_ask)) as pool:
+            futures = [
+                pool.submit(
+                    lyrics_core._query_provider,
+                    query,
+                    provider,
+                    env,
+                    artist=artist_key,
+                    title=titel_key,
+                )
+                for provider in providers_to_ask
+            ]
+            for future in as_completed(futures):
+                provider, path = future.result()
+                results[provider] = path
 
         provider_hits = []
         for provider in lyrics_core._ALL_PROVIDERS:  # Reihenfolge beibehalten
@@ -197,16 +211,13 @@ def fetch_all(
                 provider_hits.append(provider)
                 path.unlink(missing_ok=True)
 
-        if not providers_to_ask:
-            hit_str = "bereits alle Anbieter fehlgeschlagen -- siehe --nachholen"
-        else:
-            hit_str = ", ".join(provider_hits) if provider_hits else "—"
+        hit_str = ", ".join(provider_hits) if provider_hits else "—"
         lyrics_core._tprint(
             f"{lyrics_core._ts()}  {artist_key} / {titel_key}  "
             f"{len(provider_hits)}/{len(lyrics_core._ALL_PROVIDERS)}: {hit_str}"
         )
 
-    return queried, skipped
+    return total, skipped_genre, skipped_up_to_date
 
 
 def retry_missing(

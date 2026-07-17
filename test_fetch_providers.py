@@ -112,9 +112,9 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         fake_run = _fake_run({"artist a": "[00:01.00]hallo"})
         monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
-        queried, skipped = fetch_providers.fetch_all(conn)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
 
-        assert (queried, skipped) == (2, 0)
+        assert (queried, skipped_genre, skipped_up_to_date) == (2, 0, 0)
         assert len(fake_run.calls) == 8  # 2 Songs x 4 Provider
         assert {p for _, p in fake_run.calls} == set(lyrics_core._ALL_PROVIDERS)
 
@@ -142,7 +142,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
 
         monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
-        assert fetch_providers.fetch_all(conn) == (0, 0)
+        assert fetch_providers.fetch_all(conn) == (0, 0, 0)
 
     def test_skip_genre_song_wird_uebersprungen_ohne_jede_anbieter_anfrage(
         self, tmp_path, monkeypatch
@@ -162,9 +162,9 @@ class TestFetchAll(_CacheGlobalsResetMixin):
 
         monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
-        queried, skipped = fetch_providers.fetch_all(conn)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
 
-        assert (queried, skipped) == (0, 1)
+        assert (queried, skipped_genre, skipped_up_to_date) == (0, 1, 0)
         # kein Cache-Eintrag entstand -- der Song wurde nie angefasst
         assert cs.get_provider(conn, "lrclib", "artist a", "title a") is None
 
@@ -186,9 +186,9 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         # genre=None darf _is_skip_genre (ruft intern .lower() auf) nicht mit
         # einem AttributeError abstürzen lassen -- der Song muss stattdessen
         # ganz normal (alle 4 Provider) abgefragt werden.
-        queried, skipped = fetch_providers.fetch_all(conn)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
 
-        assert (queried, skipped) == (1, 0)
+        assert (queried, skipped_genre, skipped_up_to_date) == (1, 0, 0)
         assert len(fake_run.calls) == 4
 
     def test_scope_grenzt_auf_angegebene_songs_ein(self, tmp_path, monkeypatch):
@@ -208,11 +208,11 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         fake_run = _fake_run({})
         monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
-        queried, skipped = fetch_providers.fetch_all(
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(
             conn, scope={("artist a", "title a")}
         )
 
-        assert (queried, skipped) == (1, 0)
+        assert (queried, skipped_genre, skipped_up_to_date) == (1, 0, 0)
         assert len(fake_run.calls) == 4  # nur "artist a" x 4 Provider
         assert all("andere band" not in q for q, _p in fake_run.calls)
         assert cs.get_provider(conn, "lrclib", "andere band", "anderer song") is None
@@ -284,9 +284,9 @@ class TestFetchAll(_CacheGlobalsResetMixin):
 
         monkeypatch.setattr(lyrics_core, "_query_provider", _fake_query_provider)
 
-        queried, skipped = fetch_providers.fetch_all(conn)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
 
-        assert (queried, skipped) == (1, 0)
+        assert (queried, skipped_genre, skipped_up_to_date) == (1, 0, 0)
         assert len(status_calls) == 1
         assert "1/1" in status_calls[0]
         assert "artist a" in status_calls[0]
@@ -339,7 +339,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
 
         monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
-        assert fetch_providers.fetch_all(conn, scope=set()) == (0, 0)
+        assert fetch_providers.fetch_all(conn, scope=set()) == (0, 0, 0)
 
     def test_scope_none_bleibt_wie_bisher_die_ganze_datenbank(
         self, tmp_path, monkeypatch
@@ -355,9 +355,11 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         fake_run = _fake_run({})
         monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
-        queried, skipped = fetch_providers.fetch_all(conn, scope=None)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(
+            conn, scope=None
+        )
 
-        assert (queried, skipped) == (2, 0)
+        assert (queried, skipped_genre, skipped_up_to_date) == (2, 0, 0)
         assert any("andere band" in q for q, _p in fake_run.calls)
 
     def test_temporaere_lrc_pfade_werden_nach_dem_cachen_geloescht(
@@ -413,9 +415,9 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         fake_run = _fake_run({})
         monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
-        queried, skipped = fetch_providers.fetch_all(conn)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
 
-        assert (queried, skipped) == (1, 0)
+        assert (queried, skipped_genre, skipped_up_to_date) == (1, 0, 0)
         # nur die 3 NICHT fehlgeschlagenen Anbieter wurden live gefragt
         assert len(fake_run.calls) == 3
         assert {p for _, p in fake_run.calls} == set(lyrics_core._ALL_PROVIDERS) - {
@@ -474,9 +476,83 @@ class TestFetchAll(_CacheGlobalsResetMixin):
 
         monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
-        queried, skipped = fetch_providers.fetch_all(conn)
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
 
-        assert (queried, skipped) == (1, 0)
+        # der Song wird jetzt komplett aus to_query ausgeschlossen (kein
+        # Anbieter mehr übrig, der sinnvoll angefragt werden könnte) --
+        # zaehlt nicht mehr als "queried", sondern als "bereits aktuell"
+        # (dieselbe Kategorie wie ein Song mit lauter gültigen Treffern).
+        assert (queried, skipped_genre, skipped_up_to_date) == (0, 0, 1)
+
+    def test_song_mit_ausschliesslich_gueltigen_treffern_wird_uebersprungen(
+        self, tmp_path, monkeypatch
+    ):
+        """Regressionstest für einen echten Wiederholungslauf (siehe
+        ROADMAP.md): vorher wurde JEDER Song, auch mit lauter gültigen,
+        nicht abgelaufenen Provider-Treffern, trotzdem an _query_provider
+        weitergereicht (kein Netzwerk-Aufwand dank dessen eigenem
+        Cache-Lookup, aber ein irreführender Konsolen-Auftritt -- "Frage N
+        Song(s) ab" und eine Treffer-Zeile pro Song, obwohl nichts
+        Live-mäßiges passierte). Ein Song, dessen Anbieter ALLE schon einen
+        gültigen Treffer/Nichts-Eintrag haben, wird jetzt komplett aus
+        to_query ausgeschlossen -- keine Konsolenzeile, kein
+        ThreadPoolExecutor-Aufruf."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs.put_provider(conn, "lrclib", "artist a", "title a", "treffer", "[00:01.00]x")
+        cs.put_provider(conn, "genius", "artist a", "title a", "nichts", None)
+        cs.put_provider(conn, "musixmatch", "artist a", "title a", "nichts", None)
+        cs.put_provider(conn, "netease", "artist a", "title a", "nichts", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "kein Anbieter darf live gefragt werden, wenn alle 4 bereits "
+                "einen gültigen, nicht abgelaufenen Eintrag haben"
+            )
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
+
+        assert (queried, skipped_genre, skipped_up_to_date) == (0, 0, 1)
+
+    def test_song_mit_einem_abgelaufenen_treffer_wird_fuer_diesen_angefragt(
+        self, tmp_path, monkeypatch
+    ):
+        """Gegenprobe: ein einzelner ABGELAUFENER Treffer (TTL überschritten)
+        zählt NICHT als "bereits aktuell" -- nur dieser eine Anbieter wird
+        erneut gefragt, die anderen (noch gültigen) nicht."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs.put_provider(conn, "lrclib", "artist a", "title a", "treffer", "[00:01.00]x")
+        cs.put_provider(conn, "genius", "artist a", "title a", "nichts", None)
+        cs.put_provider(conn, "musixmatch", "artist a", "title a", "nichts", None)
+        cs.put_provider(conn, "netease", "artist a", "title a", "nichts", None)
+        conn.commit()
+        # lrclib-Eintrag künstlich auf ein Datum weit vor dem TTL setzen.
+        conn.execute(
+            "UPDATE ergebnisse SET datum=? WHERE quelle='lrclib'",
+            ("2000-01-01T00:00:00+00:00",),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+        fake_run = _fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(conn)
+
+        assert (queried, skipped_genre, skipped_up_to_date) == (1, 0, 0)
+        assert len(fake_run.calls) == 1
+        assert fake_run.calls[0][1] == "lrclib"
 
     def test_retry_missing_fragt_gecachten_fehlschlag_trotzdem_ab(
         self, tmp_path, monkeypatch

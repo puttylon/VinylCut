@@ -695,6 +695,46 @@ vorher). Volle Suite: 461/461 grün. `ruff check`/`ruff format` sauber.
 `lyrics_core.__version__` auf `1.13.8` erhöht (Bugfix, siehe
 CLAUDE.md-Versionierungsregel).
 
+**✓ Nachtrag — "abfragen" meldete "Frage N Song(s) ab" und Treffer-Zeilen,
+obwohl gar keine Live-Anfrage stattfand.** Direkt beim nächsten
+Wiederholungslauf über "Betterov - Olympia" aufgefallen (nachdem `bewerten`
+und `schreiben` schon korrekt "nichts geschrieben"/"übersprungen" meldeten):
+`abfragen` zeigte weiterhin `Frage 11 Song(s) bei 4 Anbietern ab ...` und
+pro Song eine Treffer-Zeile (`3/4: lrclib, musixmatch, genius`) -- obwohl
+buchstäblich jeder einzelne Provider-Wert aus dem Cache kam. Ursache: der
+`#11`-Fehlschlag-Fix (siehe Nachtrag "Phase 2 soll fehlschlag-Einträge nicht
+automatisch mit-retryen") filterte nur `status='fehlschlag'` heraus --
+gültige, nicht abgelaufene `treffer`/`nichts`-Einträge wurden weiterhin an
+`_query_provider()` durchgereicht. Dort griff zwar dessen eigener
+Cache-Lookup (kein echter Netzwerk-Aufwand), aber die Konsolenausgabe von
+`fetch_all()` selbst wusste davon nichts und tat so, als sei live gefragt
+worden.
+
+**Fix:** `fetch_all()` bestimmt jetzt PRO SONG vorab (nicht mehr erst in der
+Schleife), welche Anbieter wirklich noch offen sind -- ein Anbieter mit
+gecachtem `status='fehlschlag'` (weiterhin `--nachholen`s Aufgabe) ODER
+einem gültigen, nicht abgelaufenen `treffer`/`nichts`-Eintrag
+(`cache_store.get_provider()`, gleiche TTL-Logik wie `_query_provider()`
+selbst) zählt als "bereits erledigt". Bleibt für einen Song kein einziger
+offener Anbieter übrig, wird der Song komplett aus der Anfrage-Liste
+ausgeschlossen -- keine Konsolenzeile, kein `ThreadPoolExecutor`-Aufruf.
+"Frage N Song(s) ab" zeigt dadurch von vornherein nur Songs mit echtem
+Anfragebedarf. `fetch_all()`s Rückgabe wächst von `(queried, skipped)` auf
+`(queried, skipped_genre, skipped_up_to_date)` -- alle Aufrufer (u.a.
+`songtext_pipeline.py`) und Tests angepasst; `skipped_up_to_date` wird in
+der `abfragen:`-Zusammenfassung als "X Song(s) bereits aktuell, nichts
+abzufragen" ausgewiesen.
+
+3 neue/angepasste Tests in `test_fetch_providers.py`: ein Song mit lauter
+gültigen Treffern/Nichts-Einträgen wird komplett übersprungen (kein
+`subprocess.run`-Aufruf); ein einzelner ABGELAUFENER Treffer zählt nicht als
+"bereits aktuell" -- nur dieser eine Anbieter wird erneut gefragt, die
+anderen (noch gültigen) nicht; der bestehende "alle 4 Anbieter fehlgeschlagen"-
+Test zählt jetzt korrekt als `skipped_up_to_date` statt als `queried` mit
+0 tatsächlichen Anfragen. Volle Suite: 463/463 grün. `ruff check`/
+`ruff format` sauber. `lyrics_core.__version__` auf `1.13.9` erhöht
+(Bugfix, siehe CLAUDE.md-Versionierungsregel).
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

@@ -109,14 +109,21 @@ def fetch_providers_normal(
 
     Songs mit Skip-Genre (Hörbuch/Hörspiel/... ) werden dabei übersprungen --
     die Anzahl wird separat sichtbar gemacht, nicht nur stillschweigend
-    gezählt."""
-    queried, skipped = fetch_providers.fetch_all(conn, scope=scope)
+    gezählt. Ebenso Songs, für die kein einziger Anbieter mehr wirklich
+    angefragt werden muss (jeder Anbieter hat schon einen gültigen
+    Treffer/Nichts-Eintrag oder einen -- von --nachholen zu behandelnden --
+    Fehlschlag, siehe fetch_all-Docstring)."""
+    queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(
+        conn, scope=scope
+    )
     print(f"abfragen: {queried} Song(s) abgefragt.")
-    if skipped:
+    if skipped_genre:
         print(
-            f"  {skipped} Song(s) wegen Genre übersprungen "
+            f"  {skipped_genre} Song(s) wegen Genre übersprungen "
             "(Hörbuch/Hörspiel/Instrumental/...)."
         )
+    if skipped_up_to_date:
+        print(f"  {skipped_up_to_date} Song(s) bereits aktuell, nichts abzufragen.")
 
 
 def fetch_providers_nachhol(

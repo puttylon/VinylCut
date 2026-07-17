@@ -205,6 +205,7 @@ def write_lrc_normal(
     conn: sqlite3.Connection,
     file_song_map: list[tuple[Path, str, str]],
     quiet: bool = False,
+    folder_lock: object | None = None,
 ) -> None:
     """--schreiben: schreibt/löscht .lrc-Dateien je nach --bewerten-Entscheidung
     (wird intern erneut berechnet, siehe write_lrc.write_all -- kein
@@ -212,8 +213,15 @@ def write_lrc_normal(
 
     quiet=True unterdrückt nur die Kopf-/Zusammenfassungszeile hier UND in
     write_all() (siehe dortiger Docstring) -- die eine Ergebniszeile pro
-    Song bleibt davon unberührt."""
-    counts = write_lrc.write_all(conn, file_song_map, quiet=quiet)
+    Song bleibt davon unberührt.
+
+    folder_lock: bereits von main()s Datei-Schleife für den aktuellen Ordner
+    gehaltene Sperre (siehe dortigen Kommentar, ROADMAP.md Punkt 4) -- wird
+    unverändert an write_lrc.write_all() durchgereicht, das dann selbst
+    NICHT mehr versucht, dieselbe Sperre ein zweites Mal zu beanspruchen."""
+    counts = write_lrc.write_all(
+        conn, file_song_map, quiet=quiet, external_lock=folder_lock
+    )
     if quiet:
         return
     print(
@@ -241,6 +249,12 @@ def main() -> None:
             "--abfragen/--nachholen/--bewerten, die keine echte Datei "
             "brauchen)."
         ),
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"songtext_pipeline.py {lyrics_core.__version__}",
     )
     parser.add_argument(
         "--recursive",
@@ -320,6 +334,7 @@ def main() -> None:
     def _run_selected_steps(
         step_root: Path | None,
         step_files: list[tuple[Path, str, str, str]] | None,
+        folder_lock: object | None = None,
     ) -> None:
         """Führt die gewählten Schritte einmal aus -- entweder global (siehe
         main() ohne PFAD, step_root=None) oder für GENAU EINE Datei (siehe
@@ -327,6 +342,12 @@ def main() -> None:
         Element). step_files: bereits eingelesene (Pfad, Artist, Titel,
         Genre)-Tupel für step_root (siehe scan_songs._read_tagged_files) --
         erspart jedem Schritt den erneuten Verzeichnis-Walk.
+
+        folder_lock: von der Datei-Schleife für den aktuellen Ordner bereits
+        gehaltene Sperre (siehe dort, ROADMAP.md Punkt 4) -- wird nur an
+        write_lrc_normal durchgereicht, das damit write_lrc.write_all()s
+        eigenen (redundanten) Sperrversuch für denselben Ordner überflüssig
+        macht.
 
         quiet: True, wenn --schreiben in diesem Aufruf mitläuft UND ein PFAD
         gesetzt ist -- dann liefert --schreiben gleich die EINE gewollte
@@ -375,8 +396,9 @@ def main() -> None:
                 print("schreiben: kein PFAD angegeben, nichts zu schreiben.")
             else:
                 mapping = build_file_song_map(step_root, False, conn, files=step_files)
-                write_lrc_normal(conn, mapping, quiet=quiet)
+                write_lrc_normal(conn, mapping, quiet=quiet, folder_lock=folder_lock)
 
+    current_folder_lock: object | None = None
     try:
         if root is None:
             # Kein PFAD -> keine Ordner zum Durchlaufen, bewusst weiterhin
@@ -408,17 +430,41 @@ def main() -> None:
             # Datei-/Verzeichnisreihenfolge (_iter_audio_dfs: pro Ebene
             # alphabetisch).
             current_folder: Path | None = None
+            skip_current_folder = False
             any_file = False
             for entry in scan_songs._read_tagged_files(root, args.recursive):
                 any_file = True
                 audio_path = entry[0]
                 if audio_path.parent != current_folder:
+                    # Ordnerwechsel: vorherige Sperre freigeben, BEVOR der
+                    # neue Ordner beansprucht wird -- siehe ROADMAP.md
+                    # Punkt 4. Die Sperre umfasst jetzt ALLE gewählten
+                    # Schritte (scan/abfragen/bewerten/schreiben) für JEDE
+                    # Datei dieses Ordners, nicht mehr nur noch das
+                    # Schreiben (write_lrc.py bekommt sie unten als
+                    # folder_lock durchgereicht und beansprucht sie deshalb
+                    # nicht ein zweites Mal). Zweck: zwei bewusst parallel
+                    # laufende songtext_pipeline.py-Instanzen, die
+                    # überlappende Verzeichnisbäume abarbeiten, sollen sich
+                    # NICHT gegenseitig denselben Ordner doppelt bei den
+                    # Anbietern abfragen und doppelt per Whisper prüfen.
+                    lyrics_core._release_folder(current_folder_lock)
                     current_folder = audio_path.parent
+                    current_folder_lock = lyrics_core._try_claim_folder(current_folder)
+                    skip_current_folder = (
+                        current_folder_lock is lyrics_core._FOLDER_BUSY
+                    )
                     try:
                         rel = current_folder.relative_to(root)
                         label = str(rel) if str(rel) != "." else current_folder.name
                     except ValueError:
                         label = str(current_folder)
+                    if skip_current_folder:
+                        lyrics_core._tprint(
+                            f"{lyrics_core._ts()}  ── {label}  "
+                            "(andere Instanz aktiv, übersprungen)"
+                        )
+                        continue
                     # Ordner-Kopfzeile im Stil des frueheren
                     # fetch_songtext.py (siehe Git-Historie, main(): dort
                     # `print(f"{_ts()}  ── {rel_dir}")`) -- EIN Marker pro
@@ -427,16 +473,35 @@ def main() -> None:
                     # write_lrc.write_all), keine weitere Zwischenzeile
                     # noetig (Nutzer-Feedback: "zeig auf trackebene [...]
                     # pro track eine zeile [...] schau dir das bei dem alten
-                    # programm ab").
-                    print(f"{lyrics_core._ts()}  ── {label}")
-                _run_selected_steps(audio_path.parent, [entry])
+                    # programm ab"). _tprint() statt print(): loescht zuerst
+                    # eine noch stehende transiente "Scanne: ..."-Statuszeile
+                    # (siehe ROADMAP.md, sonst "beisst" sich die Ausgabe auf
+                    # derselben Terminalzeile).
+                    lyrics_core._tprint(f"{lyrics_core._ts()}  ── {label}")
+                elif skip_current_folder:
+                    continue
+                _run_selected_steps(
+                    audio_path.parent, [entry], folder_lock=current_folder_lock
+                )
             if not any_file:
                 # Keine Audiodatei unter PFAD gefunden -- trotzdem EINMAL
                 # mit leerer Datei-Liste ausführen, damit z.B. --nachholen/
                 # --abfragen ihre gewohnte "nichts gefunden/nichts zu
                 # tun"-Rückmeldung geben, statt komplett stillzubleiben.
                 _run_selected_steps(root, [])
+    except FileNotFoundError:
+        # syncedlyrics-Binary fehlt (z.B. falsches venv aktiv, siehe
+        # ROADMAP.md) -- fetch_providers.fetch_all() bricht dafuer bewusst
+        # mit dieser Exception ab, statt es pro Anbieter zu verschlucken:
+        # ein fehlendes Binary betrifft JEDEN weiteren Song gleichermassen.
+        # Sauberer Abbruch mit klarer Meldung statt rohem Traceback aus
+        # einem Worker-Thread (Stil wie im frueheren fetch_songtext.py,
+        # siehe Git-Historie).
+        lyrics_core._tprint(
+            f"{lyrics_core._ts()}  syncedlyrics nicht gefunden — Abbruch."
+        )
     finally:
+        lyrics_core._release_folder(current_folder_lock)
         conn.close()
 
 

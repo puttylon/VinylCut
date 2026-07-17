@@ -57,9 +57,7 @@ def _prepare_lyrics_core_globals(conn: sqlite3.Connection) -> None:
     lyrics_core._cache_ttl_days = cache_store.DEFAULT_TTL_DAYS
     lyrics_core._cache_refresh = False
     lyrics_core._cache_only = False
-    lyrics_core._lrclib_dump_conn = lyrics_core._open_lrclib_dump_conn(
-        no_cache=False
-    )
+    lyrics_core._lrclib_dump_conn = lyrics_core._open_lrclib_dump_conn(no_cache=False)
 
 
 def fetch_all(
@@ -236,7 +234,11 @@ def fetch_all(
         label = (
             audio_path.name if audio_path is not None else f"{artist_key} / {titel_key}"
         )
-        lyrics_core._print_status(f"  {i}/{total}: {label} ...")
+        # "i/total: " nur bei echten Mehrfach-Laeufen (Nutzer-Feedback: bei
+        # total==1 -- dem Normalfall im kombinierten Datei-fuer-Datei-Lauf
+        # aus songtext_pipeline.py -- ist "1/1:" reine Redundanz ohne Info).
+        counter = f"{i}/{total}: " if total > 1 else ""
+        lyrics_core._print_status(f"  {counter}{label} ...")
         query = f"{artist_key} {titel_key}".strip()
 
         results = {}
@@ -253,7 +255,20 @@ def fetch_all(
                 for provider in providers_to_ask
             ]
             for future in as_completed(futures):
-                provider, tmp_path = future.result()
+                try:
+                    provider, tmp_path = future.result()
+                except FileNotFoundError:
+                    # syncedlyrics-Binary fehlt (z.B. falsches venv aktiv) --
+                    # gilt fuer JEDEN weiteren Aufruf gleichermassen, deshalb
+                    # nicht nur diesen einen Provider ueberspringen, sondern
+                    # den ganzen Lauf sauber abbrechen (wie im frueheren
+                    # fetch_songtext.fetch_lrc, siehe Git-Historie). Bereits
+                    # von anderen Providern geschriebene Temp-.lrc-Dateien
+                    # zuerst aufraeumen, sonst Leak.
+                    for path in results.values():
+                        if path:
+                            path.unlink(missing_ok=True)
+                    raise
                 results[provider] = tmp_path
 
         provider_hits = []

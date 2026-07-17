@@ -191,6 +191,7 @@ python3 songtext_pipeline.py "Artist - Album/" --nachholen             # nachhol
 | `--bewerten` | siehe Tabelle oben |
 | `--schreiben` | siehe Tabelle oben |
 | `-h`, `--help` | Hilfe anzeigen |
+| `-V`, `--version` | Versionsnummer ausgeben |
 
 Kein Schritt-Flag angegeben → Normal-Durchlauf: `--scan --abfragen --bewerten --schreiben`, in dieser Reihenfolge — **ohne** `--nachholen` (ein Wiederholungslauf soll nicht jedes Mal ungefragt alle historisch offenen „nichts"/„fehlschlag"-Kombis erneut live nachfragen). `--nachholen` läuft deshalb nur, wenn es ausdrücklich angegeben wird, und impliziert dann automatisch `--bewerten` + `--schreiben` mit (sonst käme ein frisch gefundener Provider-Treffer nirgendwo an). Mindestens ein anderes Schritt-Flag angegeben → nur die angegebenen Schritte laufen, weiterhin in derselben festen Reihenfolge. `--scan`/`--schreiben` brauchen für Datei-Zuordnung/Schreiben zwingend PFAD — ohne PFAD werden sie mit einem Hinweis übersprungen statt einen Fehler zu werfen.
 
@@ -285,7 +286,7 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Schritt 
 
 **Cache** (`.fetch_songtext.json` pro Ordner, Dateiname bewusst unverändert seit `fetch_songtext.py`): Ein Eintrag pro Track — Schritt `--schreiben` überspringt einen Track beim nächsten Lauf, wenn der Eintrag noch gültig ist.
 
-**Parallele Instanzen:** Sowohl `songtext_pipeline.py --recursive` als auch mehrere gleichzeitig laufende `cut.py`-Sessions können bewusst gleichzeitig über dieselbe Bibliothek laufen. Jede Instanz sperrt sich beim Betreten eines Ordners (Schritt `--schreiben`) exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
+**Parallele Instanzen:** Sowohl `songtext_pipeline.py --recursive` als auch mehrere gleichzeitig laufende `cut.py`-Sessions können bewusst gleichzeitig über dieselbe Bibliothek laufen. Jede Instanz sperrt sich beim Betreten eines Ordners exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden. Die Sperre gilt für ALLE Schritte, die für die Dateien dieses Ordners laufen (scannen, Anbieter abfragen, bewerten, schreiben), nicht nur fürs Schreiben — zwei Instanzen fragen für denselben Ordner also weder doppelt bei den Anbietern an noch transkribieren sie denselben Song doppelt per Whisper.
 
 **Globale IDF-Tabelle für die kontrastive Marge:** Keine separate Datei — die Dokumentfrequenz je Wort wird bei jedem Lauf aus `texte.inhalt` der Cache-DB (`fetch_songtext_cache.db`) gebaut (`lyrics_core._global_cache_idf`), zusammen mit einem Hintergrund-Pool je Sprache (ein Provider-Treffer-Text pro Cache-Song, Sprache über denselben `langdetect`-Mechanismus erkannt). Schritt `--bewerten` baut Whisper-Modell(e) und diesen Kontext einmal pro Lauf auf (`lyrics_core._build_contrastive_context`), nicht pro Song. Whisper-Verifikation ohne offene Cache-DB ist nicht möglich.
 

@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.16"
+__version__ = "1.13.18"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -788,6 +788,12 @@ def _get_whisper_model(name: str):
             from faster_whisper import WhisperModel
         except ImportError:
             return None
+        # _clear_status() vor dem ersten print(): löscht eine noch stehende
+        # transiente Statuszeile (z.B. "i/N: ..." aus fetch_providers.py oder
+        # "Whisper transkribiert..." aus _whisper_best), sonst "beißt" sich
+        # die Ausgabe auf derselben Terminalzeile (siehe ROADMAP.md, gleiche
+        # Ursache wie bei der Ordner-Kopfzeile).
+        _clear_status()
         print(f"   {_ts()}  Lade Whisper-Modell ({name})...", end=" ", flush=True)
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         # int8: schneller auf CPU, vermeidet float16-Warnung von ctranslate2
@@ -1298,6 +1304,7 @@ def _whisper_best(
     expected_dur: float = 0.0,
     artist: str = "",
     title: str = "",
+    reason: str = "",
 ) -> tuple[Path | None, float, bool, int, str, str | None, float | None]:
     """Verifikation via small: bester Kandidat nach IDF-Jaccard-Score (_idf_jaccard).
 
@@ -1340,6 +1347,13 @@ def _whisper_best(
     (realer Befund: ein zweiter/dritter Lauf über denselben Ordner lud
     weiterhin medium/large-v3 neu, obwohl die Transkripte längst gecacht
     waren -- siehe ROADMAP.md).
+
+    reason: optionaler Klartext, WARUM Whisper für diesen Song überhaupt
+    läuft (z.B. "nur 1/4 Provider" oder "Konsens nur 32% < 40%") -- wird nur
+    in die transiente "Whisper transkribiert..."-Statuszeile eingeblendet
+    (siehe ROADMAP.md, Nutzer-Feedback: ohne Grund nicht nachvollziehbar,
+    warum ein bestimmter Track überhaupt per Whisper geprüft wird). Ohne
+    Angabe (Standard "") bleibt die Zeile wie bisher.
     """
     ctx = _whisper_context_sec(expected_dur)
 
@@ -1441,7 +1455,8 @@ def _whisper_best(
     # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
     # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
     # ein Transkript genuegt fuer den Vergleich mit allen.
-    _print_status(f"  {flac_path.name}  Whisper transkribiert...")
+    reason_suffix = f" ({reason})" if reason else ""
+    _print_status(f"  {flac_path.name}  Whisper transkribiert...{reason_suffix}")
     raw_words, no_speech, logprob = _transcribe(
         flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
     )

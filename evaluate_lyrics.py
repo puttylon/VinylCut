@@ -196,6 +196,22 @@ def evaluate_song(
             "language": None,
         }
     elif flac_path is not None and flac_path.exists():
+        # Grund, WARUM Whisper ueberhaupt noetig ist (kein Konsens moeglich)
+        # -- nur fuer die transiente Statuszeile in lyrics_core._whisper_best
+        # (siehe dortiger Docstring, ROADMAP.md Punkt 6: ohne Grund fuer den
+        # Nutzer nicht nachvollziehbar). Zu wenige Provider (< _CONSENSUS_MIN_
+        # PROVIDERS) vs. genug Provider aber zu geringe Uebereinstimmung sind
+        # zwei verschiedene Gruende -- _provider_consensus gibt bei zu wenigen
+        # Providern IMMER 0.0 zurueck (kein echter Score), das waere sonst
+        # irrefuehrend als "Konsens 0%" dargestellt.
+        if len(candidates) < lyrics_core._CONSENSUS_MIN_PROVIDERS:
+            whisper_reason = f"nur {len(candidates)}/{n_providers} Provider"
+        else:
+            whisper_reason = (
+                f"Konsens nur {consensus_jaccard:.0%} < "
+                f"{lyrics_core._CONSENSUS_MIN_JACCARD:.0%}"
+            )
+
         # Modellwahl nach Sprach-Hint (siehe Moduldocstring) -- _whisper_best
         # liest _WHISPER_MODEL immer als Modul-Global, deshalb hier kurzzeitig
         # gesetzt und danach garantiert zurückgesetzt (auch bei Exceptions).
@@ -216,6 +232,7 @@ def evaluate_song(
                 expected_dur,
                 artist=artist_key,
                 title=titel_key,
+                reason=whisper_reason,
             )
         finally:
             lyrics_core._WHISPER_MODEL = prev_model
@@ -484,7 +501,10 @@ def evaluate_all(
 
         lyrics_core._note_contrastive_evaluation(_IDF_REFRESH_INTERVAL)
 
-        lyrics_core._print_status(f"  {i}/{total}: {label} ...")
+        # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
+        # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).
+        counter = f"{i}/{total}: " if total > 1 else ""
+        lyrics_core._print_status(f"  {counter}{label} ...")
 
         existing_lrc = flac_path.with_suffix(".lrc") if flac_path is not None else None
         expected_dur = (

@@ -52,6 +52,7 @@ def write_all(
     file_song_map: list[tuple[Path, str, str]],
     force: bool = False,
     quiet: bool = False,
+    external_lock: object | None = None,
 ) -> dict[str, int]:
     """Phase 5: schreibt/löscht .lrc je Song aus file_song_map (siehe
     songtext_pipeline.build_file_song_map), gruppiert nach Ordner für
@@ -72,6 +73,21 @@ def write_all(
     ROADMAP.md). Die persistente Ergebniszeile pro Song (unten, `_tprint`)
     bleibt IMMER bestehen -- das ist die eine gewollte Zeile pro Track,
     äquivalent zur Abschlusszeile des früheren fetch_songtext.py.
+
+    external_lock (siehe ROADMAP.md Punkt 4): songtext_pipeline.main()s
+    Datei-Schleife beansprucht die Ordner-Sperre inzwischen selbst VOR dem
+    ersten Schritt (scan/abfragen/bewerten), damit sie auch diese Schritte
+    mitschützt, nicht mehr nur das Schreiben. Ist external_lock gesetzt,
+    verwendet write_all() GENAU diese bereits gehaltene Sperre weiter (kein
+    zweiter _try_claim_folder-Versuch -- ein Prozess kann sich mit flock()
+    selbst aussperren, weil die Sperre an die offene Dateibeschreibung
+    gebunden ist, nicht an den Prozess) und gibt sie am Ende NICHT frei --
+    das bleibt Aufgabe von main()s Datei-Schleife, die sie beim nächsten
+    Ordnerwechsel bzw. am Laufende löst. Ohne external_lock (Standalone-
+    Aufruf, z.B. direkt in Tests oder mit einem file_song_map über mehrere
+    Ordner) bleibt das bisherige Verhalten unverändert: write_all()
+    beansprucht/löst die Sperre selbst, pro Ordnerwechsel innerhalb dieser
+    Funktion.
     """
     fetch_providers._prepare_lyrics_core_globals(conn)
     counts = {"updated": 0, "skipped": 0, "not_found": 0, "errors": 0}
@@ -81,23 +97,24 @@ def write_all(
 
     current_parent: Path | None = None
     dir_cache: dict = {}
-    folder_lock: "object | None" = None
+    folder_lock: "object | None" = external_lock
 
     for i, (audio_path, artist_key, titel_key) in enumerate(file_song_map, start=1):
         lrc_path = audio_path.with_suffix(".lrc")
         cache_key = unicodedata.normalize("NFC", audio_path.name)
 
         if audio_path.parent != current_parent:
-            lyrics_core._release_folder(folder_lock)
             current_parent = audio_path.parent
-            folder_lock = lyrics_core._try_claim_folder(audio_path.parent)
-            if folder_lock is lyrics_core._FOLDER_BUSY:
-                lyrics_core._print_status(
-                    f"  Übersprungen (andere Instanz aktiv): {audio_path.parent}"
-                )
-                continue
+            if external_lock is None:
+                lyrics_core._release_folder(folder_lock)
+                folder_lock = lyrics_core._try_claim_folder(audio_path.parent)
+                if folder_lock is lyrics_core._FOLDER_BUSY:
+                    lyrics_core._print_status(
+                        f"  Übersprungen (andere Instanz aktiv): {audio_path.parent}"
+                    )
+                    continue
             dir_cache = lyrics_core._load_cache(audio_path.parent)
-        elif folder_lock is lyrics_core._FOLDER_BUSY:
+        elif external_lock is None and folder_lock is lyrics_core._FOLDER_BUSY:
             continue
 
         if not force:
@@ -113,7 +130,10 @@ def write_all(
                 counts["skipped"] += 1
                 continue
 
-        lyrics_core._print_status(f"  {i}/{total}: {audio_path.name} ...")
+        # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
+        # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).
+        counter = f"{i}/{total}: " if total > 1 else ""
+        lyrics_core._print_status(f"  {counter}{audio_path.name} ...")
 
         expected_dur = evaluate_lyrics._resolve_expected_dur(audio_path)
         existing_lrc = lrc_path if lrc_path.exists() else None
@@ -157,5 +177,6 @@ def write_all(
         }
         lyrics_core._save_cache(audio_path.parent, dir_cache, lockfile=folder_lock)
 
-    lyrics_core._release_folder(folder_lock)
+    if external_lock is None:
+        lyrics_core._release_folder(folder_lock)
     return counts

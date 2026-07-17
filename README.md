@@ -149,7 +149,7 @@ Steuer-Skript für die Songtexte-Pipeline (Architektur siehe `workflow für song
 |---|---|---|
 | `--scan` | Audio-Tags lesen, Song-Identität (Artist/Titel) in der Cache-DB anlegen. Braucht PFAD. | `scan_songs.py` |
 | `--abfragen` | Alle vier Anbieter (`lrclib`, `musixmatch`, `netease`, `genius`) gleichzeitig abfragen, Ergebnis in die Cache-DB schreiben — überspringt dabei Songs mit Skip-Genre (Hörbuch/Hörspiel/Instrumental/…) | `fetch_providers.py` (`fetch_all`) |
-| `--nachholen` | Nachhol-Modus: fragt gezielt nur (Song, Anbieter)-Kombinationen mit `status IN ('nichts', 'fehlschlag')` erneut ab — z. B. nachdem ein Anbieter fälschlich als gesperrt galt, obwohl er längst wieder funktioniert | `fetch_providers.py` (`retry_missing`) |
+| `--nachholen` | Nachhol-Modus: fragt gezielt nur (Song, Anbieter)-Kombinationen mit `status IN ('nichts', 'fehlschlag')` erneut ab — z. B. nachdem ein Anbieter fälschlich als gesperrt galt, obwohl er längst wieder funktioniert. Läuft NIE von allein mit (auch nicht im Normal-Durchlauf ohne jedes Flag) — impliziert dann `--bewerten` + `--schreiben` mit. | `fetch_providers.py` (`retry_missing`) |
 | `--bewerten` | Entscheidet je Song: Provider-Konsens, sonst Whisper-Verifikation, sonst Dauer-Heuristik (siehe „Wie der Algorithmus funktioniert" unten) | `evaluate_lyrics.py` |
 | `--schreiben` | `.lrc` schreiben/löschen je nach Bewertung, JSON-Ordner-Cache pflegen. Braucht PFAD. | `write_lrc.py` |
 
@@ -158,12 +158,12 @@ Mit PFAD grenzt jedes Flag (außer `--scan`/`--schreiben`, die ohnehin PFAD brau
 Für die lrclib-Quelle wird vor jeder echten Live-Abfrage zuerst ein lokaler LRCLib-Datenbank-Abzug durchsucht (`/Volumes/music/db.sqlite3`, falls erreichbar) — nur bei 0 Treffern dort wird wie bisher live gefragt. Kein eigenes Flag nötig; fehlt der Abzug (Mount nicht vorhanden), degradiert die Pipeline automatisch auf reines Live-Fragen (siehe `CACHE_DESIGN.md`).
 
 ```bash
-python3 songtext_pipeline.py "Artist - Album/"                        # alle 5 Schritte, ein Album
-python3 songtext_pipeline.py "/Pfad/zur/Datei.flac"                   # alle 5 Schritte, eine Datei
-python3 songtext_pipeline.py --recursive "/Musik/"                    # alle 5 Schritte, ganze Bibliothek
+python3 songtext_pipeline.py "Artist - Album/"                        # scan+abfragen+bewerten+schreiben, ein Album
+python3 songtext_pipeline.py "/Pfad/zur/Datei.flac"                   # scan+abfragen+bewerten+schreiben, eine Datei
+python3 songtext_pipeline.py --recursive "/Musik/"                    # scan+abfragen+bewerten+schreiben, ganze Bibliothek
 python3 songtext_pipeline.py "/Musik/" --abfragen --bewerten --schreiben  # nur ausgewählte Schritte
-python3 songtext_pipeline.py --nachholen                              # nur Nachhol-Modus, ganze Bibliothek
-python3 songtext_pipeline.py "Artist - Album/" --nachholen             # Nachhol-Modus nur für dieses Album
+python3 songtext_pipeline.py --nachholen                              # nachholen+bewerten+schreiben, ganze Bibliothek
+python3 songtext_pipeline.py "Artist - Album/" --nachholen             # nachholen+bewerten+schreiben, nur dieses Album
 ```
 
 **Optionen:**
@@ -178,7 +178,7 @@ python3 songtext_pipeline.py "Artist - Album/" --nachholen             # Nachhol
 | `--schreiben` | siehe Tabelle oben |
 | `-h`, `--help` | Hilfe anzeigen |
 
-Kein Schritt-Flag angegeben → kompletter Normal-Durchlauf: `--scan --abfragen --nachholen --bewerten --schreiben`, in dieser Reihenfolge. Mindestens ein Schritt-Flag angegeben → nur die angegebenen Schritte laufen, weiterhin in derselben festen Reihenfolge. `--scan`/`--schreiben` brauchen für Datei-Zuordnung/Schreiben zwingend PFAD — ohne PFAD werden sie mit einem Hinweis übersprungen statt einen Fehler zu werfen.
+Kein Schritt-Flag angegeben → Normal-Durchlauf: `--scan --abfragen --bewerten --schreiben`, in dieser Reihenfolge — **ohne** `--nachholen` (ein Wiederholungslauf soll nicht jedes Mal ungefragt alle historisch offenen „nichts"/„fehlschlag"-Kombis erneut live nachfragen). `--nachholen` läuft deshalb nur, wenn es ausdrücklich angegeben wird, und impliziert dann automatisch `--bewerten` + `--schreiben` mit (sonst käme ein frisch gefundener Provider-Treffer nirgendwo an). Mindestens ein anderes Schritt-Flag angegeben → nur die angegebenen Schritte laufen, weiterhin in derselben festen Reihenfolge. `--scan`/`--schreiben` brauchen für Datei-Zuordnung/Schreiben zwingend PFAD — ohne PFAD werden sie mit einem Hinweis übersprungen statt einen Fehler zu werfen.
 
 `lyrics_core.py` bündelt die eigentliche Such-/Bewertungslogik (Provider-Abfragen, Whisper, Cache-Helfer) als reine, von allen Schritten geteilte Bibliothek — hat kein eigenes CLI und wird nicht direkt aufgerufen.
 
@@ -281,7 +281,7 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Schritt 
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | z.B. `"1.13.5"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
+| `v` | z.B. `"1.13.6"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
 | `r` | `"ok"` / `"nf"` | Ergebnis: LRC vorhanden / nicht gefunden |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
@@ -298,13 +298,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.13.5", "r": "ok", "outcome": "write",
+  "v": "1.13.6", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
   "method": "whisper-large-v3", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.13.5", "r": "nf", "outcome": "delete",
+  "v": "1.13.6", "r": "nf", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "kein-provider", "words": null, "language": null, "ts": "2026-07-09T09:28:25"

@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.5"
+__version__ = "1.13.6"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1166,10 +1166,18 @@ def _whisper_best(
     _cache_only-Docstring weiter oben), NICHT Whisper (ein v1.10.0-Refactor
     hatte das faelschlich gekoppelt, seit v1.10.1 wieder korrigiert): ein
     Cache-Miss transkribiert immer live, unabhängig von --cache-only.
-    """
-    if _get_whisper_model(_WHISPER_MODEL) is None:
-        return (None, 0.0, False, 0, "", None, None)
 
+    Modell-Load bewusst NICHT hier am Funktionsanfang (siehe unten, direkt
+    vor dem eigentlichen Live-Transkriptions-Aufruf): _get_whisper_model()
+    lädt bei einem Cache-Miss im _whisper_models-Dict das volle Modell in
+    den Speicher -- bei einem Song-Transkript-Cache-TREFFER (siehe
+    cached_transcript unten) wird das geladene Modell-Objekt gar nie
+    benutzt, nur der Modell-NAME als String zur Anzeige. Ein zu früher Load
+    hier würde also bei jedem Cache-Treffer unnötig ein Whisper-Modell laden
+    (realer Befund: ein zweiter/dritter Lauf über denselben Ordner lud
+    weiterhin medium/large-v3 neu, obwohl die Transkripte längst gecacht
+    waren -- siehe ROADMAP.md).
+    """
     ctx = _whisper_context_sec(expected_dur)
 
     # EIN Start-Offset fuer den EINEN Whisper-Lauf (frueheste Kandidaten-
@@ -1260,6 +1268,12 @@ def _whisper_best(
     # _cache_only weiter oben), nicht Whisper. Ein Cache-Miss transkribiert
     # daher immer live -- auch unter --cache-only, sonst wuerde kein neuer
     # Song je zum ersten Mal verifiziert.
+
+    # Modell-Load HIER, erst unmittelbar vor dem echten Live-Transkriptions-
+    # Aufruf (siehe Docstring oben) -- ein Cache-Treffer weiter oben hat
+    # diese Zeile nie erreicht, also auch nie ein Modell geladen.
+    if _get_whisper_model(_WHISPER_MODEL) is None:
+        return (None, 0.0, False, 0, "", None, None)
 
     # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
     # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,

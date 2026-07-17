@@ -1408,6 +1408,38 @@ class TestTranscriptCache:
         assert has_vocals is True
         assert words == 4
 
+    def test_cache_hit_laedt_kein_whisper_modell(self, tmp_path, monkeypatch):
+        """Regressionstest (siehe ROADMAP.md): _get_whisper_model() lädt bei
+        einem Cache-Miss ein volles Modell in den Speicher -- bei einem
+        Song-Transkript-Cache-TREFFER wird das Modell-Objekt selbst nie
+        gebraucht (nur der Modell-NAME als String für die Anzeige). Realer
+        Befund: ein zweiter/dritter Lauf über denselben Ordner lud
+        weiterhin medium/large-v3 neu, obwohl die Transkripte längst
+        gecacht waren. _get_whisper_model() darf bei einem Cache-Treffer
+        also gar nicht erst aufgerufen werden."""
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
+        lyrics_core._cache_ttl_days = 30
+        lyrics_core._cache_refresh = False
+        monkeypatch.setattr(lyrics_core, "_contrastive_idf", (1, {}))
+        monkeypatch.setattr(
+            lyrics_core, "_detect_lrc_language", lambda candidates: None
+        )
+        cache_store.put_transcript(
+            conn, "the artist", "the title", "hello world foo bar", 0.1, -0.2
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("_get_whisper_model darf bei Song-Cache-Treffer nicht laufen")
+
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", _fail_if_called)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]hello world foo bar\n")
+
+        lyrics_core._whisper_best(flac, [lrc], artist="The Artist", title="The Title")
+
     def test_miss_transcribes_and_writes_cache(self, tmp_path, monkeypatch):
         self._prep(monkeypatch, tmp_path)
 

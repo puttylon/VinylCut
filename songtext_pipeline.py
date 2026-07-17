@@ -10,16 +10,20 @@ mit diesem Umbau ersatzlos entfallen (siehe ROADMAP.md).
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
-        Kein Schritt-Flag angegeben -> kompletter Normal-Durchlauf: scan,
-        abfragen, nachholen, bewerten, schreiben (in dieser Reihenfolge).
+        Kein Schritt-Flag angegeben -> Normal-Durchlauf: scan, abfragen,
+        bewerten, schreiben (in dieser Reihenfolge). OHNE nachholen -- das
+        läuft nur, wenn ausdrücklich angegeben (siehe unten).
     python3 songtext_pipeline.py PFAD --abfragen --bewerten --schreiben
         Nur die angegebenen Schritte.
     python3 songtext_pipeline.py --nachholen
-        Nur der Nachhol-Modus, über die GANZE Bibliothek (kein PFAD nötig).
+        Nachhol-Modus über die GANZE Bibliothek (kein PFAD nötig) --
+        impliziert automatisch --bewerten + --schreiben mit, sonst würde
+        ein frisch gefundener Provider-Treffer nirgendwo ankommen.
     python3 songtext_pipeline.py PFAD --nachholen
         Nachhol-Modus NUR für die Songs unter PFAD (seit diesem Umbau
         möglich -- vorher wurde --nachholen bei gesetztem PFAD komplett
-        übersprungen, siehe ROADMAP.md).
+        übersprungen, siehe ROADMAP.md) -- impliziert ebenfalls --bewerten
+        + --schreiben, ebenfalls auf PFAD eingegrenzt.
 
 Jeder Schritt ist einzeln UND in beliebiger Kombination aufrufbar, jeweils
 auf PFAD eingegrenzt, wenn PFAD gesetzt ist (sonst: ganze Bibliothek).
@@ -211,7 +215,10 @@ def main() -> None:
         help=(
             "Nur die Anbieter nochmal fragen, bei denen bisher nichts "
             "gefunden wurde oder die fehlgeschlagen sind. Mit PFAD: nur "
-            "Songs aus PFAD. Ohne PFAD: die ganze Bibliothek."
+            "Songs aus PFAD. Ohne PFAD: die ganze Bibliothek. Läuft NIE von "
+            "allein mit (auch nicht ohne jedes Flag) -- impliziert dann "
+            "--bewerten + --schreiben, damit ein neuer Treffer auch "
+            "wirklich geschrieben wird."
         ),
     )
     parser.add_argument(
@@ -233,18 +240,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Kein einziges Schritt-Flag gesetzt -> kompletter Normal-Durchlauf (alter
-    # Standard ohne --phase). Mindestens ein Flag gesetzt -> NUR die
-    # angegebenen Schritte, in derselben festen Reihenfolge wie immer
-    # (scan -> abfragen -> nachholen -> bewerten -> schreiben).
+    # Kein einziges Schritt-Flag gesetzt -> kompletter Normal-Durchlauf: scan,
+    # abfragen, bewerten, schreiben -- OHNE nachholen (Nutzer-Feedback: ein
+    # normaler Wiederholungslauf soll nicht bei jedem Mal erneut alle
+    # historisch offenen "nichts"/"fehlschlag"-Kombis live nachfragen; das
+    # ist ein bewusster, expliziter Schritt). --nachholen läuft deshalb NUR,
+    # wenn es ausdrücklich angegeben wird -- und impliziert dann --bewerten
+    # + --schreiben mit (ohne die beiden würde ein frisch gefundener
+    # Provider-Treffer nirgendwo ankommen, siehe ROADMAP.md).
     any_step_selected = any(
         [args.scan, args.abfragen, args.nachholen, args.bewerten, args.schreiben]
     )
     run_scan = args.scan or not any_step_selected
     run_abfragen = args.abfragen or not any_step_selected
-    run_nachholen = args.nachholen or not any_step_selected
-    run_bewerten = args.bewerten or not any_step_selected
-    run_schreiben = args.schreiben or not any_step_selected
+    run_nachholen = args.nachholen
+    run_bewerten = args.bewerten or args.nachholen or not any_step_selected
+    run_schreiben = args.schreiben or args.nachholen or not any_step_selected
 
     # Die Cache-Connection wird von jedem Schritt gebraucht (alle lesen/
     # schreiben in der Cache-DB) -- deshalb immer geöffnet, unabhängig von

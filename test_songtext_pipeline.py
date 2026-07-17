@@ -18,11 +18,17 @@ import songtext_pipeline
 # --- CLI: Schritt-Flags und Standard-Durchlauf ---------------------------
 
 
-def test_main_ohne_flags_aktiviert_alle_5_schritte(tmp_path, monkeypatch, capsys):
+def test_main_ohne_flags_aktiviert_scan_abfragen_bewerten_schreiben(
+    tmp_path, monkeypatch, capsys
+):
+    """Der Normal-Durchlauf ohne jedes Flag läuft OHNE --nachholen (Nutzer-
+    Feedback: ein Wiederholungslauf soll nicht bei jedem Mal erneut alle
+    historisch offenen "nichts"/"fehlschlag"-Kombis live nachfragen -- das
+    ist ein bewusster, expliziter Schritt, siehe ROADMAP.md)."""
     # eigene DB in tmp_path -- sonst würde main() die echte Produktions-Cache-DB
     # öffnen (siehe _default_db_path). Die DB ist leer (keine Songs, keine
-    # Ergebnisse), --abfragen/--nachholen fragen daher real, aber ohne einen
-    # einzigen (Song, Provider) -- keine Live-Netzwerk-Abfrage findet statt.
+    # Ergebnisse), --abfragen fragt daher real, aber ohne einen einzigen
+    # (Song, Provider) -- keine Live-Netzwerk-Abfrage findet statt.
     # _get_whisper_model gemockt -- sonst würde --bewerten ein echtes
     # faster-whisper-Modell laden (langsam, nicht Testgegenstand hier).
     db_path = tmp_path / "cache.db"
@@ -36,7 +42,7 @@ def test_main_ohne_flags_aktiviert_alle_5_schritte(tmp_path, monkeypatch, capsys
         out = capsys.readouterr().out
         assert "scan: 0 Song(s) gescannt/aktualisiert." in out
         assert "abfragen: 0 Song(s) abgefragt." in out
-        assert "nachholen:" in out
+        assert "nachholen:" not in out
         assert (
             "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider."
             in out
@@ -46,11 +52,16 @@ def test_main_ohne_flags_aktiviert_alle_5_schritte(tmp_path, monkeypatch, capsys
         _reset_lyrics_core_globals()
 
 
-def test_main_nachholen_allein_funktioniert_ohne_pfad(tmp_path, monkeypatch, capsys):
+def test_main_nachholen_impliziert_bewerten_und_schreiben(
+    tmp_path, monkeypatch, capsys
+):
+    """--nachholen läuft nie allein: ohne --bewerten/--schreiben käme ein
+    frisch gefundener Provider-Treffer nirgendwo an (siehe ROADMAP.md)."""
     # eigene, leere DB -- sonst würde main() die echte Produktions-Cache-DB
     # öffnen und fetch_providers.retry_missing() könnte live abfragen.
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--nachholen"])
     try:
         songtext_pipeline.main()
@@ -60,8 +71,11 @@ def test_main_nachholen_allein_funktioniert_ohne_pfad(tmp_path, monkeypatch, cap
         assert "Keine passenden Cache-Einträge gefunden" in out
         assert "scan:" not in out
         assert "abfragen:" not in out
-        assert "bewerten:" not in out
-        assert "schreiben:" not in out
+        assert (
+            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider."
+            in out
+        )
+        assert "schreiben: kein PFAD angegeben, nichts zu schreiben." in out
     finally:
         _reset_lyrics_core_globals()
 
@@ -512,6 +526,12 @@ def test_main_nachholen_mit_pfad_grenzt_auf_pfad_songs_ein(
     )
     monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
     monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    # --nachholen impliziert jetzt --bewerten + --schreiben (siehe ROADMAP.md)
+    # -- Whisper hier bewusst "nicht verfügbar", damit dieser Test isoliert
+    # nur die Nachhol-Scope-Eingrenzung prüft, ohne einen echten
+    # ffmpeg/subprocess-Transkriptions-Umweg über denselben gemockten
+    # subprocess.run auszulösen.
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: None)
     fake_run = _fake_subprocess_run({"album artist": "[00:01.00]neu"})
     monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
     monkeypatch.setattr(
@@ -588,12 +608,10 @@ def test_main_nachholen_mit_pfad_ohne_treffer_bleibt_leer_kein_fallback_auf_ganz
         _reset_lyrics_core_globals()
 
 
-def test_main_pfad_ohne_flags_ruft_nachholen_gescoped_auf(
-    tmp_path, monkeypatch, capsys
-):
-    """Der komplette Normal-Durchlauf (kein Flag angegeben) MIT PFAD führt
-    --nachholen jetzt eingegrenzt aus, statt es (wie vor diesem Umbau)
-    komplett zu überspringen."""
+def test_main_pfad_ohne_flags_laesst_nachholen_aus(tmp_path, monkeypatch, capsys):
+    """Gegenprobe zu test_main_nachholen_impliziert_bewerten_und_schreiben:
+    der komplette Normal-Durchlauf (kein Flag angegeben) MIT PFAD führt
+    --nachholen NICHT aus -- das braucht immer ein ausdrückliches Flag."""
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
@@ -603,9 +621,7 @@ def test_main_pfad_ohne_flags_ruft_nachholen_gescoped_auf(
     try:
         songtext_pipeline.main()
         out = capsys.readouterr().out
-        assert "nachholen:" in out
-        # die alte "läuft nur ohne PFAD"-Meldung gibt es nicht mehr
-        assert "Phase 'nachholen' übersprungen" not in out
+        assert "nachholen:" not in out
     finally:
         _reset_lyrics_core_globals()
 

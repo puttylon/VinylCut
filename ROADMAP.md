@@ -566,6 +566,63 @@ End-zu-Ende über die echte `_retry_missing`). Volle Suite: 456/456 grün
 (6 alte Tests entfernt, mehr neue hinzugekommen). `ruff check`/
 `ruff format` sauber.
 
+**✓ Nachtrag — `--nachholen` läuft nicht mehr im Normal-Durchlauf mit;
+Whisper-Modell wird nicht mehr unnötig geladen.** Zwei reale Befunde aus
+einem echten Wiederholungslauf über "Betterov - Olympia" (derselbe PFAD
+dreimal hintereinander):
+
+1. **`--nachholen` im Normal-Durchlauf war zu aufdringlich.** Der komplette
+   Durchlauf ohne jedes Flag führte `--nachholen` automatisch mit aus (seit
+   dem PFAD-Scoping-Fix, siehe Nachtrag oben) -- bei JEDEM Wiederholungslauf
+   desselben Albums wurden dadurch alle historisch offenen "nichts"/
+   "fehlschlag"-Kombis erneut live abgefragt (im Beispiel: 16 Provider-
+   Retries bei jedem einzelnen Lauf, obwohl sich nichts geändert hatte).
+   Nutzer-Vorgabe: "Ich will ein 'nachholen' nur wenn das flag gesetzt ist.
+   das impliziert dann auch bewerten und schreiben." **Fix:** der Normal-
+   Durchlauf (kein Flag angegeben) läuft jetzt nur noch `--scan --abfragen
+   --bewerten --schreiben` -- OHNE `--nachholen`. Wird `--nachholen`
+   ausdrücklich angegeben, impliziert es automatisch `--bewerten` +
+   `--schreiben` mit (sonst käme ein frisch gefundener Provider-Treffer
+   nirgendwo an) -- auch wenn der Nutzer nur `--nachholen` allein tippt.
+
+2. **Whisper-Modell wurde geladen, obwohl der Song längst ein gecachtes
+   Transkript hatte.** Realer Befund im selben Log: ein zweiter/dritter
+   Lauf über denselben Ordner lud weiterhin `medium`/`large-v3` neu ("Lade
+   Whisper-Modell..."), obwohl die Transkripte aus dem ersten Lauf bereits
+   in der DB standen. Ursache: `lyrics_core._whisper_best()` rief
+   `_get_whisper_model()` (lädt bei Bedarf das VOLLE Modell in den
+   Speicher) ganz am Funktionsanfang auf -- noch BEVOR geprüft wurde, ob
+   für den Song schon ein Transkript im Cache liegt. Bei einem Cache-
+   Treffer wird das geladene Modell-Objekt danach nie benutzt, nur der
+   Modell-NAME als String für die Anzeige. **Fix:** der Modell-Load wandert
+   hinter die Cache-Prüfung, direkt vor den echten Live-Transkriptions-
+   Aufruf -- ein Song mit gültigem Transkript-Cache-Treffer lädt jetzt kein
+   Modell mehr. Neuer Regressionstest `test_cache_hit_laedt_kein_whisper_
+   modell` (mockt `_get_whisper_model` als `pytest.fail`-Falle).
+
+   Bewusst NICHT Teil dieses Fixes (siehe Diskussion mit dem Nutzer): das
+   Bauen des kontrastiven Hintergrund-Kontexts (`_build_contrastive_context`)
+   bleibt weiterhin bei jedem `--bewerten`-Lauf nötig, sobald irgendein Song
+   im Scope den Whisper-Vergleichszweig braucht (auch bei einem Cache-
+   Treffer -- die Marge wird ja gegen den aktuellen Hintergrund-Pool neu
+   berechnet) UND weil jeder `songtext_pipeline.py`-Aufruf ein frischer
+   Prozess ist (kein Zustand überlebt zwischen zwei separaten Aufrufen).
+   `bewerten` hat außerdem WEITERHIN keinerlei "hat sich seitdem etwas
+   geändert"-Skip (anders als `schreiben` seit dem vorherigen Nachtrag) --
+   bewertet also bei jedem Lauf jeden Song im Scope neu. Ein solcher Skip
+   für `bewerten` selbst wäre der eigentlich vollständige Fix für "beim
+   zweiten/dritten Lauf über einen unveränderten Pfad passiert gar nichts
+   mehr" -- auf die To-do-Liste vertagt.
+
+Tests angepasst: `test_main_ohne_flags_aktiviert_scan_abfragen_bewerten_
+schreiben` (ersetzt die alte "...alle_5_schritte"-Variante, prüft jetzt
+explizit `"nachholen:" not in out`), `test_main_nachholen_impliziert_
+bewerten_und_schreiben` (ersetzt die alte "...allein_funktioniert_ohne_
+pfad"-Variante), `test_main_pfad_ohne_flags_laesst_nachholen_aus` (Gegenprobe
+mit PFAD). Volle Suite: 457/457 grün. `ruff check`/`ruff format` sauber.
+`lyrics_core.__version__` auf `1.13.6` erhöht (Bugfix, siehe
+CLAUDE.md-Versionierungsregel).
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

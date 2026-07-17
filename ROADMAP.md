@@ -2233,6 +2233,15 @@ Tests für `get_segments`, automatische Umbenennung der Ausgabedatei, ROADMAP ak
 ## ✓ v1.0 — Stabile Version
 README vollständig nachgezogen, Gesamtworkflow dokumentiert.
 
+## ✓ v1.1.5 — Bugfix: UI zeigte noch "-0.1 dBFS" statt echtem Zielwert
+
+In v1.1.4 vergessen: die Phase-4-Statuszeile ("DC-Offset + Peak-
+Normalisierung auf ...") war als String-Literal fest auf "-0.1 dBFS"
+codiert, unabhängig vom tatsächlich verwendeten Zielwert. Nutzer meldete
+den Widerspruch direkt aus der laufenden UI. Fix: Zeile liest jetzt
+`PEAK_NORMALIZE_TARGET_DBFS` statt eines hartcodierten Strings — Anzeige
+und tatsächliches Verhalten können dadurch nicht mehr auseinanderlaufen.
+
 ## ✓ v1.1.4 — Zurück zu reiner Peak-Normalisierung auf -1 dBFS
 
 `normalize()` nutzte seit v1.1.2 ffmpeg `loudnorm` (Lautheitsangleichung auf

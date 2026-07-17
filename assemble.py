@@ -17,7 +17,7 @@ from assemble_ui import (
 )
 from cut_ui import fmt_dur, live_input
 
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 
 console = Console()
 
@@ -837,7 +837,9 @@ def main():
                     f"Korrektur: Links ×{left_gain:.4f}  Rechts ×{right_gain:.4f}"
                 )
 
-        norm_status.append("DC-Offset + Peak-Normalisierung auf -0.1 dBFS...")
+        norm_status.append(
+            f"DC-Offset + Peak-Normalisierung auf {PEAK_NORMALIZE_TARGET_DBFS:g} dBFS..."
+        )
         live.update(build_normalize_panel(stem, left_db, right_db, norm_status))
         live.refresh()
         normalize(out_flac, final_flac, left_gain, right_gain)

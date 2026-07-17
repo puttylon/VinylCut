@@ -518,8 +518,8 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
         monkeypatch.setattr(
             lyrics_core,
             "_retry_missing",
-            lambda providers, artist, title: captured.update(
-                providers=providers, artist=artist, title=title
+            lambda providers, artist, title, song_ids=None: captured.update(
+                providers=providers, artist=artist, title=title, song_ids=song_ids
             ),
         )
 
@@ -529,6 +529,7 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
             "providers": lyrics_core._ALL_PROVIDERS,
             "artist": None,
             "title": None,
+            "song_ids": None,
         }
         assert lyrics_core._cache_conn is conn
 
@@ -541,12 +542,113 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
         monkeypatch.setattr(
             lyrics_core,
             "_retry_missing",
-            lambda providers, artist, title: captured.update(providers=providers),
+            lambda providers, artist, title, song_ids=None: captured.update(
+                providers=providers
+            ),
         )
 
         fetch_providers.retry_missing(conn, providers=["lrclib"])
 
         assert captured["providers"] == ["lrclib"]
+
+    def test_scope_none_bleibt_ohne_eingrenzung(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        captured = {}
+        monkeypatch.setattr(
+            lyrics_core,
+            "_retry_missing",
+            lambda providers, artist, title, song_ids=None: captured.update(
+                song_ids=song_ids
+            ),
+        )
+
+        fetch_providers.retry_missing(conn, scope=None)
+
+        assert captured["song_ids"] is None
+
+    def test_scope_wird_zu_song_ids_aufgeloest(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs._get_or_create_song(conn, "artist b", "title b", None)
+        conn.commit()
+        song_id_a = conn.execute(
+            "SELECT id FROM songs WHERE artist_key='artist a'"
+        ).fetchone()[0]
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        captured = {}
+        monkeypatch.setattr(
+            lyrics_core,
+            "_retry_missing",
+            lambda providers, artist, title, song_ids=None: captured.update(
+                song_ids=song_ids
+            ),
+        )
+
+        fetch_providers.retry_missing(conn, scope={("artist a", "title a")})
+
+        assert captured["song_ids"] == [song_id_a]
+
+    def test_scope_mit_unbekanntem_song_wird_ignoriert(self, tmp_path, monkeypatch):
+        """Ein (artist_key, titel_key)-Paar im scope, das gar nicht in der
+        songs-Tabelle steht (kann bei einer PFAD-Datei ohne DB-Eintrag
+        passieren), darf nicht crashen -- einfach nicht mitgezählt."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        captured = {}
+        monkeypatch.setattr(
+            lyrics_core,
+            "_retry_missing",
+            lambda providers, artist, title, song_ids=None: captured.update(
+                song_ids=song_ids
+            ),
+        )
+
+        fetch_providers.retry_missing(conn, scope={("unbekannt", "unbekannt")})
+
+        assert captured["song_ids"] == []
+
+    def test_end_to_end_scope_grenzt_auf_pfad_songs_ein(self, tmp_path, monkeypatch):
+        """Kernstück des --nachholen-mit-PFAD-Umbaus (siehe ROADMAP.md):
+        über den echten (nicht gemockten) lyrics_core._retry_missing landet
+        nur der Song aus scope beim Live-Retry, der andere fehlgeschlagene
+        Song bleibt unangetastet."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs.put_provider(
+            conn, "lrclib", "artist a", "title a", "fehlschlag", None, "timeout"
+        )
+        cs.put_provider(
+            conn, "lrclib", "artist b", "title b", "fehlschlag", None, "timeout"
+        )
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+        fake_run = _fake_run({"artist a": "[00:01.00]neu"})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        fetch_providers.retry_missing(conn, scope={("artist a", "title a")})
+
+        assert len(fake_run.calls) == 1
+        assert "artist a" in fake_run.calls[0][0]
+        assert cs.get_provider(conn, "lrclib", "artist a", "title a") == {
+            "status": "treffer",
+            "content": "[00:01.00]neu",
+        }
+        # unveraendert, nicht retried
+        row = conn.execute(
+            "SELECT status FROM ergebnisse e JOIN songs s ON s.id=e.song_id "
+            "WHERE s.artist_key='artist b' AND s.titel_key='title b'"
+        ).fetchone()
+        assert row == ("fehlschlag",)
 
     def test_end_to_end_nur_nichts_fehlschlag_kombis_werden_retried(
         self, tmp_path, monkeypatch

@@ -60,6 +60,7 @@ python3 assemble.py "Artist - Album-raw.flac" --preview 12
 | Eingabe | Aktion |
 |---------|--------|
 | `p` | Snippet abspielen |
+| `p<Sek>` | Snippet-Länge für den Rest des Laufs ändern (z.B. `p18` → 18s). Nur 2–30s gültig, außerhalb wird die Eingabe ignoriert |
 | `+` / `-` | Punkt ±0,5 s verschieben |
 | `++` / `--` | Punkt ±2,0 s verschieben |
 | `ok` | Punkt bestätigen, weiter |
@@ -72,6 +73,7 @@ python3 assemble.py "Artist - Album-raw.flac" --preview 12
 | Eingabe | Aktion |
 |---------|--------|
 | `p` | Crossfade nochmal abspielen |
+| `p<Sek>` | Crossfade-Vorschaulänge für den Rest des Laufs ändern (z.B. `p12` → 12s). Nur 2–30s gültig, außerhalb wird die Eingabe ignoriert |
 | `a` / `b` | Fokus auf Punkt A (Ende Musik) / B (Anfang Musik) |
 | `+` / `-` | Aktiven Punkt ±0,5 s verschieben |
 | `++` / `--` | Aktiven Punkt ±2,0 s verschieben |
@@ -141,37 +143,44 @@ Jede geschnittene FLAC erhält einen `COMMENT`-Tag mit Programmname und Version.
 ### `songtext_pipeline.py`
 Sucht für die Audiodateien im gewählten Umfang synchronisierte Songtexte (`.lrc`) bei vier Anbietern, prüft das Ergebnis mit Whisper und speichert die beste passende Datei. Wird von `cut.py` automatisch pro Track aufgerufen; für eine ganze Bibliothek (Batch-Lauf, Nachpflege, Neuaufbau nach Code-Änderungen) wird `songtext_pipeline.py` manuell verwendet.
 
-Steuer-Skript für die 5-Phasen-Pipeline (Architektur siehe `workflow für songexte.txt`, Abschnitt „ZIELARCHITEKTUR"; Baufortschritt siehe `ROADMAP.md`, „Songtexte-Pipeline-Umbau"). Jede Phase liest/schreibt ausschließlich über die gemeinsame Cache-DB (`fetch_songtext_cache.db`, siehe unten) und ist einzeln wiederholbar:
+Steuer-Skript für die Songtexte-Pipeline (Architektur siehe `workflow für songexte.txt`, Abschnitt „ZIELARCHITEKTUR"; Baufortschritt siehe `ROADMAP.md`, „Songtexte-Pipeline-Umbau"). Jeder Schritt hat sein eigenes Flag — kein Sammel-Flag `--phase` mehr (Nutzer-Feedback: „kein Mensch braucht im Flag den Begriff 'phase'"). Jeder Schritt liest/schreibt ausschließlich über die gemeinsame Cache-DB (`fetch_songtext_cache.db`, siehe unten) und ist einzeln wiederholbar:
 
-| Phase (Name bei `--phase`) | Was passiert | Eigenständiges Modul |
+| Flag | Was passiert | Eigenständiges Modul |
 |---|---|---|
-| `scan` | Audio-Tags lesen, Song-Identität (Artist/Titel) in der Cache-DB anlegen | `scan_songs.py` |
-| `abfragen` | Alle vier Anbieter (`lrclib`, `musixmatch`, `netease`, `genius`) gleichzeitig abfragen, Ergebnis in die Cache-DB schreiben — überspringt dabei Songs mit Skip-Genre (Hörbuch/Hörspiel/Instrumental/…) | `fetch_providers.py` (`fetch_all`) |
-| `nachholen` | Nachhol-Modus: fragt gezielt nur (Song, Anbieter)-Kombinationen mit `status IN ('nichts', 'fehlschlag')` erneut ab, über die GANZE Cache-DB — z. B. nachdem ein Anbieter fälschlich als gesperrt galt, obwohl er längst wieder funktioniert | `fetch_providers.py` (`retry_missing`) |
-| `bewerten` | Entscheidet je Song: Provider-Konsens, sonst Whisper-Verifikation, sonst Dauer-Heuristik (siehe „Wie der Algorithmus funktioniert" unten) | `evaluate_lyrics.py` |
-| `schreiben` | `.lrc` schreiben/löschen je nach Bewertung, JSON-Ordner-Cache pflegen | `write_lrc.py` |
+| `--scan` | Audio-Tags lesen, Song-Identität (Artist/Titel) in der Cache-DB anlegen. Braucht PFAD. | `scan_songs.py` |
+| `--abfragen` | Alle vier Anbieter (`lrclib`, `musixmatch`, `netease`, `genius`) gleichzeitig abfragen, Ergebnis in die Cache-DB schreiben — überspringt dabei Songs mit Skip-Genre (Hörbuch/Hörspiel/Instrumental/…) | `fetch_providers.py` (`fetch_all`) |
+| `--nachholen` | Nachhol-Modus: fragt gezielt nur (Song, Anbieter)-Kombinationen mit `status IN ('nichts', 'fehlschlag')` erneut ab — z. B. nachdem ein Anbieter fälschlich als gesperrt galt, obwohl er längst wieder funktioniert | `fetch_providers.py` (`retry_missing`) |
+| `--bewerten` | Entscheidet je Song: Provider-Konsens, sonst Whisper-Verifikation, sonst Dauer-Heuristik (siehe „Wie der Algorithmus funktioniert" unten) | `evaluate_lyrics.py` |
+| `--schreiben` | `.lrc` schreiben/löschen je nach Bewertung, JSON-Ordner-Cache pflegen. Braucht PFAD. | `write_lrc.py` |
+
+Mit PFAD grenzt jedes Flag (außer `--scan`/`--schreiben`, die ohnehin PFAD brauchen) auf die Songs unter PFAD ein; ohne PFAD arbeitet es über die GANZE Bibliothek (explizite „alles nachziehen"-Absicht). Das gilt auch für `--nachholen` — gezielt nur die fehlenden Anbieter EINES Albums nachholen ist damit möglich, ohne die ganze Bibliothek anzufassen.
 
 Für die lrclib-Quelle wird vor jeder echten Live-Abfrage zuerst ein lokaler LRCLib-Datenbank-Abzug durchsucht (`/Volumes/music/db.sqlite3`, falls erreichbar) — nur bei 0 Treffern dort wird wie bisher live gefragt. Kein eigenes Flag nötig; fehlt der Abzug (Mount nicht vorhanden), degradiert die Pipeline automatisch auf reines Live-Fragen (siehe `CACHE_DESIGN.md`).
 
 ```bash
-python3 songtext_pipeline.py "Artist - Album/"                              # alle 5 Phasen, ein Album
-python3 songtext_pipeline.py "/Pfad/zur/Datei.flac"                        # alle 5 Phasen, eine Datei
-python3 songtext_pipeline.py --recursive "/Musik/"                          # alle 5 Phasen, ganze Bibliothek
-python3 songtext_pipeline.py "/Musik/" --phase abfragen,bewerten,schreiben  # nur ausgewählte Phasen
-python3 songtext_pipeline.py --phase nachholen                              # nur Nachhol-Modus, ganze Bibliothek, kein PFAD nötig
+python3 songtext_pipeline.py "Artist - Album/"                        # alle 5 Schritte, ein Album
+python3 songtext_pipeline.py "/Pfad/zur/Datei.flac"                   # alle 5 Schritte, eine Datei
+python3 songtext_pipeline.py --recursive "/Musik/"                    # alle 5 Schritte, ganze Bibliothek
+python3 songtext_pipeline.py "/Musik/" --abfragen --bewerten --schreiben  # nur ausgewählte Schritte
+python3 songtext_pipeline.py --nachholen                              # nur Nachhol-Modus, ganze Bibliothek
+python3 songtext_pipeline.py "Artist - Album/" --nachholen             # Nachhol-Modus nur für dieses Album
 ```
 
 **Optionen:**
 
 | Flag | Bedeutung |
 |------|-----------|
-| `--recursive`, `-r` | Alle Unterordner rekursiv durchsuchen |
-| `--phase LISTE` | Kommagetrennte Phasen-Auswahl (`scan`, `abfragen`, `nachholen`, `bewerten`, `schreiben`). Ohne `--phase` laufen alle 5 Phasen nacheinander. |
+| `--recursive`, `-r` | Unterordner von PFAD mit einbeziehen |
+| `--scan` | siehe Tabelle oben |
+| `--abfragen` | siehe Tabelle oben |
+| `--nachholen` | siehe Tabelle oben |
+| `--bewerten` | siehe Tabelle oben |
+| `--schreiben` | siehe Tabelle oben |
 | `-h`, `--help` | Hilfe anzeigen |
 
-Ohne PFAD arbeiten `abfragen`/`bewerten` bewusst über die GANZE Bibliothek (explizite „alles nachziehen"-Absicht); mit PFAD nur über die Songs des aktuellen Laufs. `nachholen` läuft ausschließlich ohne PFAD (arbeitet immer über die ganze Bibliothek) — ist trotzdem ein PFAD gesetzt, wird die Phase komplett übersprungen statt eingegrenzt. `scan`/`bewerten`/`schreiben` brauchen für Datei-Zuordnung/Whisper-Zugriff/Schreiben zusätzlich eine echte Audiodatei — ohne PFAD werden sie mit einem Hinweis übersprungen statt einen Fehler zu werfen.
+Kein Schritt-Flag angegeben → kompletter Normal-Durchlauf: `--scan --abfragen --nachholen --bewerten --schreiben`, in dieser Reihenfolge. Mindestens ein Schritt-Flag angegeben → nur die angegebenen Schritte laufen, weiterhin in derselben festen Reihenfolge. `--scan`/`--schreiben` brauchen für Datei-Zuordnung/Schreiben zwingend PFAD — ohne PFAD werden sie mit einem Hinweis übersprungen statt einen Fehler zu werfen.
 
-`lyrics_core.py` bündelt die eigentliche Such-/Bewertungslogik (Provider-Abfragen, Whisper, Cache-Helfer) als reine, von allen fünf Phasen geteilte Bibliothek — hat kein eigenes CLI und wird nicht direkt aufgerufen.
+`lyrics_core.py` bündelt die eigentliche Such-/Bewertungslogik (Provider-Abfragen, Whisper, Cache-Helfer) als reine, von allen Schritten geteilte Bibliothek — hat kein eigenes CLI und wird nicht direkt aufgerufen.
 
 **Unterstützte Formate:** FLAC, MP3, OGG, Opus, M4A, AAC, WAV
 
@@ -184,14 +193,14 @@ Für jeden Track läuft folgendes Verfahren — in dieser Reihenfolge:
 **Vorab-Filter**
 
 - Tracks ohne Artist- *und* Title-Tag werden übersprungen (kein sinnvoller Suchbegriff).
-- Tracks mit Genre-Tags wie `Instrumental`, `Hörbuch`, `Podcast` o.ä. werden übersprungen (Phase `abfragen`).
-- Bereits im JSON-Ordner-Cache gespeicherte Ergebnisse werden nicht erneut geschrieben (Phase `schreiben`, siehe unten).
+- Tracks mit Genre-Tags wie `Instrumental`, `Hörbuch`, `Podcast` o.ä. werden übersprungen (Schritt `--abfragen`).
+- Bereits im JSON-Ordner-Cache gespeicherte Ergebnisse werden nicht erneut geschrieben (Schritt `--schreiben`, siehe unten).
 
-**Provider-Abfragen** (Phase `abfragen`/`nachholen`)
+**Provider-Abfragen** (Schritt `--abfragen`/`--nachholen`)
 
 Die vier Anbieter `lrclib`, `musixmatch`, `netease` und `genius` werden gleichzeitig befragt (je max. 20 s Timeout). Artist und Titel kommen aus den Audio-Tags. Klammer-Zusätze im Titel (`(Live In Osaka Japan 16th August 1972)`, `[Deluxe Edition 2014 Remix]` u.ä.) werden für den Suchbegriff entfernt — Lyrics-Provider kennen meist nur den Kern-Titel, der Songtext ist ohnehin identisch zur Studio-Version. Title-Tag und Dateiname bleiben davon unberührt. Identische LRCs von verschiedenen Anbietern (gespiegelte Datenbanken) werden per Inhalt-Hash dedupliziert.
 
-**Provider-Konsens (Schnellweg)** (Phase `bewerten`)
+**Provider-Konsens (Schnellweg)** (Schritt `--bewerten`)
 
 Wenn mindestens 3 Anbieter eine LRC geliefert haben und deren Texte untereinander zu mindestens 40 % übereinstimmen (Jaccard-Ähnlichkeit), gilt das als Konsens. Der repräsentativste Kandidat — also der mit der höchsten Durchschnitts-Ähnlichkeit zu allen anderen — wird ohne Whisper-Prüfung gespeichert. Ausreißer-Anbieter (falscher Song, andere Sprache) werden dadurch automatisch übergangen.
 
@@ -217,7 +226,7 @@ Die kontrastive Marge braucht dafür immer eine offene Cache-DB als Hintergrund-
 
 → Bei „kein Vokal erkannt" werden die Provider-LRCs untereinander verglichen (Jaccard). Stimmen mindestens 2 Provider zu ≥ 40 % überein, wird die repräsentativste LRC gespeichert — als „Konsens (kein Vokal)". Sind die Provider sich uneinig, wird nichts gespeichert.
 
-**Ohne Audiodatei** (Phase `bewerten` ohne zugeordnete Datei, z. B. bei einem eigenständigen Lauf ohne PFAD): Whisper entfällt, es entscheidet eine reine Dauer-Heuristik — der Kandidat mit dem besten `_score_lrc`-Wert wird genommen, außer seine Dauer weicht zu stark vom Track ab, dann wird nichts gespeichert (`reason: "dauer-abweichung"`).
+**Ohne Audiodatei** (Schritt `--bewerten` ohne zugeordnete Datei, z. B. bei einem eigenständigen Lauf ohne PFAD): Whisper entfällt, es entscheidet eine reine Dauer-Heuristik — der Kandidat mit dem besten `_score_lrc`-Wert wird genommen, außer seine Dauer weicht zu stark vom Track ab, dann wird nichts gespeichert (`reason: "dauer-abweichung"`).
 
 ---
 
@@ -248,7 +257,7 @@ Beispiele:
 09:28:20  Artist/Album/07 Song.flac  2/4: lrclib, genius │ [medium] en Whisper 12W unter Schwelle idf-jacc=0.023  –
 09:28:20  Artist/Album/08 Song.flac  0/4: — │ kein Provider  –
 ```
-Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Phase `abfragen` keine Provider-Kandidaten bekommen und zeigt sich hier deshalb nicht anders als „kein Provider" — die genauere Ursache steht nur noch in der Konsole von Phase `abfragen` selbst, nicht mehr im Datei-Ergebnis von Phase `schreiben`.
+Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Schritt `--abfragen` keine Provider-Kandidaten bekommen und zeigt sich hier deshalb nicht anders als „kein Provider" — die genauere Ursache steht nur noch in der Konsole von Schritt `--abfragen` selbst, nicht mehr im Datei-Ergebnis von Schritt `--schreiben`.
 
 - **Modell**: `[medium]` (englische Songs) oder `[large-v3]` (alle anderen Sprachen), siehe „Whisper-Verifikation" oben
 - **Sprache**: z.B. `de`, `en` — von `langdetect` erkannt, als Hint an Whisper übergeben
@@ -260,19 +269,19 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Phase `a
 
 #### Cache und Hilfs-Skripte
 
-**Cache** (`.fetch_songtext.json` pro Ordner, Dateiname bewusst unverändert seit `fetch_songtext.py`): Ein Eintrag pro Track — Phase `schreiben` überspringt einen Track beim nächsten Lauf, wenn der Eintrag noch gültig ist.
+**Cache** (`.fetch_songtext.json` pro Ordner, Dateiname bewusst unverändert seit `fetch_songtext.py`): Ein Eintrag pro Track — Schritt `--schreiben` überspringt einen Track beim nächsten Lauf, wenn der Eintrag noch gültig ist.
 
-**Parallele Instanzen:** Sowohl `songtext_pipeline.py --recursive` als auch mehrere gleichzeitig laufende `cut.py`-Sessions können bewusst gleichzeitig über dieselbe Bibliothek laufen. Jede Instanz sperrt sich beim Betreten eines Ordners (Phase `schreiben`) exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
+**Parallele Instanzen:** Sowohl `songtext_pipeline.py --recursive` als auch mehrere gleichzeitig laufende `cut.py`-Sessions können bewusst gleichzeitig über dieselbe Bibliothek laufen. Jede Instanz sperrt sich beim Betreten eines Ordners (Schritt `--schreiben`) exklusiv über `.fetch_songtext.lock` (pro Ordner) — hält eine andere Instanz den Ordner bereits, wird er komplett übersprungen statt doppelt bearbeitet zu werden.
 
-**Globale IDF-Tabelle für die kontrastive Marge:** Keine separate Datei — die Dokumentfrequenz je Wort wird bei jedem Lauf aus `texte.inhalt` der Cache-DB (`fetch_songtext_cache.db`) gebaut (`lyrics_core._global_cache_idf`), zusammen mit einem Hintergrund-Pool je Sprache (ein Provider-Treffer-Text pro Cache-Song, Sprache über denselben `langdetect`-Mechanismus erkannt). Phase `bewerten` baut Whisper-Modell(e) und diesen Kontext einmal pro Lauf auf (`lyrics_core._build_contrastive_context`), nicht pro Song. Whisper-Verifikation ohne offene Cache-DB ist nicht möglich.
+**Globale IDF-Tabelle für die kontrastive Marge:** Keine separate Datei — die Dokumentfrequenz je Wort wird bei jedem Lauf aus `texte.inhalt` der Cache-DB (`fetch_songtext_cache.db`) gebaut (`lyrics_core._global_cache_idf`), zusammen mit einem Hintergrund-Pool je Sprache (ein Provider-Treffer-Text pro Cache-Song, Sprache über denselben `langdetect`-Mechanismus erkannt). Schritt `--bewerten` baut Whisper-Modell(e) und diesen Kontext einmal pro Lauf auf (`lyrics_core._build_contrastive_context`), nicht pro Song. Whisper-Verifikation ohne offene Cache-DB ist nicht möglich.
 
-**Cache-Modul** (`fetch_songtext_cache.db`, neben den Skripten; Design siehe `CACHE_DESIGN.md`): normalisiertes Schema — `songs` (ein Künstler/Titel = eine Zeile) verknüpft mit `ergebnisse` (ein Versuch je Provider, bis zu vier pro Song), `texte` (jeder Liedtext-Inhalt einmal, per Fingerabdruck dedupliziert) und `transkripte` (ein Whisper-Transkript je Song, gleiche Künstler+Titel-Identität wie `songs` — nicht an Datei/Modell/Parameter gebunden). Speichert erfolgreiche Provider-Antworten und Whisper-Transkripte, damit ein Neuaufbau der Bibliothek nach Code-Änderungen ohne erneute Provider-Abfragen/Whisper-Läufe möglich ist. Jeder Provider-Versuch wird festgehalten — auch ein Fehlschlag (`status="fehlschlag"` mit `fehlergrund`: `rate_limit`/`captcha`/`timeout`/`gesperrt`), aber ein Fehlschlag zählt nie als gültiger Cache-Treffer (immer erneuter Live-Versuch, außer über Phase `nachholen`, siehe oben). Eskaliert der Rate-Limit-Backoff eines Providers auf 5 Treffer in Folge (z.B. dauerhaft blockiertes Musixmatch-Captcha), wird er für 15 Minuten komplett übersprungen statt bei jedem Song erneut zu warten — der Fehlschlag wird dabei sofort (ohne Live-Versuch) mit `fehlergrund="gesperrt"` festgehalten. Provider-Treffer verfallen nach 30 Tagen.
+**Cache-Modul** (`fetch_songtext_cache.db`, neben den Skripten; Design siehe `CACHE_DESIGN.md`): normalisiertes Schema — `songs` (ein Künstler/Titel = eine Zeile) verknüpft mit `ergebnisse` (ein Versuch je Provider, bis zu vier pro Song), `texte` (jeder Liedtext-Inhalt einmal, per Fingerabdruck dedupliziert) und `transkripte` (ein Whisper-Transkript je Song, gleiche Künstler+Titel-Identität wie `songs` — nicht an Datei/Modell/Parameter gebunden). Speichert erfolgreiche Provider-Antworten und Whisper-Transkripte, damit ein Neuaufbau der Bibliothek nach Code-Änderungen ohne erneute Provider-Abfragen/Whisper-Läufe möglich ist. Jeder Provider-Versuch wird festgehalten — auch ein Fehlschlag (`status="fehlschlag"` mit `fehlergrund`: `rate_limit`/`captcha`/`timeout`/`gesperrt`), aber ein Fehlschlag zählt nie als gültiger Cache-Treffer (immer erneuter Live-Versuch, außer über Schritt `--nachholen`, siehe oben). Eskaliert der Rate-Limit-Backoff eines Providers auf 5 Treffer in Folge (z.B. dauerhaft blockiertes Musixmatch-Captcha), wird er für 15 Minuten komplett übersprungen statt bei jedem Song erneut zu warten — der Fehlschlag wird dabei sofort (ohne Live-Versuch) mit `fehlergrund="gesperrt"` festgehalten. Provider-Treffer verfallen nach 30 Tagen.
 
-**Felder je Eintrag** (JSON-Ordner-Cache, geschrieben von Phase `schreiben`):
+**Felder je Eintrag** (JSON-Ordner-Cache, geschrieben von Schritt `--schreiben`):
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | z.B. `"1.13.4"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
+| `v` | z.B. `"1.13.5"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
 | `r` | `"ok"` / `"nf"` | Ergebnis: LRC vorhanden / nicht gefunden |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
@@ -280,7 +289,7 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Phase `a
 | `method` | `"whisper-medium"` / `"whisper-large-v3"` / `"konsens"` / `"heuristik"` / `null` | Entscheidungsweg — Whisper-Modell je nach Sprache, siehe oben |
 | `no_vocal` | `true` / `false` | Whisper-Pass hat keinen Gesang erkannt (bei `method=konsens`: Konsens trotzdem möglich) |
 | `score` | `0.0`–`1.0` / `null` | Whisper-IDF-Jaccard oder Jaccard-Konsens |
-| `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"dauer-abweichung"` | Grund bei `r="nf"`. Skip-Genre-Tracks (Hörbuch/Hörspiel/Instrumental/…) landen hier ebenfalls als `"kein-provider"` — der Skip passiert schon in Phase `abfragen`, siehe „Ausgabe-Zeichen" oben. |
+| `reason` | `"kein-provider"` / `"kein-vokal"` / `"unter-schwelle"` / `"dauer-abweichung"` | Grund bei `r="nf"`. Skip-Genre-Tracks (Hörbuch/Hörspiel/Instrumental/…) landen hier ebenfalls als `"kein-provider"` — der Skip passiert schon in Schritt `--abfragen`, siehe „Ausgabe-Zeichen" oben. |
 | `words` | `0`–`n` / `null` | Von Whisper transkribierte Wörter |
 | `language` | `"de"` / `"en"` / … / `null` | Erkannte Sprache (Hint an Whisper) |
 | `ts` | ISO-8601 | Zeitstempel des Laufs |
@@ -289,13 +298,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.13.4", "r": "ok", "outcome": "write",
+  "v": "1.13.5", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
   "method": "whisper-large-v3", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.13.4", "r": "nf", "outcome": "delete",
+  "v": "1.13.5", "r": "nf", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "kein-provider", "words": null, "language": null, "ts": "2026-07-09T09:28:25"
@@ -325,7 +334,7 @@ python3 db_analyse.py
 python3 db_analyse.py --db /pfad/zu/anderer.db
 ```
 
-Ausgabe: Treffer-/Nichts-/Fehlschlag-Quote je Anbieter inkl. Fehlschlag-Gründen, Songs ganz ohne Provider-Treffer, Songs mit allen 4 Providern fehlgeschlagen (Kandidaten für `--phase nachholen`), Whisper-Transkript-Abdeckung + Modell-Aufschlüsselung, Provider-Aktivität der letzten 24h/7 Tage.
+Ausgabe: Treffer-/Nichts-/Fehlschlag-Quote je Anbieter inkl. Fehlschlag-Gründen, Songs ganz ohne Provider-Treffer, Songs mit allen 4 Providern fehlgeschlagen (Kandidaten für `--nachholen`), Whisper-Transkript-Abdeckung + Modell-Aufschlüsselung, Provider-Aktivität der letzten 24h/7 Tage.
 
 **`whisper_analyse.py`** — zeigt speziell, ob und warum Whisper pro Track gelaufen ist (unabhängig von der Skriptversion des Cache-Eintrags):
 

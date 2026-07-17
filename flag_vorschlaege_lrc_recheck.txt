@@ -1,0 +1,86 @@
+GEPLANTE --help-AUSGABE FÜR songtext_pipeline.py (ohne "--phase")
+
+Wichtigste Änderung ggü. heute: --nachholen darf jetzt mit PFAD zusammen
+benutzt werden. Es wird dann nur für die Songs aus PFAD ausgeführt, genau
+wie --abfragen und --bewerten das schon können. Bisher wurde --nachholen
+bei PFAD komplett übersprungen (nur ganze Bibliothek möglich) — das war
+der Punkt, den du zu Recht bemängelt hast.
+
+────────────────────────────────────────────────────────────────────────────
+$ python3 songtext_pipeline.py --help
+
+usage: songtext_pipeline.py [-h] [--recursive] [--scan] [--abfragen]
+                             [--nachholen] [--bewerten] [--schreiben]
+                             [--nachpruefen]
+                             [PFAD]
+
+Songtexte suchen, prüfen und speichern.
+
+positional arguments:
+  PFAD             Audiodatei oder Ordner. Weggelassen = ganze Bibliothek
+                    (nur sinnvoll zusammen mit Anbieter-/Prüf-Flags, die
+                    keine echte Datei brauchen, siehe unten).
+
+optionale Flags (mehrere gleichzeitig erlaubt):
+  --recursive, -r  Unterordner von PFAD mit einbeziehen
+
+  --scan           Tags lesen, Song in der Datenbank anlegen.
+                    Braucht PFAD.
+
+  --abfragen       Anbieter (lrclib, musixmatch, netease, genius) live
+                    abfragen und Ergebnis in der Datenbank speichern.
+                    Mit PFAD: nur Songs aus PFAD.
+                    Ohne PFAD: die ganze Bibliothek.
+
+  --nachholen      Nur die Anbieter nochmal fragen, bei denen bisher
+                    nichts gefunden wurde oder die fehlgeschlagen sind.
+                    Mit PFAD: nur Songs aus PFAD.
+                    Ohne PFAD: die ganze Bibliothek.
+
+  --bewerten       Entscheiden: Konsens der Anbieter, sonst Whisper-Check,
+                    sonst Dauer-Heuristik.
+                    Mit PFAD: nur Songs aus PFAD.
+                    Ohne PFAD: die ganze Bibliothek.
+
+  --schreiben      .lrc-Datei schreiben oder löschen, je nach Entscheidung
+                    aus --bewerten.
+                    Braucht PFAD.
+
+  --nachpruefen    Schon akzeptierte .lrc-Dateien NEU prüfen, auch wenn
+                    sich in der Datenbank nichts geändert hat (z.B. weil
+                    inzwischen ein besseres Whisper-Modell da ist).
+                    Überschreibt die Datei bei abweichendem Ergebnis.
+                    Läuft NIE von allein mit, immer nur wenn ausdrücklich
+                    angegeben.
+                    Mit PFAD: nur Songs aus PFAD.
+                    Ohne PFAD: die ganze Bibliothek.
+
+  -h, --help       Diese Hilfe anzeigen
+
+Kein Flag angegeben:
+  Läuft der normale Komplett-Durchlauf: scan, abfragen, nachholen,
+  bewerten, schreiben — in dieser Reihenfolge, jeweils auf PFAD eingegrenzt
+  falls PFAD angegeben ist. --nachpruefen ist davon ausgenommen, das muss
+  immer extra angegeben werden.
+
+────────────────────────────────────────────────────────────────────────────
+
+BEISPIELE
+
+  Ganze Bibliothek, alles wie gewohnt:
+    python3 songtext_pipeline.py --recursive "/Musik/"
+
+  Nur ein Album, alles:
+    python3 songtext_pipeline.py "Artist - Album/"
+
+  Nur ein Album, gezielt fehlende Anbieter nachholen (das ging vorher NICHT):
+    python3 songtext_pipeline.py "Artist - Album/" --nachholen
+
+  Nur abfragen und bewerten, nichts schreiben:
+    python3 songtext_pipeline.py "/Musik/" --abfragen --bewerten
+
+  Ganze Bibliothek neu prüfen (altes Whisper-Modell nachziehen):
+    python3 songtext_pipeline.py --nachpruefen
+
+  Nur ein Album neu prüfen:
+    python3 songtext_pipeline.py "Artist - Album/" --nachpruefen

@@ -506,6 +506,66 @@ auch OHNE neue DB-Daten neu bewerten kann (z.B. weil inzwischen ein besseres
 Whisper-Modell zur Verfügung steht) — auf die To-do-Liste vertagt, siehe
 Punkt 3 oben.
 
+**✓ Nachtrag — `--phase LISTE` ersatzlos entfernt, jeder Schritt hat jetzt
+sein eigenes Flag; `--nachholen` funktioniert jetzt mit PFAD.** Nutzer-
+Feedback beim Entwurf des geplanten "Plausibilitätsprüfung"-Flags (Punkt 3
+oben): "nimm doch mal alles was das tool kann und können soll und
+entwickle die passenden sprechenden Flags dafür. Kein Mensch braucht im
+Flag den Begriff 'phase'." Das Sammel-Flag `--phase scan,abfragen,...`
+(erst kürzlich von Zahlen auf sprechende Namen umgestellt, siehe Nachtrag
+weiter oben) ist damit selbst schon überholt — jeder der 5 Schritte
+bekommt stattdessen sein eigenes boolesches Flag: `--scan`, `--abfragen`,
+`--nachholen`, `--bewerten`, `--schreiben`. Kein Flag angegeben → kompletter
+Normal-Durchlauf (alter Standard ohne `--phase`); mindestens ein Flag
+angegeben → nur die gewählten Schritte, weiterhin in fester Reihenfolge.
+
+Im selben Zug fiel eine zweite, unabhängige Einschränkung auf, die der
+Nutzer direkt mitkorrigiert haben wollte: "wenn ich einen pfad mitgebe gilt
+das flag auch nur für die dateien, song + artist, die darin enthalten sind.
+sonst kann ich ja keinen gezielten --nachholen machen." Vorher wurde
+`--nachholen`/Phase 3 bei gesetztem PFAD komplett übersprungen (siehe
+Nachtrag "Fix B" weiter oben) -- `fetch_providers.retry_missing()` kannte
+keinen Scope-Parameter, nur eine artist/title-Eingrenzung für genau einen
+Künstler/Song (Rest von `fetch_songtext.py --retry-missing --artist/
+--title`, siehe Git-Historie). **Fix:** `lyrics_core._retry_missing()`
+bekommt einen neuen `song_ids`-Parameter (Vorrang vor artist/title, falls
+gesetzt; eine LEERE Liste bedeutet bewusst "nichts zu tun", nicht "keine
+Eingrenzung" -- sonst wäre `"... IN ()"` ungültiges SQL).
+`fetch_providers.retry_missing()` bekommt denselben `scope`-Parameter wie
+`fetch_all()`/`evaluate_all()` (Menge von `(artist_key, titel_key)`) und
+löst ihn zu `song_ids` auf. `songtext_pipeline.py` berechnet den Scope für
+`--nachholen` jetzt genauso wie für `--abfragen`/`--bewerten` (frisch pro
+Schritt, nach einem eventuellen `--scan` im selben Lauf) -- die alte
+Sonderregel "PFAD gesetzt → nachholen überspringen" ist komplett entfallen.
+
+Konsolen-Ausgaben von "Phase 1 (scan_songs): ..." usw. auf schlichte
+"scan: ...", "abfragen: ...", "nachholen:", "bewerten: ...", "schreiben:
+..." umgestellt -- passend zum neuen Flag-Namen, ohne "Phase N"-Nummerierung.
+README.md komplett auf die neuen Flags umgestellt (Tabelle statt
+Phasen-Liste), `fetch_providers.py`/`scan_songs.py`/`write_lrc.py`/
+`db_analyse.py` von stehen gebliebenen `--phase`-Erwähnungen bereinigt.
+
+Design vorab in einer eigenen Textdatei (`flag_vorschlaege_lrc_recheck.txt`)
+mit dem Nutzer abgestimmt, inklusive einem ersten Opus-Entwurf (auf
+Nutzer-Wunsch: "denk aber nach, nimm opus zuhilfe") für den noch
+zurückgestellten `--nachpruefen`-Namen (Punkt 3) -- wichtigster Fund dabei:
+`--recheck` kollidiert mit dem bereits bestehenden, aber semantisch
+anderen `lrc_recheck.py` und schied deshalb aus.
+
+Testmigration: die 6 `_parse_phase_list`-Tests entfielen (Funktion
+gestrichen), alle `--phase`-CLI-Tests in `test_songtext_pipeline.py` auf die
+neuen Flags umgeschrieben, plus neue Tests für das Kernstück
+(`test_main_nachholen_mit_pfad_grenzt_auf_pfad_songs_ein`: ein Song IM PFAD
+mit gecachtem Fehlschlag wird retried, ein Song AUSSERHALB bleibt
+unangetastet; `test_main_nachholen_mit_pfad_ohne_treffer_bleibt_leer_...`:
+ein PFAD ohne passende Songs fällt nicht auf die ganze DB zurück). Neue
+Tests auch in `test_lyrics_core.py` (`song_ids`-Parameter, Vorrang vor
+artist/title, leere Liste) und `test_fetch_providers.py` (`scope`-Parameter,
+Auflösung zu `song_ids`, unbekannter Scope-Eintrag wird ignoriert,
+End-zu-Ende über die echte `_retry_missing`). Volle Suite: 456/456 grün
+(6 alte Tests entfernt, mehr neue hinzugekommen). `ruff check`/
+`ruff format` sauber.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der
@@ -2232,6 +2292,39 @@ Tests für `get_segments`, automatische Umbenennung der Ausgabedatei, ROADMAP ak
 
 ## ✓ v1.0 — Stabile Version
 README vollständig nachgezogen, Gesamtworkflow dokumentiert.
+
+## ✓ v1.1.6 — UI an cut.py angeglichen: Farbschema + Vorschaudauer live änderbar
+
+Auf Nutzerwunsch an `cut.py`/`cut_ui.py` angeglichen:
+
+- **Farbschema:** `assemble_ui.py` nutzte durchgängig das rich-Attribut
+  `style="dim"` (+ `[dim]`/`[/dim]`-Markup in Subtitles), `cut_ui.py`
+  stattdessen die explizite Farbe `"grey35"` (`"blue dim"` als Border-Farbe
+  und `"dim yellow"` für noch-nicht-erreichte Status-Symbole blieben in
+  beiden Dateien unverändert — nur der reine `"dim"`-Fall wurde ersetzt).
+  Alle 26 betroffenen Stellen in `assemble_ui.py` umgestellt, per
+  `sed`-Ersetzung + Gegenprobe (Anzahl vorher/nachher gezählt).
+- **Vorschaudauer live änderbar (`p<Sek>`):** `cut.py` erlaubt, die
+  Snippet-Länge während der Bedienung per `p18` etc. zu ändern
+  (`parse_preview_duration()`, Grenzen 2–30s). `assemble.py` hatte dafür
+  bisher gar keinen Mechanismus — Phase 1 (Punkt-Vorschau) lief immer mit
+  der festen `DEFAULT_PLAY_DURATION`, Phase 2 (Crossfade-Vorschau) nur mit
+  dem einmal beim Start gesetzten `--preview`-Wert. `parse_preview_duration()`
+  1:1 aus `cut.py` übernommen; **beide** Phasen (nicht nur Phase 1, das
+  einzige Äquivalent in cut.py) haben jetzt eigene, live per `p<Sek>`
+  änderbare Werte — Phase 1 und Phase 2 sind in `assemble.py` zwei
+  unterschiedliche Vorschau-Mechanismen ohne 1:1-Entsprechung in cut.py,
+  deshalb beide konsistent nachgezogen (Nutzerentscheidung).
+- **Anzeige:** Die Steuerzeile in beiden Panels zeigt jetzt
+  `[p] {dauer}s abspielen  [p<Sek>] Dauer ändern (2-30s)` — genau wie in
+  `cut_ui.py`. `skip_play`-Mechanik ergänzt (wie in `cut.py`): eine
+  Dauer-Änderung spielt nicht sofort erneut ab, sondern nur auf explizites
+  `[p]` danach.
+
+Manuell mit `rich.Console` gerendert (keine echte Audiodatei nötig) zur
+Kontrolle auf Rendering-Fehler — echter interaktiver Test mit Audiodatei
+steht noch aus (siehe CLAUDE.md: UI-Änderungen gelten erst nach Bestätigung
+im laufenden Programm als abgeschlossen).
 
 ## ✓ v1.1.5 — Bugfix: UI zeigte noch "-0.1 dBFS" statt echtem Zielwert
 

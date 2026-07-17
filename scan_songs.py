@@ -12,7 +12,7 @@ cache_store.py, Schema-Dokumentation) -- eine Erweiterung dafür wäre eine
 Schema-Änderung, die (Stand Meilenstein 1) nicht abgesegnet ist. _load_release
 (liest Dauer aus release.json) wird deshalb hier bewusst NICHT eingebunden.
 
-Wird von songtext_pipeline.py für --phase scan aufgerufen (siehe dort, main()).
+Wird von songtext_pipeline.py für --scan aufgerufen (siehe dort, main()).
 """
 
 from __future__ import annotations

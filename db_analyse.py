@@ -56,7 +56,7 @@ def collect_stats(conn: sqlite3.Connection) -> dict:
     stats["fehlschlag_gruende"] = fehlschlag_gruende
 
     # Songs ohne jeden Provider-Treffer (0/4) bzw. mit allen 4 Providern als
-    # Fehlschlag (Kandidaten für --phase nachholen, siehe ROADMAP.md).
+    # Fehlschlag (Kandidaten für --nachholen, siehe ROADMAP.md).
     stats["songs_ohne_treffer"] = conn.execute(
         "SELECT COUNT(*) FROM songs s WHERE NOT EXISTS ("
         "  SELECT 1 FROM ergebnisse e WHERE e.song_id = s.id AND e.status = 'treffer'"
@@ -135,7 +135,7 @@ def print_stats(stats: dict) -> None:
     print(
         f"Songs mit allen {len(_ALL_PROVIDERS)} Providern fehlgeschlagen: "
         f"{stats['songs_alle_fehlgeschlagen']} "
-        "(Kandidaten für --phase nachholen)"
+        "(Kandidaten für --nachholen)"
     )
 
     print(f"\nWHISPER-TRANSKRIPTE: {stats['transkripte_gesamt']} von {songs} Songs")

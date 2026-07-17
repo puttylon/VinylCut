@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """Steuer-Skript für die Songtexte-Pipeline.
 
-Orchestriert die 5 Phasen aus dem Architektur-Dokument
-"workflow für songexte.txt" (Abschnitt "ZIELARCHITEKTUR"): scannen, Anbieter
-abfragen, Anbieter nachholen, bewerten, .lrc schreiben. Alle 5 Phasen laufen
-inzwischen echt (siehe ROADMAP.md, "Songtexte-Pipeline-Umbau").
+Orchestriert die 5 Schritte aus dem Architektur-Dokument "workflow für
+songexte.txt" (Abschnitt "ZIELARCHITEKTUR"): scannen, Anbieter abfragen,
+Anbieter nachholen, bewerten, .lrc schreiben. Jeder Schritt hat sein eigenes
+Flag -- KEIN Sammel-Flag mehr (Nutzer-Feedback: "kein Mensch braucht im Flag
+den Begriff 'phase'"). Frühere Versionen kannten `--phase LISTE`; das ist
+mit diesem Umbau ersatzlos entfallen (siehe ROADMAP.md).
 
 Verwendung:
     python3 songtext_pipeline.py PFAD [--recursive]
-        Alle 5 Phasen nacheinander -- "nachholen" wird dabei automatisch
-        übersprungen, siehe unten.
-    python3 songtext_pipeline.py PFAD --phase abfragen,bewerten,schreiben
-        Nur die angegebenen Phasen.
-    python3 songtext_pipeline.py --phase nachholen
-        Nur der Nachhol-Modus von fetch_providers -- reine Cache-DB-Operation
-        über die GANZE Bibliothek. Läuft NUR, wenn GAR KEIN PFAD angegeben
-        ist: wird trotzdem ein PFAD mitgegeben, wird "nachholen" komplett
-        übersprungen (nicht auf PFAD eingegrenzt) -- ist PFAD gesetzt, wird
-        NUR dieser PFAD verarbeitet, siehe main().
+        Kein Schritt-Flag angegeben -> kompletter Normal-Durchlauf: scan,
+        abfragen, nachholen, bewerten, schreiben (in dieser Reihenfolge).
+    python3 songtext_pipeline.py PFAD --abfragen --bewerten --schreiben
+        Nur die angegebenen Schritte.
+    python3 songtext_pipeline.py --nachholen
+        Nur der Nachhol-Modus, über die GANZE Bibliothek (kein PFAD nötig).
+    python3 songtext_pipeline.py PFAD --nachholen
+        Nachhol-Modus NUR für die Songs unter PFAD (seit diesem Umbau
+        möglich -- vorher wurde --nachholen bei gesetztem PFAD komplett
+        übersprungen, siehe ROADMAP.md).
+
+Jeder Schritt ist einzeln UND in beliebiger Kombination aufrufbar, jeweils
+auf PFAD eingegrenzt, wenn PFAD gesetzt ist (sonst: ganze Bibliothek).
+--scan/--schreiben brauchen zwingend eine echte Audiodatei, also PFAD.
 """
 
 from __future__ import annotations
@@ -32,56 +38,6 @@ import fetch_providers
 import lyrics_core
 import scan_songs
 import write_lrc
-
-# Sprechende Namen statt Zahlen für --phase (Nutzer-Feedback: "phase" mit
-# Zahlen ist nicht sprechend) -- Werte spiegeln die Reihenfolge/Bedeutung aus
-# dem Architektur-Dokument ("scannen, Anbieter abfragen, Anbieter nachholen,
-# bewerten, .lrc schreiben"). Intern bleibt die Phase weiterhin eine Zahl
-# (1-5) -- nur die CLI-Schicht (Parsing/Fehlermeldungen/Hilfetexte) spricht
-# in Namen, main()s Dispatch-Logik (phase == 1/2/3/4/5) bleibt unverändert.
-_PHASE_NAMES: dict[str, int] = {
-    "scan": 1,
-    "abfragen": 2,
-    "nachholen": 3,
-    "bewerten": 4,
-    "schreiben": 5,
-}
-_ALL_PHASES = tuple(_PHASE_NAMES.values())
-# Phasen, die eine echte Audiodatei brauchen (siehe Design-Dokument, Abschnitt
-# 3 "PFAD und Audiodateien"): Phase 1 (scan) zum Scannen, Phase 4 (bewerten)
-# nur wenn Whisper den Song noch nie gehört hat, Phase 5 (schreiben) immer
-# (schreibt .lrc-Dateien). Alle anderen Phasen kommen ohne PFAD aus.
-_PHASES_NEEDING_FILE = frozenset({1, 4, 5})
-
-
-def _parse_phase_list(spec: str) -> list[int]:
-    """Parst z.B. "abfragen,bewerten,schreiben" oder "nachholen" zu einer
-    sortierten, eindeutigen Liste von Phasen-Zahlen (siehe _PHASE_NAMES).
-
-    Wirft ValueError mit einer sprechenden Meldung bei leeren oder
-    unbekannten Namen.
-    """
-    phases: list[int] = []
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if part not in _PHASE_NAMES:
-            raise ValueError(
-                f"Ungültige Phase: {part!r} (gültig: {', '.join(_PHASE_NAMES)})"
-            )
-        phases.append(_PHASE_NAMES[part])
-    if not phases:
-        raise ValueError("--phase braucht mindestens einen Wert")
-    return sorted(set(phases))
-
-
-def _phase_arg_type(spec: str) -> list[int]:
-    """argparse-`type`-Wrapper um _parse_phase_list für eine saubere CLI-Fehlermeldung."""
-    try:
-        return _parse_phase_list(spec)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e)) from None
 
 
 def build_file_song_map(
@@ -117,10 +73,29 @@ def build_file_song_map(
     return mapping
 
 
+def _scope_from_root(
+    root: Path | None, recursive: bool, conn: sqlite3.Connection
+) -> set[tuple[str, str]] | None:
+    """Berechnet den Scope (Menge von (artist_key, titel_key)) für root, oder
+    None ohne PFAD (= keine Eingrenzung, ganze Cache-DB -- bewusste "alles
+    nachziehen"-Absicht, siehe fetch_providers.fetch_all-Docstring).
+
+    Wird an mehreren Stellen in main() jeweils FRISCH aufgerufen, nie einmal
+    vorab wiederverwendet: läuft --scan im selben Aufruf VOR einem anderen
+    Schritt (Standardfall), stehen frisch gescannte Songs erst danach in der
+    "songs"-Tabelle -- eine vorher berechnete Zuordnung sähe sie noch nicht
+    (siehe ROADMAP.md, realer Bug: Datei-Zuordnung vor dem Scan zu klein).
+    """
+    if root is None:
+        return None
+    mapping = build_file_song_map(root, recursive, conn)
+    return {(artist_key, titel_key) for _, artist_key, titel_key in mapping}
+
+
 def fetch_providers_normal(
     conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
 ) -> None:
-    """Phase 2: Normal-Modus von fetch_providers -- fragt Songs in "songs"
+    """--abfragen: Normal-Modus von fetch_providers -- fragt Songs in "songs"
     bei allen 4 Anbietern ab (siehe fetch_providers.fetch_all).
 
     scope wird unverändert durchgereicht: ist er gesetzt (PFAD-Lauf, siehe
@@ -132,7 +107,7 @@ def fetch_providers_normal(
     die Anzahl wird separat sichtbar gemacht, nicht nur stillschweigend
     gezählt."""
     queried, skipped = fetch_providers.fetch_all(conn, scope=scope)
-    print(f"Phase 2 (fetch_providers, Normal-Modus): {queried} Song(s) abgefragt.")
+    print(f"abfragen: {queried} Song(s) abgefragt.")
     if skipped:
         print(
             f"  {skipped} Song(s) wegen Genre übersprungen "
@@ -140,15 +115,19 @@ def fetch_providers_normal(
         )
 
 
-def fetch_providers_nachhol(conn: sqlite3.Connection) -> None:
-    """Phase 3: Nachhol-Modus von fetch_providers -- fragt gezielt nur
+def fetch_providers_nachhol(
+    conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
+) -> None:
+    """--nachholen: Nachhol-Modus von fetch_providers -- fragt gezielt nur
     (Song, Provider)-Kombinationen mit status 'nichts'/'fehlschlag' erneut ab
-    (siehe fetch_providers.retry_missing), über die GANZE Cache-DB, kein
-    Scope-Parameter. Wird von main() nur aufgerufen, wenn kein PFAD gegeben
-    ist -- ist PFAD gesetzt, überspringt main() diese Phase komplett, bevor
-    diese Funktion je erreicht wird (siehe dortiger Kommentar)."""
-    print("Phase 3 (fetch_providers, Nachhol-Modus):")
-    fetch_providers.retry_missing(conn)
+    (siehe fetch_providers.retry_missing).
+
+    scope wie bei --abfragen: None (kein PFAD) = ganze Cache-DB, sonst nur
+    die Songs des aktuellen Laufs. Seit diesem Umbau möglich -- vorher wurde
+    --nachholen bei gesetztem PFAD komplett übersprungen, weil retry_missing
+    keinen Scope kannte (siehe ROADMAP.md)."""
+    print("nachholen:")
+    fetch_providers.retry_missing(conn, scope=scope)
 
 
 def evaluate_lyrics_normal(
@@ -156,19 +135,19 @@ def evaluate_lyrics_normal(
     scope: set[tuple[str, str]] | None = None,
     file_song_map: dict[tuple[str, str], Path] | None = None,
 ) -> None:
-    """Phase 4: bewertet Songs (Konsens/Whisper), siehe evaluate_lyrics.evaluate_all.
+    """--bewerten: bewertet Songs (Konsens/Whisper), siehe evaluate_lyrics.evaluate_all.
 
-    scope wie bei Phase 2 (None ohne PFAD = ganze DB, sonst nur die Songs des
-    aktuellen Laufs). file_song_map erlaubt Whisper bei Cache-Miss live zu
-    transkribieren -- ohne Eintrag fällt der Song auf Konsens/Dauer-Heuristik
-    zurück."""
+    scope wie bei --abfragen (None ohne PFAD = ganze DB, sonst nur die Songs
+    des aktuellen Laufs). file_song_map erlaubt Whisper bei Cache-Miss live
+    zu transkribieren -- ohne Eintrag fällt der Song auf Konsens/Dauer-
+    Heuristik zurück."""
     counts = evaluate_lyrics.evaluate_all(
         conn, scope=scope, file_song_map=file_song_map
     )
     if not counts:
         return
     print(
-        f"Phase 4 (evaluate_lyrics): {counts['konsens']} Konsens, "
+        f"bewerten: {counts['konsens']} Konsens, "
         f"{counts['whisper-akzeptiert']} Whisper akzeptiert, "
         f"{counts['abgelehnt']} abgelehnt, {counts['kein-provider']} ohne Provider."
     )
@@ -177,12 +156,12 @@ def evaluate_lyrics_normal(
 def write_lrc_normal(
     conn: sqlite3.Connection, file_song_map: list[tuple[Path, str, str]]
 ) -> None:
-    """Phase 5: schreibt/löscht .lrc-Dateien je nach Phase-4-Entscheidung
+    """--schreiben: schreibt/löscht .lrc-Dateien je nach --bewerten-Entscheidung
     (wird intern erneut berechnet, siehe write_lrc.write_all -- kein
     Ablageort in der DB nötig)."""
     counts = write_lrc.write_all(conn, file_song_map)
     print(
-        f"Phase 5 (write_lrc): {counts['updated']} geschrieben, "
+        f"schreiben: {counts['updated']} geschrieben, "
         f"{counts['skipped']} übersprungen, {counts['not_found']} nicht gefunden."
     )
 
@@ -202,71 +181,80 @@ def main() -> None:
         metavar="PFAD",
         help=(
             "Audiodatei oder Ordner (mit --recursive für Unterordner). "
-            "Nicht nötig für --phase nachholen (reine Cache-DB-Operation "
-            "über die ganze Bibliothek) -- ist PFAD trotzdem gesetzt, wird "
-            "'nachholen' komplett übersprungen statt eingegrenzt."
+            "Weggelassen = ganze Bibliothek (nur sinnvoll zusammen mit "
+            "--abfragen/--nachholen/--bewerten, die keine echte Datei "
+            "brauchen)."
         ),
     )
     parser.add_argument(
         "--recursive",
         "-r",
         action="store_true",
-        help="Alle Unterordner rekursiv durchsuchen",
+        help="Unterordner von PFAD mit einbeziehen",
     )
     parser.add_argument(
-        "--phase",
-        type=_phase_arg_type,
-        default=None,
-        metavar="LISTE",
+        "--scan",
+        action="store_true",
+        help="Tags lesen, Song in der Datenbank anlegen. Braucht PFAD.",
+    )
+    parser.add_argument(
+        "--abfragen",
+        action="store_true",
         help=(
-            "Kommagetrennte Phasen-Auswahl, z.B. 'abfragen,bewerten,"
-            "schreiben' oder 'nachholen' (gültig: "
-            f"{', '.join(_PHASE_NAMES)}). Ohne --phase laufen alle 5 "
-            "Phasen nacheinander."
+            "Anbieter (lrclib, musixmatch, netease, genius) live abfragen. "
+            "Mit PFAD: nur Songs aus PFAD. Ohne PFAD: die ganze Bibliothek."
+        ),
+    )
+    parser.add_argument(
+        "--nachholen",
+        action="store_true",
+        help=(
+            "Nur die Anbieter nochmal fragen, bei denen bisher nichts "
+            "gefunden wurde oder die fehlgeschlagen sind. Mit PFAD: nur "
+            "Songs aus PFAD. Ohne PFAD: die ganze Bibliothek."
+        ),
+    )
+    parser.add_argument(
+        "--bewerten",
+        action="store_true",
+        help=(
+            "Entscheiden: Konsens der Anbieter, sonst Whisper-Check, sonst "
+            "Dauer-Heuristik. Mit PFAD: nur Songs aus PFAD. Ohne PFAD: die "
+            "ganze Bibliothek."
+        ),
+    )
+    parser.add_argument(
+        "--schreiben",
+        action="store_true",
+        help=(
+            ".lrc-Datei schreiben oder löschen, je nach Entscheidung aus "
+            "--bewerten. Braucht PFAD."
         ),
     )
     args = parser.parse_args()
 
-    phases = args.phase if args.phase is not None else list(_ALL_PHASES)
+    # Kein einziges Schritt-Flag gesetzt -> kompletter Normal-Durchlauf (alter
+    # Standard ohne --phase). Mindestens ein Flag gesetzt -> NUR die
+    # angegebenen Schritte, in derselben festen Reihenfolge wie immer
+    # (scan -> abfragen -> nachholen -> bewerten -> schreiben).
+    any_step_selected = any(
+        [args.scan, args.abfragen, args.nachholen, args.bewerten, args.schreiben]
+    )
+    run_scan = args.scan or not any_step_selected
+    run_abfragen = args.abfragen or not any_step_selected
+    run_nachholen = args.nachholen or not any_step_selected
+    run_bewerten = args.bewerten or not any_step_selected
+    run_schreiben = args.schreiben or not any_step_selected
 
-    # Die Cache-Connection wird von jeder Phase gebraucht (alle 5 lesen/
+    # Die Cache-Connection wird von jedem Schritt gebraucht (alle lesen/
     # schreiben in der Cache-DB) -- deshalb immer geöffnet, unabhängig von
-    # PFAD. Phase 1/4/5 brauchen zusätzlich eine echte Audiodatei
-    # (_PHASES_NEEDING_FILE); PFAD fehlt aber, ist das kein Fehler -- die
-    # Datei-Zuordnung/der Scan wird einfach nicht versucht (siehe
-    # Design-Dokument, Abschnitt 3, Randfall b). Die Verbindung bleibt über
-    # die gesamte Phasen-Schleife offen (statt je Phase eine eigene).
+    # PFAD. --scan/--schreiben brauchen zusätzlich eine echte Audiodatei;
+    # fehlt PFAD, ist das kein Fehler -- der jeweilige Schritt meldet das nur
+    # und tut nichts (siehe Design-Dokument, Abschnitt 3, Randfall b).
     conn = cache_store.open_cache(_default_db_path())
-    # root wird immer aus PFAD aufgelöst, sobald PFAD gegeben ist (reines
-    # Path.resolve(), kein Datei-I/O) -- unabhängig davon, ob Phase 1/4
-    # gewählt sind. Grund: Phase 2 braucht root weiter unten in der Schleife
-    # ebenfalls, um sich auf die Songs des aktuellen Laufs einzugrenzen
-    # (siehe dort). Die folgende, informative "Datei-Zuordnung"-Vorab-
-    # Ausgabe bleibt an ihre bisherige Bedingung (Phase 1/4 gewählt)
-    # gebunden -- unverändert, eigener Zweck.
     root: Path | None = Path(args.path).resolve() if args.path else None
 
-    # Phase "nachholen" (3) läuft bewusst nur, wenn GAR KEIN PFAD angegeben
-    # ist -- dann arbeitet sie über die ganze Bibliothek (bewusste "alle
-    # Tracks aktualisieren"-Absicht). Ist PFAD gesetzt, wird NUR dieser PFAD
-    # verarbeitet: "nachholen" wird komplett ausgelassen (nicht auf PFAD
-    # eingegrenzt -- fetch_providers.retry_missing() kennt gar keinen Scope-
-    # Parameter, siehe dortiger Docstring). Präzisierte Nutzer-Vorgabe nach
-    # einem echten Testlauf (ROADMAP.md) -- ursprünglich sollte "nachholen"
-    # PFAD immer ignorieren, das war zu grob.
-    if root is not None and 3 in phases:
-        phases = [p for p in phases if p != 3]
-        print(
-            "Phase 'nachholen' übersprungen: läuft nur ohne PFAD "
-            "(arbeitet über die ganze Bibliothek)."
-        )
-
-    if not phases:
-        print("Keine Phase auszuführen.")
-        conn.close()
-        return
-
-    if root is not None and any(p in _PHASES_NEEDING_FILE for p in phases):
+    if root is not None and (run_scan or run_bewerten or run_schreiben):
         file_song_map = build_file_song_map(root, args.recursive, conn)
         print(
             f"Datei-Zuordnung: {len(file_song_map)} Datei(en) einem Song in "
@@ -274,57 +262,33 @@ def main() -> None:
         )
 
     try:
-        for phase in phases:
-            if phase == 1:
-                if root is None:
-                    print(
-                        "Phase 1 (scan_songs): kein PFAD angegeben, nichts zu scannen."
-                    )
-                    continue
+        if run_scan:
+            if root is None:
+                print("scan: kein PFAD angegeben, nichts zu scannen.")
+            else:
                 count = scan_songs.scan(root, args.recursive, conn)
-                print(f"Phase 1 (scan_songs): {count} Song(s) gescannt/aktualisiert.")
-            elif phase == 2:
-                # Scope MUSS hier, an dieser Stelle in der Schleife, frisch
-                # berechnet werden -- nicht vor der Schleife (siehe root oben):
-                # läuft Phase 1 im selben Aufruf VOR Phase 2 (Standardfall,
-                # Phasen laufen sortiert aufsteigend), stehen die gerade neu
-                # gescannten Songs erst JETZT in der "songs"-Tabelle. Eine
-                # vorher berechnete Zuordnung sähe sie noch nicht (siehe
-                # ROADMAP.md, realer Bug: "Datei-Zuordnung: 2 Datei(en)" vor
-                # Phase 1, obwohl das Album 17 Songs hatte).
-                #
-                # Ohne PFAD (root is None) bleibt scope=None -- fetch_all
-                # fragt dann bewusst die komplette Cache-DB ab (explizite
-                # Nutzerabsicht "ganze Bibliothek nachziehen").
-                scope: set[tuple[str, str]] | None = None
-                if root is not None:
-                    file_song_map = build_file_song_map(root, args.recursive, conn)
-                    scope = {
-                        (artist_key, titel_key)
-                        for _, artist_key, titel_key in file_song_map
-                    }
-                fetch_providers_normal(conn, scope=scope)
-            elif phase == 3:
-                fetch_providers_nachhol(conn)
-            elif phase == 4:
-                # Scope + Datei-Zuordnung frisch berechnet wie bei Phase 2 --
-                # Whisper braucht die Audiodatei nur bei einem Transkript-
-                # Cache-Miss, file_song_map deckt genau das ab.
-                scope = None
-                file_map: dict[tuple[str, str], Path] = {}
-                if root is not None:
-                    mapping = build_file_song_map(root, args.recursive, conn)
-                    scope = {(a, t) for _, a, t in mapping}
-                    file_map = {(a, t): p for p, a, t in mapping}
-                evaluate_lyrics_normal(conn, scope=scope, file_song_map=file_map)
-            elif phase == 5:
-                # Phase 5 braucht PFAD zwingend (schreibt echte Dateien) --
-                # ohne PFAD gibt es nichts zu schreiben, kein Fehler.
-                if root is None:
-                    print(
-                        "Phase 5 (write_lrc): kein PFAD angegeben, nichts zu schreiben."
-                    )
-                    continue
+                print(f"scan: {count} Song(s) gescannt/aktualisiert.")
+
+        if run_abfragen:
+            scope = _scope_from_root(root, args.recursive, conn)
+            fetch_providers_normal(conn, scope=scope)
+
+        if run_nachholen:
+            scope = _scope_from_root(root, args.recursive, conn)
+            fetch_providers_nachhol(conn, scope=scope)
+
+        if run_bewerten:
+            scope = _scope_from_root(root, args.recursive, conn)
+            file_map: dict[tuple[str, str], Path] = {}
+            if root is not None:
+                mapping = build_file_song_map(root, args.recursive, conn)
+                file_map = {(a, t): p for p, a, t in mapping}
+            evaluate_lyrics_normal(conn, scope=scope, file_song_map=file_map)
+
+        if run_schreiben:
+            if root is None:
+                print("schreiben: kein PFAD angegeben, nichts zu schreiben.")
+            else:
                 mapping = build_file_song_map(root, args.recursive, conn)
                 write_lrc_normal(conn, mapping)
     finally:

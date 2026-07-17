@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.4"
+__version__ = "1.13.5"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1506,7 +1506,12 @@ def _iter_audio_dfs(root: Path) -> Iterator[Path]:
     yield from _recurse(root)
 
 
-def _retry_missing(providers: list[str], artist: str | None, title: str | None) -> None:
+def _retry_missing(
+    providers: list[str],
+    artist: str | None,
+    title: str | None,
+    song_ids: list[int] | None = None,
+) -> None:
     """--retry-missing: fragt `providers` live erneut ab, wo die Cache-DB
     aktuell status='nichts' ODER status='fehlschlag' zeigt (Motivation:
     lrclib steckte einmal stundenlang fälschlich in der "gesperrt"-
@@ -1546,13 +1551,23 @@ def _retry_missing(providers: list[str], artist: str | None, title: str | None) 
     artist (title=None) -> alle Songs dieses Künstlers in der Cache-DB.
     Weder artist noch title -> keine Eingrenzung, ganze Cache-DB.
 
+    song_ids: alternative Eingrenzung direkt über Song-IDs (siehe
+    fetch_providers.retry_missing, PFAD-Scope) -- hat Vorrang vor
+    artist/title, wenn nicht None. Eine LEERE Liste bedeutet bewusst "nichts
+    zu tun" (anders als None = keine Eingrenzung) -- ein PFAD ohne passende
+    Songs soll still nichts abfragen, nicht auf die ganze DB zurückfallen.
+    Wird separat behandelt statt einfach in die SQL-IN-Klausel zu geben, weil
+    "IN ()" mit leerer Liste ungültiges SQL wäre.
+
     Ergebniszeilen werden immer nach Artist, Titel (Cache-DB-Schlüssel)
     sortiert abgearbeitet -- unabhängig von der Eingrenzung.
     """
     assert _cache_conn is not None  # von main() vor dem Aufruf sichergestellt
 
     scope_song_ids: list[int] | None = None
-    if artist is not None:
+    if song_ids is not None:
+        scope_song_ids = song_ids
+    elif artist is not None:
         artist_key = cache_store.normalize_key(artist)
         if title is not None:
             title_key = cache_store.normalize_key(title)
@@ -1578,20 +1593,23 @@ def _retry_missing(providers: list[str], artist: str | None, title: str | None) 
                 sys.exit(1)
             scope_song_ids = [r[0] for r in song_rows]
 
-    placeholders = ",".join("?" for _ in providers)
-    sql = (
-        "SELECT e.song_id, e.quelle, s.artist_key, s.titel_key "
-        "FROM ergebnisse e JOIN songs s ON s.id = e.song_id "
-        f"WHERE e.status IN ('nichts', 'fehlschlag') AND e.quelle IN ({placeholders})"
-    )
-    params: list = list(providers)
-    if scope_song_ids is not None:
-        id_placeholders = ",".join("?" for _ in scope_song_ids)
-        sql += f" AND e.song_id IN ({id_placeholders})"
-        params.extend(scope_song_ids)
-    sql += " ORDER BY s.artist_key, s.titel_key, e.quelle"
+    if scope_song_ids is not None and not scope_song_ids:
+        rows = []
+    else:
+        placeholders = ",".join("?" for _ in providers)
+        sql = (
+            "SELECT e.song_id, e.quelle, s.artist_key, s.titel_key "
+            "FROM ergebnisse e JOIN songs s ON s.id = e.song_id "
+            f"WHERE e.status IN ('nichts', 'fehlschlag') AND e.quelle IN ({placeholders})"
+        )
+        params: list = list(providers)
+        if scope_song_ids is not None:
+            id_placeholders = ",".join("?" for _ in scope_song_ids)
+            sql += f" AND e.song_id IN ({id_placeholders})"
+            params.extend(scope_song_ids)
+        sql += " ORDER BY s.artist_key, s.titel_key, e.quelle"
 
-    rows = _cache_conn.execute(sql, params).fetchall()
+        rows = _cache_conn.execute(sql, params).fetchall()
 
     if not rows:
         print(

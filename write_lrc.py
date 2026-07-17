@@ -89,7 +89,7 @@ def write_all(
 
     Bereitet dieselben lyrics_core-Modul-Globals vor wie Phase 4 (siehe
     fetch_providers._prepare_lyrics_core_globals) -- notwendig, damit
-    evaluate_lyrics.evaluate_song() bei einem eigenständigen --phase 5-Lauf
+    evaluate_lyrics.evaluate_song() bei einem eigenständigen --schreiben-Lauf
     (ohne vorheriges Phase 4 im selben Prozess) den Whisper-Transkript-Cache
     findet, statt jeden Song ohne Cache neu zu transkribieren.
     """

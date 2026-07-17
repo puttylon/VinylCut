@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Phase 2 (+ Nachhol-Modus als Phase 3) der Songtexte-Pipeline: Anbieter abfragen.
+"""Anbieter-Abfrage der Songtexte-Pipeline (--abfragen + --nachholen).
 
 Zwei Modi (siehe "workflow für songexte.txt", Abschnitt ZIELARCHITEKTUR):
-  - Normal-Modus (fetch_all, Phase 2): fragt Songs aus der Tabelle "songs"
+  - Normal-Modus (fetch_all, --abfragen): fragt Songs aus der Tabelle "songs"
     (aus Meilenstein 1/scan_songs.py befüllt) bei allen 4 Anbietern
     (lrclib, musixmatch, netease, genius) ab -- optional eingegrenzt auf
     einen `scope` (siehe dortiger Docstring; ohne scope: JEDER Song in der
     Tabelle, also die komplette Cache-DB).
-  - Nachhol-Modus (retry_missing, Phase 3): fragt gezielt nur (Song,
+  - Nachhol-Modus (retry_missing, --nachholen): fragt gezielt nur (Song,
     Provider)-Kombinationen mit status IN ('nichts', 'fehlschlag') erneut ab
-    -- bewusst weiterhin PFAD-unabhängig, deckt immer die ganze Cache-DB ab
-    (siehe dortiger Docstring).
+    -- optional eingegrenzt auf denselben `scope` wie der Normal-Modus (ohne
+    scope: ganze Cache-DB, siehe dortiger Docstring).
 
 Beide Modi bauen auf lyrics_core._query_provider auf (Rate-Limit-Handling,
 lrclib-Dump-Lookup, Cache-Schreiblogik -- siehe dortiger Docstring) statt
@@ -64,14 +64,14 @@ def _prepare_lyrics_core_globals(conn: sqlite3.Connection) -> None:
 def fetch_all(
     conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
 ) -> tuple[int, int]:
-    """Normal-Modus (Phase 2): fragt Songs aus "songs" bei allen 4 Anbietern
+    """Normal-Modus (--abfragen): fragt Songs aus "songs" bei allen 4 Anbietern
     gleichzeitig ab (ThreadPoolExecutor, analog zum früheren Provider-Block
     im alten fetch_songtext.fetch_lrc, siehe Git-Historie).
 
     scope=None (Standard) fragt JEDEN Song in "songs" ab -- die komplette
     Cache-DB, über alle jemals gescannten Alben hinweg. Das ist nur
     beabsichtigt, wenn wirklich die ganze Bibliothek nachgezogen werden soll
-    (z.B. songtext_pipeline.py --phase 2 ohne PFAD). Ist scope gesetzt (eine
+    (z.B. songtext_pipeline.py --abfragen ohne PFAD). Ist scope gesetzt (eine
     Menge von (artist_key, titel_key)-Paaren, siehe songtext_pipeline.main()),
     werden NUR Songs abgefragt, deren (artist_key, titel_key) darin
     enthalten ist -- alle anderen Zeilen aus "songs" werden komplett
@@ -198,7 +198,7 @@ def fetch_all(
                 path.unlink(missing_ok=True)
 
         if not providers_to_ask:
-            hit_str = "bereits alle Anbieter fehlgeschlagen -- siehe --phase nachholen"
+            hit_str = "bereits alle Anbieter fehlgeschlagen -- siehe --nachholen"
         else:
             hit_str = ", ".join(provider_hits) if provider_hits else "—"
         lyrics_core._tprint(
@@ -209,22 +209,42 @@ def fetch_all(
     return queried, skipped
 
 
-def retry_missing(conn: sqlite3.Connection, providers: list[str] | None = None) -> None:
-    """Nachhol-Modus (Phase 3): dünner Wrapper um lyrics_core._retry_missing
-    -- die dort schon fertige Logik (Eingrenzung auf status IN ('nichts',
+def retry_missing(
+    conn: sqlite3.Connection,
+    providers: list[str] | None = None,
+    scope: set[tuple[str, str]] | None = None,
+) -> None:
+    """Nachhol-Modus: dünner Wrapper um lyrics_core._retry_missing -- die
+    dort schon fertige Logik (Eingrenzung auf status IN ('nichts',
     'fehlschlag'), Rate-Limit-Handling, Cache-Schreiblogik, siehe deren
     Docstring) wird unverändert wiederverwendet, inklusive deren eigener
     Erfolgs-/Fehlschlag-Zusammenfassung auf stdout.
 
-    providers=None fragt alle 4 Anbieter ab (Standard für Phase 3 aus dem
-    Steuer-Skript). Eine artist/title-Eingrenzung (wie beim alten
-    fetch_songtext.py --retry-missing --artist/--title) bietet diese
-    Funktion bewusst nicht an -- YAGNI, songtext_pipeline.py kennt für
-    --phase 3 keinen Songs-Scope.
+    providers=None fragt alle 4 Anbieter ab (Standard aus dem Steuer-Skript).
+
+    scope wie bei fetch_all (Menge von (artist_key, titel_key), siehe
+    dortiger Docstring): None = keine Eingrenzung, ganze Cache-DB (Standard
+    ohne PFAD). Ist scope gesetzt, wird er zu einer Liste von Song-IDs
+    aufgelöst und an lyrics_core._retry_missing durchgereicht (dessen
+    song_ids-Parameter) -- macht "nur fehlende Anbieter für DIESEN Ordner
+    nachholen" möglich, was vorher (YAGNI-Notiz, jetzt überholt) bewusst
+    nicht ging: songtext_pipeline.py übersprang den Nachhol-Modus bislang
+    komplett, sobald ein PFAD gesetzt war (siehe ROADMAP.md).
     """
     _prepare_lyrics_core_globals(conn)
+    song_ids: list[int] | None = None
+    if scope is not None:
+        song_ids = []
+        for artist_key, titel_key in scope:
+            row = conn.execute(
+                "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+                (artist_key, titel_key),
+            ).fetchone()
+            if row is not None:
+                song_ids.append(row[0])
     lyrics_core._retry_missing(
         providers if providers is not None else lyrics_core._ALL_PROVIDERS,
         None,
         None,
+        song_ids=song_ids,
     )

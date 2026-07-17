@@ -2104,6 +2104,61 @@ class TestRetryMissing:
 
         assert lyrics_core._cache_refresh is False
 
+    def test_song_ids_beschraenkt_auf_diese_songs(self, tmp_path, monkeypatch):
+        """song_ids ist die von fetch_providers.retry_missing genutzte
+        PFAD-Scope-Eingrenzung (siehe dortiger Docstring) -- unabhängig von
+        artist/title."""
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+        cache_store.put_provider(conn, "lrclib", "artist b", "title b", "nichts", None)
+        song_id_a = conn.execute(
+            "SELECT id FROM songs WHERE artist_key='artist a'"
+        ).fetchone()[0]
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        lyrics_core._retry_missing(["lrclib"], None, None, song_ids=[song_id_a])
+
+        assert len(fake_run.calls) == 1
+        assert "artist a" in fake_run.calls[0][0]
+
+    def test_song_ids_hat_vorrang_vor_artist_title(self, tmp_path, monkeypatch):
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+        cache_store.put_provider(conn, "lrclib", "artist b", "title b", "nichts", None)
+        song_id_b = conn.execute(
+            "SELECT id FROM songs WHERE artist_key='artist b'"
+        ).fetchone()[0]
+
+        fake_run = self._fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        # artist zeigt auf "artist a", song_ids zeigt auf "artist b" --
+        # song_ids gewinnt.
+        lyrics_core._retry_missing(["lrclib"], "Artist A", None, song_ids=[song_id_b])
+
+        assert len(fake_run.calls) == 1
+        assert "artist b" in fake_run.calls[0][0]
+
+    def test_leere_song_ids_liste_fragt_nichts_ab_kein_fallback_auf_ganze_db(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Eine leere Liste (PFAD ohne passende Songs) bedeutet "nichts zu
+        tun" -- NICHT dieselbe Bedeutung wie song_ids=None (keine
+        Eingrenzung, ganze DB)."""
+        conn = self._open(tmp_path)
+        cache_store.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("leere song_ids-Liste darf nie live abfragen")
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+
+        lyrics_core._retry_missing(["lrclib"], None, None, song_ids=[])
+
+        assert "Keine passenden Cache-Einträge" in capsys.readouterr().out
+
     def test_transienter_fehlschlag_wird_von_echtem_nichttreffer_unterschieden(
         self, tmp_path, monkeypatch, capsys
     ):

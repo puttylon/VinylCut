@@ -1041,6 +1041,40 @@ ohne die Zeile lässt sich der Leer-Verzeichnis-Fallback nicht mehr über
 Konsolentext belegen. Volle Suite: 474/474 grün. `ruff check`/`format`
 sauber. `lyrics_core.__version__` auf `1.13.15` erhöht.
 
+**⧗ Offen — TODO für einen der nächsten Schritte: Ordner-Kopfzeile löscht
+die transiente "Scanne: ..."-Statuszeile nicht sauber, Ausgabe "beißt
+sich".** Live-Test gegen `/Volumes/music/musik/_Various Artists --recursive`
+(direkt im Anschluss an den lazy-Walk-Nachtrag oben): Nutzer sah in echt
+verschmolzene Zeilen wie
+`  Scanne: 0-9/100% Rock Classics Part Four                    14:50:20  ── 0-9/100% Rock Classics Part Four`
+-- Statustext und echte Zeile auf derselben sichtbaren Zeile statt sauber
+getrennt. Zweite Nutzer-Meldung direkt danach: "wird noch schlimmer mit der
+formatierung" (weitere transiente Status wie `1/1: ... ...` und `Whisper
+transkribiert...` reihen sich offenbar genauso ein).
+
+**Wahrscheinliche Ursache (noch nicht live verifiziert, nur aus dem Code
+hergeleitet -- vor der Umsetzung bestätigen):** `lyrics_core._print_status()`
+schreibt `\r{msg:<98}` OHNE `\n` -- der Cursor bleibt nach Spalte 98 stehen,
+nicht Spalte 0. `lyrics_core._tprint()` ruft davor `_clear_status()` auf
+(schreibt `\r` + 100 Leerzeichen + `\r`, Cursor damit zurück auf Spalte 0)
+und LÖSCHT die Statuszeile so sauber, bevor die echte Zeile gedruckt wird --
+das nutzen alle bisherigen Track-Ergebniszeilen (`write_lrc.write_all()`
+usw.) bereits richtig. Die NEUE Ordner-Kopfzeile in
+`songtext_pipeline.py`s `main()`
+(`print(f"{lyrics_core._ts()}  ── {label}")`, siehe Nachtrag "Konsole zeigt
+pro Track eine Zeile") ist dagegen ein BLOSSER `print()` -- ruft
+`_clear_status()` nicht auf, schreibt also direkt ab der aktuellen
+Cursor-Position (Spalte 98 der vorherigen `Scanne: ...`-Statuszeile) weiter,
+statt die Zeile vorher zu löschen. Naheliegender Fix: die Ordner-Kopfzeile
+über `lyrics_core._tprint()` statt `print()` ausgeben (wie alle anderen
+persistenten Zeilen auch).
+
+**Vor der Umsetzung:** live gegen eine echte Bibliothek verifizieren (nicht
+nur behaupten, siehe CLAUDE.md "Evidenz vor Vermutung") -- insbesondere ob
+auch die `Whisper transkribiert...`/`1/1: ...`-Statuszeilen (aus
+`lyrics_core.py`, an mehreren Stellen) betroffen sind oder nur die neue
+Ordner-Kopfzeile.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.6"
+__version__ = "1.13.7"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -670,6 +670,27 @@ def _dedupe_by_content(
         else:
             path.unlink(missing_ok=True)  # Duplikat-Temp-Datei sofort löschen
     return deduped, deduped_hits
+
+
+def _faster_whisper_available() -> bool:
+    """Prüft NUR, ob das faster-whisper-Paket importierbar ist -- lädt dabei
+    KEIN Modell in den Speicher (reiner Import-Check, kein Instanziieren
+    von WhisperModel).
+
+    Dient als billige Alternative zu `_get_whisper_model(name) is not None`
+    für einen reinen Verfügbarkeits-Check (z.B. evaluate_all()s Sonde vor
+    dem Bewerten): ein Song, der am Ende gar kein Whisper braucht (Konsens
+    reicht, oder alle Songs im Scope sind z.B. rein englisch/deutsch und
+    brauchen nur eines der beiden Modelle), soll nicht ungefragt das jeweils
+    ANDERE Modell laden, nur um "ist Whisper überhaupt installiert" zu
+    beantworten (realer Befund: ein reines Deutsch-Album lud bei jedem Lauf
+    unnötig `medium`, obwohl kein einziger Song dieses Modell brauchte --
+    siehe ROADMAP.md)."""
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _get_whisper_model(name: str):

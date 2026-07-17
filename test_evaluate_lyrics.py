@@ -291,12 +291,37 @@ class TestWhisperModelOverrideRestored(_GlobalsResetMixin):
 class TestEvaluateAll(_GlobalsResetMixin):
     def test_kein_whisper_verfuegbar_bricht_sauber_ab(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
-        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: None)
+        monkeypatch.setattr(lyrics_core, "_faster_whisper_available", lambda: False)
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         result = evaluate_lyrics.evaluate_all(conn)
         assert result == {}
+
+    def test_verfuegbarkeits_check_laedt_kein_modell(self, tmp_path, monkeypatch):
+        """Regressionstest (siehe ROADMAP.md): die Verfügbarkeits-Prüfung am
+        Anfang von evaluate_all() darf KEIN Whisper-Modell laden -- ein
+        Lauf, bei dem kein einziger Song im Scope überhaupt Whisper
+        braucht (hier: leere DB), soll auch keins laden. Vorher wurde
+        `medium` hier immer als Sonde voll geladen, selbst wenn kein Song
+        `medium` gebraucht hätte."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("_get_whisper_model darf hier nicht aufgerufen werden")
+
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", _fail_if_called)
+
+        result = evaluate_lyrics.evaluate_all(conn)
+        assert result == {
+            "konsens": 0,
+            "whisper-akzeptiert": 0,
+            "abgelehnt": 0,
+            "kein-provider": 0,
+        }
 
     def test_scope_grenzt_auf_angegebene_songs_ein(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")

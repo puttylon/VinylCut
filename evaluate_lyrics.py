@@ -327,18 +327,21 @@ def evaluate_all(
     kann Whisper bei einem Transkript-Cache-Miss live transkribieren; andere
     Songs fallen auf Konsens/Dauer-Heuristik zurueck.
 
-    Prueft vorab nur, ob faster-whisper ueberhaupt verfuegbar ist (per
-    _WHISPER_MODEL_EN als Sonde) -- welches Modell (medium/large-v3)
-    tatsaechlich pro Song geladen wird, entscheidet _select_whisper_model()
-    je nach Sprache (siehe Moduldocstring); beide werden dabei lazy von
-    lyrics_core._get_whisper_model() geladen und gecacht, hoechstens
-    einmal pro Modellname und Lauf, nicht pro Song.
+    Prueft vorab nur, ob das faster-whisper-PAKET ueberhaupt installiert ist
+    (lyrics_core._faster_whisper_available() -- reiner Import-Check, laedt
+    KEIN Modell). Welches Modell (medium/large-v3) tatsaechlich pro Song
+    geladen wird, entscheidet _select_whisper_model() je nach Sprache (siehe
+    Moduldocstring); beide werden dabei lazy von lyrics_core.
+    _get_whisper_model() geladen und gecacht, hoechstens einmal pro
+    Modellname und Lauf -- und NUR wenn ein Song im Scope das jeweilige
+    Modell auch wirklich braucht (kein Konsens UND kein bereits gecachtes
+    Transkript). Frueher wurde hier `medium` als Verfuegbarkeits-Sonde immer
+    voll geladen, selbst wenn im gesamten Lauf kein einziger Song `medium`
+    brauchte (z.B. eine rein deutschsprachige Bibliothek/Album, die nur
+    `large-v3` nutzt) -- siehe ROADMAP.md.
     """
-    if lyrics_core._get_whisper_model(_WHISPER_MODEL_EN) is None:
-        print(
-            f"FEHLER: faster-whisper nicht verfügbar — Modell "
-            f"'{_WHISPER_MODEL_EN}' konnte nicht geladen werden."
-        )
+    if not lyrics_core._faster_whisper_available():
+        print("FEHLER: faster-whisper nicht verfügbar (Paket nicht installiert).")
         return {}
 
     fetch_providers._prepare_lyrics_core_globals(conn)

@@ -623,6 +623,33 @@ mit PFAD). Volle Suite: 457/457 grün. `ruff check`/`ruff format` sauber.
 `lyrics_core.__version__` auf `1.13.6` erhöht (Bugfix, siehe
 CLAUDE.md-Versionierungsregel).
 
+**✓ Nachtrag — `evaluate_all()`s Verfügbarkeits-Sonde lud unnötig das
+`medium`-Modell.** Direkt beim nächsten Live-Testlauf desselben Albums
+aufgefallen: trotz des vorherigen Fixes ("Whisper-Modell wird nicht mehr
+unnötig geladen") erschien weiterhin `Lade Whisper-Modell (medium)...` --
+obwohl das komplett deutsche Album gar keinen einzigen Song hat, der
+`medium` braucht (nur `large-v3`, für Englisch wäre es `medium`). Ursache:
+der vorherige Fix betraf nur `lyrics_core._whisper_best()`s EIGENEN
+Modell-Load (pro Song, verzögert bis nach der Cache-Prüfung) -- eine ZWEITE,
+unabhängige Stelle blieb bestehen: `evaluate_lyrics.evaluate_all()` prüft
+ganz am Anfang "ist Whisper überhaupt verfügbar" per
+`lyrics_core._get_whisper_model(_WHISPER_MODEL_EN)` -- das lädt bei diesem
+reinen Verfügbarkeits-Check das VOLLE `medium`-Modell, unabhängig davon, ob
+irgendein Song im Scope `medium` je braucht.
+
+**Fix:** neue `lyrics_core._faster_whisper_available()` -- reiner
+Import-Check (`import faster_whisper`), lädt kein Modell. `evaluate_all()`
+nutzt das jetzt für seine Sonde statt `_get_whisper_model(_WHISPER_MODEL_EN)`.
+Modelle werden dadurch ausschließlich noch lazy, pro tatsächlich
+gebrauchtem Modellnamen, geladen (wie im Docstring immer schon behauptet,
+jetzt auch tatsächlich so). Neuer Regressionstest
+`test_verfuegbarkeits_check_laedt_kein_modell` (mockt `_get_whisper_model`
+als Abbruch-Falle, prüft `evaluate_all()` gegen eine leere DB). Bestehender
+Test `test_kein_whisper_verfuegbar_bricht_sauber_ab` auf
+`_faster_whisper_available` umgestellt. Volle Suite: 458/458 grün. `ruff
+check`/`ruff format` sauber. `lyrics_core.__version__` auf `1.13.7` erhöht
+(Bugfix, siehe CLAUDE.md-Versionierungsregel).
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

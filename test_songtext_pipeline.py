@@ -40,14 +40,15 @@ def test_main_ohne_flags_aktiviert_scan_abfragen_bewerten_schreiben(
         songtext_pipeline.main()
 
         out = capsys.readouterr().out
-        assert "scan: 0 Song(s) gescannt/aktualisiert." in out
-        assert "abfragen: 0 Song(s) abgefragt." in out
+        # --schreiben laeuft mit -> quiet-Modus (siehe ROADMAP.md, Nachtrag
+        # "pro Track eine Zeile"): keine Kopf-/Zusammenfassungszeilen der
+        # Einzelschritte, nur die (hier leere) "Datei(en) gefunden"-Zeile.
+        assert "0 Datei(en) gefunden." in out
+        assert "scan:" not in out
+        assert "abfragen:" not in out
         assert "nachholen:" not in out
-        assert (
-            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider, 0 übersprungen (unverändert)."
-            in out
-        )
-        assert "schreiben: 0 geschrieben, 0 übersprungen, 0 nicht gefunden." in out
+        assert "bewerten:" not in out
+        assert "schreiben:" not in out
     finally:
         _reset_lyrics_core_globals()
 
@@ -99,14 +100,13 @@ def test_main_einzelne_flags_nur_diese_schritte(tmp_path, monkeypatch, capsys):
         songtext_pipeline.main()
 
         out = capsys.readouterr().out
+        # --schreiben laeuft mit -> quiet-Modus (siehe oben).
+        assert "0 Datei(en) gefunden." in out
         assert "scan:" not in out
-        assert "abfragen: 0 Song(s) abgefragt." in out
+        assert "abfragen:" not in out
         assert "nachholen:" not in out
-        assert (
-            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider, 0 übersprungen (unverändert)."
-            in out
-        )
-        assert "schreiben: 0 geschrieben, 0 übersprungen, 0 nicht gefunden." in out
+        assert "bewerten:" not in out
+        assert "schreiben:" not in out
     finally:
         _reset_lyrics_core_globals()
 
@@ -690,8 +690,12 @@ def test_main_verarbeitet_dateien_ueber_ordnergrenzen_hinweg_einzeln(
     ROADMAP.md, Nutzer-Feedback: "ich will, dass die phasen für jeden
     einzelne datei laufen [...] dadurch haben die provider auch wieder
     länger leerlauf"). Zwei Alben in getrennten Unterordnern -- jede Datei
-    muss vollständig durchlaufen werden (scan bis schreiben), inklusive der
-    Ordner-Wechsel-Ausgabe."""
+    muss einzeln gescannt werden (nicht als 2er-Batch pro Ordner), inklusive
+    der Ordner-Wechsel-Ausgabe. Konsolenausgabe ist dabei quiet (--schreiben
+    läuft mit, siehe ROADMAP.md "pro Track eine Zeile") -- die Kopf-/
+    Zusammenfassungszeilen der Einzelschritte fallen weg, deshalb wird die
+    Datei-für-Datei-Granularität hier über die tatsächlichen scan()-Aufrufe
+    geprüft, nicht über deren (unterdrückte) Konsolenausgabe."""
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
 
@@ -721,6 +725,15 @@ def test_main_verarbeitet_dateien_ueber_ordnergrenzen_hinweg_einzeln(
         "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--recursive"]
     )
 
+    scan_calls: list[list] = []
+    real_scan = songtext_pipeline.scan_songs.scan
+
+    def _counting_scan(root, recursive, conn, files=None):
+        scan_calls.append(files)
+        return real_scan(root, recursive, conn, files=files)
+
+    monkeypatch.setattr(songtext_pipeline.scan_songs, "scan", _counting_scan)
+
     try:
         songtext_pipeline.main()
     finally:
@@ -728,15 +741,14 @@ def test_main_verarbeitet_dateien_ueber_ordnergrenzen_hinweg_einzeln(
 
     out = capsys.readouterr().out
     assert "2 Datei(en) gefunden." in out
-    assert "Ordner: album1" in out
-    assert "Ordner: album2" in out
-    assert "Datei 1/2: 01 - Song A.flac" in out
-    assert "Datei 2/2: 01 - Song B.flac" in out
-    # jede Datei durchläuft scan/abfragen/bewerten/schreiben EINZELN --
-    # also zweimal "scan: 1 Song(s)...", nicht einmal "scan: 2 Song(s)...".
-    assert out.count("scan: 1 Song(s) gescannt/aktualisiert.") == 2
-    assert out.count("abfragen: 1 Song(s) abgefragt.") == 2
-    assert out.count("nicht gefunden.") == 2  # kein Provider -> je 1 "nicht gefunden"
+    assert "── album1" in out
+    assert "── album2" in out
+    assert "01 - Song A.flac" in out  # je eine Ergebniszeile pro Track
+    assert "01 - Song B.flac" in out
+    # zwei getrennte scan()-Aufrufe mit je 1 Datei -- kein gebündelter
+    # Aufruf mit beiden Dateien (das wäre noch die alte Ordner-Bündelung).
+    assert len(scan_calls) == 2
+    assert [len(f) for f in scan_calls] == [1, 1]
 
     conn = cs.open_cache(db_path)
     rows = conn.execute(
@@ -752,9 +764,9 @@ def test_main_verarbeitet_dateien_im_selben_ordner_ebenfalls_einzeln(
     tmp_path, monkeypatch, capsys
 ):
     """Wie oben, aber INNERHALB eines einzigen Ordners: zwei Songs im selben
-    Album dürfen NICHT gemeinsam als ein scan/abfragen-Aufruf laufen (das
-    wäre noch die alte Ordner-für-Ordner-Bündelung aus Task #15) -- jede
-    Datei einzeln, ohne zweite Ordner-Wechsel-Zeile zwischen den beiden."""
+    Album dürfen NICHT gemeinsam als ein scan-Aufruf laufen (das wäre noch
+    die alte Ordner-für-Ordner-Bündelung aus Task #15) -- jede Datei
+    einzeln, ohne zweite Ordner-Wechsel-Zeile zwischen den beiden."""
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
 
@@ -779,6 +791,15 @@ def test_main_verarbeitet_dateien_im_selben_ordner_ebenfalls_einzeln(
     monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(album), "--recursive"])
 
+    scan_calls: list[list] = []
+    real_scan = songtext_pipeline.scan_songs.scan
+
+    def _counting_scan(root, recursive, conn, files=None):
+        scan_calls.append(files)
+        return real_scan(root, recursive, conn, files=files)
+
+    monkeypatch.setattr(songtext_pipeline.scan_songs, "scan", _counting_scan)
+
     try:
         songtext_pipeline.main()
     finally:
@@ -786,14 +807,13 @@ def test_main_verarbeitet_dateien_im_selben_ordner_ebenfalls_einzeln(
 
     out = capsys.readouterr().out
     assert "2 Datei(en) gefunden." in out
-    assert out.count("Ordner: album") == 1  # EIN Ordner-Wechsel, nicht pro Datei
-    assert "Datei 1/2: 01 - Song A.flac" in out
-    assert "Datei 2/2: 02 - Song B.flac" in out
-    # zwei getrennte scan/abfragen-Aufrufe je 1 Song, nicht ein gebündelter
-    # Aufruf mit 2 Songs -- das wäre noch die alte Ordner-Bündelung.
-    assert out.count("scan: 1 Song(s) gescannt/aktualisiert.") == 2
-    assert "scan: 2 Song(s)" not in out
-    assert out.count("abfragen: 1 Song(s) abgefragt.") == 2
+    assert out.count("── album") == 1  # EIN Ordner-Wechsel, nicht pro Datei
+    assert "01 - Song A.flac" in out
+    assert "02 - Song B.flac" in out
+    # zwei getrennte scan()-Aufrufe mit je 1 Datei, nicht ein gebündelter
+    # Aufruf mit 2 Dateien -- das wäre noch die alte Ordner-Bündelung.
+    assert len(scan_calls) == 2
+    assert [len(f) for f in scan_calls] == [1, 1]
 
 
 def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
@@ -802,7 +822,11 @@ def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
     """Kein Ordner mit Audiodateien unter PFAD gefunden (leeres
     Verzeichnis) -- die Schritte laufen trotzdem EINMAL mit leerer
     Datei-Liste, statt komplett stillzubleiben (z.B. damit --nachholen
-    seine gewohnte "nichts gefunden"-Meldung zeigt)."""
+    seine gewohnte "nichts gefunden"-Meldung zeigt). "0 Datei(en)
+    gefunden." wird IMMER ausgegeben (auch bei 0 Dateien) -- das ist
+    unabhängig vom quiet-Modus (siehe ROADMAP.md, Nachtrag "pro Track eine
+    Zeile") die einzige garantierte Rückmeldung, wenn nichts gefunden
+    wurde."""
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
     empty_dir = tmp_path / "leer"
@@ -816,8 +840,7 @@ def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
     songtext_pipeline.main()
 
     out = capsys.readouterr().out
-    assert "Datei(en) gefunden" not in out
-    assert "scan: 0 Song(s) gescannt/aktualisiert." in out
+    assert "0 Datei(en) gefunden." in out
 
 
 # --- Voller Pipeline-Lauf: scan -> abfragen -> bewerten -> schreiben ------
@@ -893,9 +916,17 @@ def test_voller_lauf_scan_provider_bewerten_schreiben(tmp_path, monkeypatch, cap
         _reset_lyrics_core_globals()
 
     out = capsys.readouterr().out
-    assert "scan: 1 Song(s) gescannt/aktualisiert." in out
-    assert "bewerten: 1 Konsens" in out
-    assert "schreiben: 1 geschrieben" in out
+    # --schreiben laeuft mit -> quiet-Modus (siehe ROADMAP.md, Nachtrag "pro
+    # Track eine Zeile"): keine Kopf-/Zusammenfassungszeilen der
+    # Einzelschritte mehr, stattdessen genau EINE Ergebniszeile für den
+    # Track (Konsens-Info + Schreib-Symbol).
+    assert "scan:" not in out
+    assert "abfragen:" not in out
+    assert "bewerten:" not in out
+    assert "schreiben:" not in out
+    assert "01 - Song.flac" in out
+    assert "Konsens" in out
+    assert " ✓" in out
 
     conn = cs.open_cache(db_path)
     song_row = conn.execute(

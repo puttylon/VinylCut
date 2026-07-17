@@ -66,6 +66,7 @@ def fetch_all(
     conn: sqlite3.Connection,
     scope: set[tuple[str, str]] | None = None,
     file_order: list[tuple[Path, str, str]] | None = None,
+    quiet: bool = False,
 ) -> tuple[int, int, int]:
     """Normal-Modus (--abfragen): fragt Songs aus "songs" bei allen 4 Anbietern
     gleichzeitig ab (ThreadPoolExecutor, analog zum früheren Provider-Block
@@ -146,6 +147,17 @@ def fetch_all(
     dabei ignoriert -- file_order deckt dieselbe Eingrenzung bereits ab.
     Ohne file_order (kein PFAD) bleibt es bei der alphabetischen
     DB-Reihenfolge + `scope`-Filter wie bisher.
+
+    quiet=True unterdrückt die Kopfzeile ("Frage N Song(s) ab ...") und die
+    persistente Treffer-Zeile pro Song -- gedacht für den kombinierten
+    Datei-für-Datei-Lauf aus songtext_pipeline.py, wo ohnehin gleich danach
+    --bewerten/--schreiben für denselben Song laufen und deren EINE
+    Abschlusszeile (siehe write_lrc.write_all) sonst von einer fast
+    identischen Zwischenzeile hier verdoppelt würde (Nutzer-Feedback: "zeig
+    auf trackebene [...] pro track eine zeile", siehe ROADMAP.md). Die
+    überschreibbare Statuszeile (_print_status) bleibt auch in quiet=True
+    bestehen -- sie ist ohnehin transient und gibt bei einer länger
+    laufenden Anfrage weiterhin Lebenszeichen.
     """
     _prepare_lyrics_core_globals(conn)
     env = lyrics_core._load_env()
@@ -209,7 +221,7 @@ def fetch_all(
         to_query.append((song_id, artist_key, titel_key, audio_path, providers_to_ask))
 
     total = len(to_query)
-    if total:
+    if total and not quiet:
         print(
             f"Frage {total} Song(s) bei {len(lyrics_core._ALL_PROVIDERS)} "
             "Anbietern ab ..."
@@ -251,11 +263,12 @@ def fetch_all(
                 provider_hits.append(provider)
                 tmp_path.unlink(missing_ok=True)
 
-        hit_str = ", ".join(provider_hits) if provider_hits else "—"
-        lyrics_core._tprint(
-            f"{lyrics_core._ts()}  {label}  "
-            f"{len(provider_hits)}/{len(lyrics_core._ALL_PROVIDERS)}: {hit_str}"
-        )
+        if not quiet:
+            hit_str = ", ".join(provider_hits) if provider_hits else "—"
+            lyrics_core._tprint(
+                f"{lyrics_core._ts()}  {label}  "
+                f"{len(provider_hits)}/{len(lyrics_core._ALL_PROVIDERS)}: {hit_str}"
+            )
 
     return total, skipped_genre, skipped_up_to_date
 

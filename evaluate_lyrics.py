@@ -358,6 +358,7 @@ def evaluate_all(
     conn: sqlite3.Connection,
     scope: set[tuple[str, str]] | None = None,
     file_song_map: dict[tuple[str, str], Path] | None = None,
+    quiet: bool = False,
 ) -> dict[str, int]:
     """Phase 4: bewertet Songs aus "songs" -- optional eingegrenzt auf `scope`
     (siehe fetch_providers.fetch_all fuer dasselbe Scope-Prinzip: ohne PFAD
@@ -389,6 +390,14 @@ def evaluate_all(
     voll geladen, selbst wenn im gesamten Lauf kein einziger Song `medium`
     brauchte (z.B. eine rein deutschsprachige Bibliothek/Album, die nur
     `large-v3` nutzt) -- siehe ROADMAP.md.
+
+    quiet=True unterdrückt die Kopfzeile ("Bewerte N Song(s) ...") und die
+    persistente Ergebniszeile pro Song -- gesetzt vom kombinierten
+    Datei-für-Datei-Lauf aus songtext_pipeline.py, wenn im selben Durchlauf
+    gleich danach --schreiben für denselben Song läuft und dessen EINE
+    Abschlusszeile (write_lrc.write_all, ruft evaluate_song() ohnehin ein
+    zweites Mal auf) diese Zwischenzeile sonst dupliziert (Nutzer-Feedback:
+    "zeig auf trackebene [...] pro track eine zeile", siehe ROADMAP.md).
     """
     if not lyrics_core._faster_whisper_available():
         print("FEHLER: faster-whisper nicht verfügbar (Paket nicht installiert).")
@@ -414,7 +423,7 @@ def evaluate_all(
         ).fetchall()
         to_evaluate = [(a, t) for a, t in rows if scope is None or (a, t) in scope]
     total = len(to_evaluate)
-    if total:
+    if total and not quiet:
         print(f"Bewerte {total} Song(s) ...")
 
     counts = {
@@ -479,6 +488,7 @@ def evaluate_all(
         else:
             counts["abgelehnt"] += 1
 
-        lyrics_core._tprint(f"{lyrics_core._ts()}  {label}  {info_str}")
+        if not quiet:
+            lyrics_core._tprint(f"{lyrics_core._ts()}  {label}  {info_str}")
 
     return counts

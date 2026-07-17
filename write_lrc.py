@@ -51,6 +51,7 @@ def write_all(
     conn: sqlite3.Connection,
     file_song_map: list[tuple[Path, str, str]],
     force: bool = False,
+    quiet: bool = False,
 ) -> dict[str, int]:
     """Phase 5: schreibt/löscht .lrc je Song aus file_song_map (siehe
     songtext_pipeline.build_file_song_map), gruppiert nach Ordner für
@@ -63,11 +64,19 @@ def write_all(
     evaluate_lyrics.evaluate_song() bei einem eigenständigen --schreiben-Lauf
     (ohne vorheriges Phase 4 im selben Prozess) den Whisper-Transkript-Cache
     findet, statt jeden Song ohne Cache neu zu transkribieren.
+
+    quiet=True unterdrückt NUR die Kopfzeile ("Schreibe/prüfe N Datei(en)
+    ...") -- gedacht für den kombinierten Datei-für-Datei-Lauf aus
+    songtext_pipeline.py, wo diese Zeile bei N=1 nichts beiträgt (Nutzer-
+    Feedback: "zeig auf trackebene [...] pro track eine zeile", siehe
+    ROADMAP.md). Die persistente Ergebniszeile pro Song (unten, `_tprint`)
+    bleibt IMMER bestehen -- das ist die eine gewollte Zeile pro Track,
+    äquivalent zur Abschlusszeile des früheren fetch_songtext.py.
     """
     fetch_providers._prepare_lyrics_core_globals(conn)
     counts = {"updated": 0, "skipped": 0, "not_found": 0, "errors": 0}
     total = len(file_song_map)
-    if total:
+    if total and not quiet:
         print(f"Schreibe/prüfe {total} Datei(en) ...")
 
     current_parent: Path | None = None

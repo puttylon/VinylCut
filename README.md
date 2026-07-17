@@ -155,7 +155,20 @@ Steuer-Skript für die Songtexte-Pipeline (Architektur siehe `workflow für song
 
 Mit PFAD grenzt jedes Flag (außer `--scan`/`--schreiben`, die ohnehin PFAD brauchen) auf die Songs unter PFAD ein; ohne PFAD arbeitet es über die GANZE Bibliothek (explizite „alles nachziehen"-Absicht). Das gilt auch für `--nachholen` — gezielt nur die fehlenden Anbieter EINES Albums nachholen ist damit möglich, ohne die ganze Bibliothek anzufassen.
 
-**Mit PFAD läuft die Pipeline Datei für Datei:** Tags werden einmal für den ganzen Baum gelesen (in Dateinamen-/Verzeichnisreihenfolge), danach durchläuft JEDE einzelne Datei alle gewählten Schritte komplett (`scan` → `abfragen`/`nachholen` → `bewerten` → `schreiben`), bevor die nächste Datei beginnt — nicht mehr Ordner für Ordner. Ein Ordnerwechsel wird zusätzlich als eigene Zeile angezeigt. Das gibt sichtbaren Fortschritt und sorgt nebenbei für spürbaren Leerlauf zwischen zwei Anbieter-Abfragen (`--bewerten` kann pro Song mehrere Minuten Live-Whisper-Transkription brauchen), was das Risiko eines Anbieter-Rate-Limits senkt — ganz ohne eigene Wartezeit-Logik. Bei einem Abbruch mitten im Lauf sind bereits fertige Dateien schon geschrieben. Ohne PFAD (z.B. `--nachholen` allein) läuft weiterhin alles global in einem Rutsch über die ganze Cache-DB, da es dort keine Datei-Struktur gibt.
+**Mit PFAD läuft die Pipeline Datei für Datei:** Tags werden einmal für den ganzen Baum gelesen (in Dateinamen-/Verzeichnisreihenfolge), danach durchläuft JEDE einzelne Datei alle gewählten Schritte komplett (`scan` → `abfragen`/`nachholen` → `bewerten` → `schreiben`), bevor die nächste Datei beginnt — nicht mehr Ordner für Ordner. Das schiebt spürbaren Leerlauf zwischen zwei Anbieter-Abfragen (`--bewerten` kann pro Song mehrere Minuten Live-Whisper-Transkription brauchen), was das Risiko eines Anbieter-Rate-Limits senkt — ganz ohne eigene Wartezeit-Logik. Bei einem Abbruch mitten im Lauf sind bereits fertige Dateien schon geschrieben. Ohne PFAD (z.B. `--nachholen` allein) läuft weiterhin alles global in einem Rutsch über die ganze Cache-DB, da es dort keine Datei-Struktur gibt.
+
+**Konsolenausgabe pro Track (statt pro Schritt):** Läuft `--schreiben` im selben Durchlauf mit PFAD mit (der Normalfall), unterdrücken `--scan`/`--abfragen`/`--bewerten` ihre eigenen Kopf-/Zwischen-/Zusammenfassungszeilen — `--schreiben` liefert ohnehin die eine, vollständige Ergebniszeile pro Song (Anbieter-Treffer, Whisper-/Konsens-Info, Schreib-Symbol), alles andere wäre reine Wiederholung. Ein Ordnerwechsel wird zusätzlich als eigene Zeile markiert:
+
+```
+3 Datei(en) gefunden.
+14:33:43  ── album1
+14:33:44  01 - Song A.flac  4/4: lrclib, musixmatch, netease, genius │ Konsens 86%  ✓
+14:33:52  02 - Song B.flac  2/4: lrclib, genius │ [medium] en Whisper 125W idf-jacc=0.718  ✓
+14:33:52  ── album2
+14:33:53  03 - Song C.flac  0/4: — │ kein Provider  =
+```
+
+Läuft ein Schritt dagegen einzeln (z.B. nur `--abfragen`, ohne `--schreiben` im selben Aufruf), bleibt dessen ausführliche Ausgabe (Kopfzeile, Treffer je Song, Zusammenfassung) bestehen — sie ist dann die einzige Rückmeldung.
 
 Für die lrclib-Quelle wird vor jeder echten Live-Abfrage zuerst ein lokaler LRCLib-Datenbank-Abzug durchsucht (`/Volumes/music/db.sqlite3`, falls erreichbar) — nur bei 0 Treffern dort wird wie bisher live gefragt. Kein eigenes Flag nötig; fehlt der Abzug (Mount nicht vorhanden), degradiert die Pipeline automatisch auf reines Live-Fragen (siehe `CACHE_DESIGN.md`).
 

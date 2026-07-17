@@ -936,6 +936,62 @@ Song(s)..." (NICHT einmal "scan: 2 Song(s)...") und genau EINE
 "Ordner: album"-Zeile trotz zwei Dateien. Volle Suite: 474/474 grün.
 `lyrics_core.__version__` auf `1.13.13` erhöht.
 
+**✓ Nachtrag — Konsole zeigt jetzt pro Track genau EINE Zeile statt bis zu
+zehn.** Live-Test des Datei-für-Datei-Umbaus gegen die echte
+Produktionsbibliothek zeigte: jede einzelne Datei durchlief jetzt zwar
+scan/abfragen/bewerten/schreiben separat, aber JEDER dieser vier Schritte
+druckte weiterhin seine eigene Kopfzeile ("Frage 1 Song(s) ab ...", "Bewerte
+1 Song(s) ...", "Schreibe/prüfe 1 Datei(en) ..."), seine eigene persistente
+Ergebniszeile (abfragen und bewerten rekonstruierten dabei UNABHÄNGIG
+voneinander densel­ben `prov_str`/Anbieter-Treffer-Teil) und seine eigene
+Zusammenfassung ("abfragen: 1 Song(s) abgefragt.", "bewerten: 0 Konsens, ...
+1 übersprungen", "schreiben: 1 geschrieben, ...") -- bis zu ~10 Zeilen für
+EINEN Track. Nutzer: "die ausgabe ist 'bescheiden'. verbessere das. zeig auf
+trackebene in diesem fall was passiert. pro track eine zeile. schau dir das
+bei dem alten programm ab." Das alte, mittlerweile gelöschte
+`fetch_songtext.py` (siehe Git-Historie, `main()`) verarbeitete jeden Track
+tatsächlich in einem einzigen Rutsch und druckte genau eine `_tprint`-Zeile
+pro Track: `{ts}  {rel_pfad}  {info}  {symbol}` -- exakt das Format, das
+`write_lrc.write_all()`s Ergebniszeile in der neuen Architektur schon
+liefert (siehe Nachtrag oben, "Dateinamen-Reihenfolge"), nur bislang von den
+Zwischenzeilen der vorgelagerten Schritte verdeckt.
+
+**Lösung: neuer `quiet`-Parameter**, durchgereicht von
+`songtext_pipeline._run_selected_steps()` an `fetch_providers.fetch_all()`,
+`evaluate_lyrics.evaluate_all()` und `write_lrc.write_all()` (jeweils über
+die `_normal()`-Wrapper in `songtext_pipeline.py`). `quiet = run_schreiben
+and step_root is not None` -- läuft `--schreiben` im selben Aufruf mit UND
+ist ein PFAD gesetzt (der Normalfall bei einem Datei-für-Datei-Lauf),
+unterdrücken scan/abfragen/bewerten ihre Kopf-/Zwischen-/
+Zusammenfassungszeilen komplett; `write_all()`s EINE Ergebniszeile pro Song
+bleibt in jedem Fall bestehen (nie hinter `quiet` versteckt -- das ist die
+gewollte Zeile). Läuft ein Schritt EINZELN (z.B. nur `--abfragen`, ohne
+`--schreiben` im selben Aufruf), bleibt die ausführliche Ausgabe erhalten --
+`quiet` wird dann nie gesetzt, da es sonst die einzige Rückmeldung wäre.
+`--nachholen` bewusst NICHT angefasst (deutlich seltener Pfad, eigene,
+andersartige Fortschrittsausgabe über `lyrics_core._retry_missing` -- YAGNI,
+kann bei Bedarf separat nachgezogen werden).
+
+Zusätzlich: die Ordner-Kopfzeile (bisher `\nOrdner: <Pfad>`, aus dem
+vorherigen Datei-für-Datei-Nachtrag) durch den Stil des alten Programms
+ersetzt (`{ts}  ── {Pfad}`, siehe Git-Historie `fetch_songtext.main()`), die
+separate "Datei i/N: <Dateiname>"-Zeile ganz entfernt (redundant zur
+Ergebniszeile, die den Dateinamen ohnehin zeigt) und "N Datei(en)
+gefunden." VOR die leer/nicht-leer-Verzweigung gezogen -- wird jetzt IMMER
+ausgegeben, auch bei 0 Dateien, damit ein leeres PFAD-Verzeichnis (oder ein
+`quiet`-geschalteter Lauf) nicht komplett still wirkt wie ein Hänger.
+
+6 bestehende Tests angepasst (Konsolen-Assertions auf die jetzt
+unterdrückten Kopf-/Zusammenfassungszeilen mussten weg; wo Datei-für-Datei-
+Granularität geprüft wurde, jetzt über einen `scan_songs.scan()`-Spy
+verifiziert statt über deren -- jetzt unterdrückte -- Konsolenausgabe, siehe
+`test_main_verarbeitet_dateien_ueber_ordnergrenzen_hinweg_einzeln` /
+`test_main_verarbeitet_dateien_im_selben_ordner_ebenfalls_einzeln`). Volle
+Suite: 474/474 grün. `ruff check`/`format` sauber (verbleibende
+`ruff format`-Diffs in `evaluate_lyrics.py`/`fetch_providers.py`
+vorbestehend, nicht von diesem Nachtrag). `lyrics_core.__version__` auf
+`1.13.14` erhöht.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

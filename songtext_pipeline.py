@@ -116,6 +116,7 @@ def fetch_providers_normal(
     conn: sqlite3.Connection,
     scope: set[tuple[str, str]] | None = None,
     file_order: list[tuple[Path, str, str]] | None = None,
+    quiet: bool = False,
 ) -> None:
     """--abfragen: Normal-Modus von fetch_providers -- fragt Songs in "songs"
     bei allen 4 Anbietern ab (siehe fetch_providers.fetch_all).
@@ -133,10 +134,18 @@ def fetch_providers_normal(
     gezählt. Ebenso Songs, für die kein einziger Anbieter mehr wirklich
     angefragt werden muss (jeder Anbieter hat schon einen gültigen
     Treffer/Nichts-Eintrag oder einen -- von --nachholen zu behandelnden --
-    Fehlschlag, siehe fetch_all-Docstring)."""
+    Fehlschlag, siehe fetch_all-Docstring).
+
+    quiet=True unterdrückt Kopf-/Zusammenfassungszeilen UND fetch_all()s
+    eigene Treffer-Zeile (siehe dortiger Docstring) -- gesetzt von
+    main()/_run_selected_steps(), wenn im selben Durchlauf gleich danach
+    --bewerten + --schreiben für denselben Song laufen und dessen EINE
+    Abschlusszeile die ausführliche Zwischenausgabe hier überflüssig macht."""
     queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(
-        conn, scope=scope, file_order=file_order
+        conn, scope=scope, file_order=file_order, quiet=quiet
     )
+    if quiet:
+        return
     print(f"abfragen: {queried} Song(s) abgefragt.")
     if skipped_genre:
         print(
@@ -166,17 +175,23 @@ def evaluate_lyrics_normal(
     conn: sqlite3.Connection,
     scope: set[tuple[str, str]] | None = None,
     file_song_map: dict[tuple[str, str], Path] | None = None,
+    quiet: bool = False,
 ) -> None:
     """--bewerten: bewertet Songs (Konsens/Whisper), siehe evaluate_lyrics.evaluate_all.
 
     scope wie bei --abfragen (None ohne PFAD = ganze DB, sonst nur die Songs
     des aktuellen Laufs). file_song_map erlaubt Whisper bei Cache-Miss live
     zu transkribieren -- ohne Eintrag fällt der Song auf Konsens/Dauer-
-    Heuristik zurück."""
+    Heuristik zurück.
+
+    quiet=True unterdrückt Kopf-/Ergebnis-/Zusammenfassungszeilen (siehe
+    evaluate_all-Docstring) -- gesetzt, wenn im selben Durchlauf gleich
+    danach --schreiben für denselben Song dessen EINE Abschlusszeile
+    zeigt."""
     counts = evaluate_lyrics.evaluate_all(
-        conn, scope=scope, file_song_map=file_song_map
+        conn, scope=scope, file_song_map=file_song_map, quiet=quiet
     )
-    if not counts:
+    if not counts or quiet:
         return
     print(
         f"bewerten: {counts['konsens']} Konsens, "
@@ -187,12 +202,20 @@ def evaluate_lyrics_normal(
 
 
 def write_lrc_normal(
-    conn: sqlite3.Connection, file_song_map: list[tuple[Path, str, str]]
+    conn: sqlite3.Connection,
+    file_song_map: list[tuple[Path, str, str]],
+    quiet: bool = False,
 ) -> None:
     """--schreiben: schreibt/löscht .lrc-Dateien je nach --bewerten-Entscheidung
     (wird intern erneut berechnet, siehe write_lrc.write_all -- kein
-    Ablageort in der DB nötig)."""
-    counts = write_lrc.write_all(conn, file_song_map)
+    Ablageort in der DB nötig).
+
+    quiet=True unterdrückt nur die Kopf-/Zusammenfassungszeile hier UND in
+    write_all() (siehe dortiger Docstring) -- die eine Ergebniszeile pro
+    Song bleibt davon unberührt."""
+    counts = write_lrc.write_all(conn, file_song_map, quiet=quiet)
+    if quiet:
+        return
     print(
         f"schreiben: {counts['updated']} geschrieben, "
         f"{counts['skipped']} übersprungen, {counts['not_found']} nicht gefunden."
@@ -303,20 +326,35 @@ def main() -> None:
         Datei-für-Datei-Schleife weiter unten, step_files hat dann genau ein
         Element). step_files: bereits eingelesene (Pfad, Artist, Titel,
         Genre)-Tupel für step_root (siehe scan_songs._read_tagged_files) --
-        erspart jedem Schritt den erneuten Verzeichnis-Walk."""
+        erspart jedem Schritt den erneuten Verzeichnis-Walk.
+
+        quiet: True, wenn --schreiben in diesem Aufruf mitläuft UND ein PFAD
+        gesetzt ist -- dann liefert --schreiben gleich die EINE gewollte
+        Ergebniszeile pro Song (siehe write_lrc.write_all-Docstring), und
+        scan/abfragen/bewerten unterdrücken ihre eigenen, sonst fast
+        identischen Kopf-/Zwischen-/Zusammenfassungszeilen (Nutzer-Feedback:
+        "zeig auf trackebene [...] pro track eine zeile [...] schau dir das
+        bei dem alten programm ab", siehe ROADMAP.md -- das alte
+        fetch_songtext.py verarbeitete jeden Track ohnehin in einem
+        Rutsch und druckte genau eine Zeile). Ohne --schreiben (z.B.
+        `--abfragen` allein) bleibt die ausführliche Ausgabe die einzige
+        Rückmeldung -- dort NICHT unterdrückt."""
+        quiet = run_schreiben and step_root is not None
+
         if run_scan:
             if step_root is None:
                 print("scan: kein PFAD angegeben, nichts zu scannen.")
             else:
                 count = scan_songs.scan(step_root, False, conn, files=step_files)
-                print(f"scan: {count} Song(s) gescannt/aktualisiert.")
+                if not quiet:
+                    print(f"scan: {count} Song(s) gescannt/aktualisiert.")
 
         if run_abfragen:
             order: list[tuple[Path, str, str]] | None = None
             if step_root is not None:
                 order = build_file_song_map(step_root, False, conn, files=step_files)
             scope = {(a, t) for _, a, t in order} if order is not None else None
-            fetch_providers_normal(conn, scope=scope, file_order=order)
+            fetch_providers_normal(conn, scope=scope, file_order=order, quiet=quiet)
 
         if run_nachholen:
             scope = _scope_from_root(step_root, False, conn, files=step_files)
@@ -328,14 +366,16 @@ def main() -> None:
             if step_root is not None:
                 mapping = build_file_song_map(step_root, False, conn, files=step_files)
                 file_map = {(a, t): p for p, a, t in mapping}
-            evaluate_lyrics_normal(conn, scope=scope, file_song_map=file_map)
+            evaluate_lyrics_normal(
+                conn, scope=scope, file_song_map=file_map, quiet=quiet
+            )
 
         if run_schreiben:
             if step_root is None:
                 print("schreiben: kein PFAD angegeben, nichts zu schreiben.")
             else:
                 mapping = build_file_song_map(step_root, False, conn, files=step_files)
-                write_lrc_normal(conn, mapping)
+                write_lrc_normal(conn, mapping, quiet=quiet)
 
     try:
         if root is None:
@@ -361,6 +401,10 @@ def main() -> None:
             # Nachtrag "Dateinamen-Reihenfolge") -- `all_files` liefert das
             # bereits (_iter_audio_dfs: pro Ebene alphabetisch).
             all_files = scan_songs._read_tagged_files(root, args.recursive)
+            # Immer ausgeben, auch bei 0 Dateien -- sonst wirkt ein leeres
+            # PFAD-Verzeichnis (oder ein quiet-geschalteter Lauf, siehe
+            # _run_selected_steps-Docstring) komplett still, wie ein Hänger.
+            print(f"{len(all_files)} Datei(en) gefunden.")
             if not all_files:
                 # Keine Audiodatei unter PFAD gefunden -- trotzdem EINMAL
                 # mit leerer Datei-Liste ausführen, damit z.B. --nachholen/
@@ -368,10 +412,8 @@ def main() -> None:
                 # tun"-Rückmeldung geben, statt komplett stillzubleiben.
                 _run_selected_steps(root, [])
             else:
-                total_files = len(all_files)
-                print(f"{total_files} Datei(en) gefunden.")
                 current_folder: Path | None = None
-                for i, entry in enumerate(all_files, start=1):
+                for entry in all_files:
                     audio_path = entry[0]
                     if audio_path.parent != current_folder:
                         current_folder = audio_path.parent
@@ -380,8 +422,16 @@ def main() -> None:
                             label = str(rel) if str(rel) != "." else current_folder.name
                         except ValueError:
                             label = str(current_folder)
-                        print(f"\nOrdner: {label}")
-                    print(f"Datei {i}/{total_files}: {audio_path.name}")
+                        # Ordner-Kopfzeile im Stil des frueheren
+                        # fetch_songtext.py (siehe Git-Historie, main(): dort
+                        # `print(f"{_ts()}  ── {rel_dir}")`) -- EIN Marker
+                        # pro Ordnerwechsel, kein "i/N"-Zaehler: darunter
+                        # steht direkt die eine Ergebniszeile pro Track
+                        # (siehe write_lrc.write_all), keine weitere
+                        # Zwischenzeile noetig (Nutzer-Feedback: "zeig auf
+                        # trackebene [...] pro track eine zeile [...] schau
+                        # dir das bei dem alten programm ab").
+                        print(f"{lyrics_core._ts()}  ── {label}")
                     _run_selected_steps(audio_path.parent, [entry])
     finally:
         conn.close()

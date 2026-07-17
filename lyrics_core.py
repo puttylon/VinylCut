@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.15"
+__version__ = "1.13.16"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1196,6 +1196,7 @@ def _whisper_best(
     expected_dur: float = 0.0,
     artist: str = "",
     title: str = "",
+    reason: str = "",
 ) -> tuple[Path | None, float, bool, int, str, str | None, float | None]:
     """Verifikation via small: bester Kandidat nach IDF-Jaccard-Score (_idf_jaccard).
 
@@ -1238,6 +1239,13 @@ def _whisper_best(
     (realer Befund: ein zweiter/dritter Lauf über denselben Ordner lud
     weiterhin medium/large-v3 neu, obwohl die Transkripte längst gecacht
     waren -- siehe ROADMAP.md).
+
+    reason: optionaler Klartext, WARUM Whisper für diesen Song überhaupt
+    läuft (z.B. "nur 1/4 Provider" oder "Konsens nur 32% < 40%") -- wird nur
+    in die transiente "Whisper transkribiert..."-Statuszeile eingeblendet
+    (siehe ROADMAP.md, Nutzer-Feedback: ohne Grund nicht nachvollziehbar,
+    warum ein bestimmter Track überhaupt per Whisper geprüft wird). Ohne
+    Angabe (Standard "") bleibt die Zeile wie bisher.
     """
     ctx = _whisper_context_sec(expected_dur)
 
@@ -1339,7 +1347,8 @@ def _whisper_best(
     # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
     # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
     # ein Transkript genuegt fuer den Vergleich mit allen.
-    _print_status(f"  {flac_path.name}  Whisper transkribiert...")
+    reason_suffix = f" ({reason})" if reason else ""
+    _print_status(f"  {flac_path.name}  Whisper transkribiert...{reason_suffix}")
     raw_words, no_speech, logprob = _transcribe(
         flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
     )

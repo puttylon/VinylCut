@@ -78,9 +78,7 @@ def _load_candidate_texts(
         (song_id,),
     ).fetchall()
     by_provider = {quelle: inhalt for quelle, inhalt in rows if inhalt}
-    return [
-        (p, by_provider[p]) for p in lyrics_core._ALL_PROVIDERS if p in by_provider
-    ]
+    return [(p, by_provider[p]) for p in lyrics_core._ALL_PROVIDERS if p in by_provider]
 
 
 def _write_temp_lrc(content: str) -> Path:
@@ -178,6 +176,22 @@ def evaluate_song(
             "language": None,
         }
     elif flac_path is not None and flac_path.exists():
+        # Grund, WARUM Whisper ueberhaupt noetig ist (kein Konsens moeglich)
+        # -- nur fuer die transiente Statuszeile in lyrics_core._whisper_best
+        # (siehe dortiger Docstring, ROADMAP.md Punkt 6: ohne Grund fuer den
+        # Nutzer nicht nachvollziehbar). Zu wenige Provider (< _CONSENSUS_MIN_
+        # PROVIDERS) vs. genug Provider aber zu geringe Uebereinstimmung sind
+        # zwei verschiedene Gruende -- _provider_consensus gibt bei zu wenigen
+        # Providern IMMER 0.0 zurueck (kein echter Score), das waere sonst
+        # irrefuehrend als "Konsens 0%" dargestellt.
+        if len(candidates) < lyrics_core._CONSENSUS_MIN_PROVIDERS:
+            whisper_reason = f"nur {len(candidates)}/{n_providers} Provider"
+        else:
+            whisper_reason = (
+                f"Konsens nur {consensus_jaccard:.0%} < "
+                f"{lyrics_core._CONSENSUS_MIN_JACCARD:.0%}"
+            )
+
         # Modellwahl nach Sprach-Hint (siehe Moduldocstring) -- _whisper_best
         # liest _WHISPER_MODEL immer als Modul-Global, deshalb hier kurzzeitig
         # gesetzt und danach garantiert zurückgesetzt (auch bei Exceptions).
@@ -198,6 +212,7 @@ def evaluate_song(
                 expected_dur,
                 artist=artist_key,
                 title=titel_key,
+                reason=whisper_reason,
             )
         finally:
             lyrics_core._WHISPER_MODEL = prev_model
@@ -268,9 +283,7 @@ def evaluate_song(
                 "language": lrc_lang,
             }
     else:
-        best_content, _score = lyrics_core._heuristic_best(
-            all_candidates, expected_dur
-        )
+        best_content, _score = lyrics_core._heuristic_best(all_candidates, expected_dur)
         if best_content is not None:
             info_str = f"{prov_str} │ Heuristik"
             extras = {

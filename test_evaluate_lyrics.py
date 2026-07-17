@@ -127,7 +127,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
 
-        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
+        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title="", reason=""):
             # bevorzugt den Kandidaten mit LRC_A-Inhalt
             best = next(p for p in candidates if "true I love you" in p.read_text())
             return (best, 0.9, True, 42, "medium", "en", 0.5)
@@ -149,7 +149,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
 
-        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
+        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title="", reason=""):
             return (candidates[0], 0.01, True, 5, "medium", "en", -0.5)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
@@ -168,7 +168,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
 
-        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
+        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title="", reason=""):
             return (None, 0.0, False, 0, "medium", "en", None)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
@@ -188,7 +188,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
 
-        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
+        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title="", reason=""):
             return (None, 0.0, False, 0, "medium", "en", None)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
@@ -228,7 +228,7 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
         existing = tmp_path / "song.lrc"
         existing.write_text(LRC_B, encoding="utf-8")
 
-        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
+        def _fake_whisper_best(flac, candidates, expected_dur, artist="", title="", reason=""):
             assert existing in candidates
             return (existing, 0.9, True, 10, "medium", "en", 0.5)
 
@@ -276,7 +276,7 @@ class TestWhisperModelOverrideRestored(_GlobalsResetMixin):
         monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: "de")
         seen_models = []
 
-        def _raising_whisper_best(flac, candidates, expected_dur, artist="", title=""):
+        def _raising_whisper_best(flac, candidates, expected_dur, artist="", title="", reason=""):
             seen_models.append(lyrics_core._WHISPER_MODEL)
             raise RuntimeError("boom")
 

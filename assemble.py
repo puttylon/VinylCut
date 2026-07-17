@@ -17,7 +17,7 @@ from assemble_ui import (
 )
 from cut_ui import fmt_dur, live_input
 
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 
 console = Console()
 
@@ -33,6 +33,8 @@ TRIM_MIN_DURATION = 0.5
 DEFAULT_PLAY_DURATION = 3.0
 DEFAULT_CROSSFADE_PREVIEW_SEC = 8.0
 CROSSFADE_DURATION = 0.5
+_MIN_PREVIEW_SEC = 2.0  # Untergrenze für "p<Sek>" (Bedienfehler-Schutz)
+_MAX_PREVIEW_SEC = 30.0  # Obergrenze für "p<Sek>"
 
 
 def detect_silences(
@@ -103,6 +105,24 @@ def parse_offset(s: str) -> float:
         m, sec = s.split(":", 1)
         return sign * (int(m) * 60 + float(sec))
     return sign * float(s)
+
+
+def parse_preview_duration(action: str) -> float | None:
+    """Parst 'p<Sek>' (z.B. 'p18') zur Änderung der Vorschau-Dauer.
+
+    Gibt None zurück wenn kein p<Zahl>-Muster vorliegt oder der Wert
+    außerhalb [_MIN_PREVIEW_SEC, _MAX_PREVIEW_SEC] liegt — die Eingabe wird
+    dann komplett ignoriert (Bedienfehler-Schutz), nicht auf die Grenze geklemmt.
+    """
+    if not (action.startswith("p") and action[1:]):
+        return None
+    try:
+        new_dur = float(action[1:])
+    except ValueError:
+        return None
+    if _MIN_PREVIEW_SEC <= new_dur <= _MAX_PREVIEW_SEC:
+        return new_dur
+    return None
 
 
 def play_snippet(
@@ -633,30 +653,40 @@ def main():
 
         # --- Phase 1: Punkte setzen ---
         normton = True
+        preview_duration = DEFAULT_PLAY_DURATION
         i = len(history)
         while i < len(steps):
             step = steps[i]
             current_pos = history[i]["pos"] if i < len(history) else step["suggested"]
+            skip_play = False
 
             while True:
                 panel = build_points_panel(
-                    stem, steps, history, i, current_pos, normton
+                    stem, steps, history, i, current_pos, normton, preview_duration
                 )
                 live.update(panel)
                 live.refresh()
 
-                if normton:
-                    play_snippet_with_tone(flac_path, current_pos)
-                else:
-                    play_snippet(flac_path, current_pos)
+                if not skip_play:
+                    if normton:
+                        play_snippet_with_tone(flac_path, current_pos, preview_duration)
+                    else:
+                        play_snippet(flac_path, current_pos, preview_duration)
+                skip_play = False
 
                 action = live_input(
                     live,
-                    build_points_panel(stem, steps, history, i, current_pos, normton),
+                    build_points_panel(
+                        stem, steps, history, i, current_pos, normton, preview_duration
+                    ),
                     "> ",
                 )
 
                 if action == "p":
+                    continue
+                elif (new_dur := parse_preview_duration(action)) is not None:
+                    preview_duration = new_dur
+                    skip_play = True
                     continue
                 elif action == "n":
                     normton = not normton
@@ -698,31 +728,38 @@ def main():
             a_pos = history[a_idx]["pos"]
             b_pos = history[b_idx]["pos"]
 
+            skip_play = False
             while True:
                 bds = _cf_boundaries(history, n_boundaries, j, a_pos, b_pos)
                 panel = build_crossfade_panel(
-                    stem, bds, len(cf_done), j, active, normton_cf
+                    stem, bds, len(cf_done), j, active, normton_cf, cf_preview_sec
                 )
                 live.update(panel)
                 live.refresh()
 
-                play_crossfade_preview(
-                    flac_path,
-                    a_pos,
-                    b_pos,
-                    preview_sec=cf_preview_sec,
-                    normton=normton_cf,
-                )
+                if not skip_play:
+                    play_crossfade_preview(
+                        flac_path,
+                        a_pos,
+                        b_pos,
+                        preview_sec=cf_preview_sec,
+                        normton=normton_cf,
+                    )
+                skip_play = False
 
                 action = live_input(
                     live,
                     build_crossfade_panel(
-                        stem, bds, len(cf_done), j, active, normton_cf
+                        stem, bds, len(cf_done), j, active, normton_cf, cf_preview_sec
                     ),
                     "> ",
                 )
 
                 if action == "p":
+                    continue
+                elif (new_dur := parse_preview_duration(action)) is not None:
+                    cf_preview_sec = new_dur
+                    skip_play = True
                     continue
                 elif action == "n":
                     normton_cf = not normton_cf

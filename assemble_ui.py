@@ -19,11 +19,11 @@ def build_analysis_panel(stem: str, status_lines: list) -> Panel:
     """Phase 0: Analyse-Fortschritt und Seitenanzahl-Eingabe."""
     body = Text()
     for line in status_lines:
-        body.append(line + "\n", style="dim")
+        body.append(line + "\n", style="grey35")
     return Panel(
         body,
         title=f"[bold]{stem}[/bold]",
-        subtitle="[dim]Analyse[/dim]",
+        subtitle="[grey35]Analyse[/grey35]",
         expand=True,
         border_style="blue dim",
     )
@@ -36,6 +36,7 @@ def build_points_panel(
     current_i: int,
     current_pos: float,
     normton: bool,
+    preview_duration: float = 3.0,
 ) -> Panel:
     """Phase 1: Tabelle aller Punkte mit Status, Position und Delta."""
     n = len(steps)
@@ -57,9 +58,9 @@ def build_points_panel(
             delta = pos - suggested
             delta_str = f"{delta:+.2f}s" if abs(delta) > 0.01 else ""
             pos_text = Text(fmt_dur(pos))
-            delta_text = Text(delta_str, style="dim")
+            delta_text = Text(delta_str, style="grey35")
             status_sym = Text("✓", style="green")
-            row_style = "dim"
+            row_style = "grey35"
         elif i == current_i:
             pos = current_pos
             delta = pos - suggested
@@ -77,13 +78,13 @@ def build_points_panel(
             pos_text = Text("~" + fmt_dur(suggested))
             delta_text = Text("")
             status_sym = Text("○", style="dim yellow")
-            row_style = "dim"
+            row_style = "grey35"
 
         table.add_row(
             f"{i + 1:02d}",
             step["desc"],
             pos_text,
-            Text(fmt_dur(suggested), style="dim"),
+            Text(fmt_dur(suggested), style="grey35"),
             delta_text,
             status_sym,
             style=row_style,
@@ -102,20 +103,21 @@ def build_points_panel(
         f"Position: {fmt_dur(current_pos)}   Vorschlag: {fmt_dur(step['suggested'])}   "
     )
     info.append(f"Δ {delta:+.2f}s\n", style=delta_style)
-    info.append("Normton: ", style="dim")
+    info.append("Normton: ", style="grey35")
     info.append(
-        "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim"
+        "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "grey35"
     )
     info.append(
-        "[p] abspielen  [+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
+        f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (2-30s)  "
+        "[+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
         "[u] rückgängig  [n] Normton  Offset: ±m:ss",
-        style="dim",
+        style="grey35",
     )
 
     return Panel(
-        Group(table, Rule(style="dim"), info),
+        Group(table, Rule(style="grey35"), info),
         title=f"[bold]{stem}[/bold]",
-        subtitle=f"[dim]Phase 1 · Punkte setzen · {current_i}/{n} bestätigt[/dim]",
+        subtitle=f"[grey35]Phase 1 · Punkte setzen · {current_i}/{n} bestätigt[/grey35]",
         expand=True,
         border_style="blue dim",
     )
@@ -128,6 +130,7 @@ def build_crossfade_panel(
     current_j: int,
     active: str,
     normton: bool,
+    preview_duration: float = 8.0,
 ) -> Panel:
     """Phase 2: Crossfade-Vorschau.
 
@@ -148,20 +151,20 @@ def build_crossfade_panel(
     for j, bd in enumerate(boundaries):
         gap = bd["b_pos"] - bd["a_pos"]
         gap_style = (
-            "dim"
+            "grey35"
             if j != current_j
             else ("green" if gap < 120 else ("yellow" if gap < 300 else "red"))
         )
         label = f"{bd['left']}→{bd['right']}"
 
         if j < cf_done_count:
-            row_style = "dim"
+            row_style = "grey35"
             status_sym = Text("✓", style="green")
         elif j == current_j:
             row_style = "bold"
             status_sym = Text("→", style="bold cyan")
         else:
-            row_style = "dim"
+            row_style = "grey35"
             status_sym = Text("○", style="dim yellow")
 
         table.add_row(
@@ -181,30 +184,31 @@ def build_crossfade_panel(
     info.append(
         f"Grenze {bd['left']}→{bd['right']}  ({current_j + 1}/{n})\n", style="bold cyan"
     )
-    info.append(f"Ende Seite {bd['left']}:     ", style="dim")
+    info.append(f"Ende Seite {bd['left']}:     ", style="grey35")
     info.append(fmt_dur(bd["a_pos"]), style="bold" if a_active else "")
     info.append(
-        "  ← aktiv\n" if a_active else "\n", style="cyan" if a_active else "dim"
+        "  ← aktiv\n" if a_active else "\n", style="cyan" if a_active else "grey35"
     )
-    info.append(f"Anfang Seite {bd['right']}: ", style="dim")
+    info.append(f"Anfang Seite {bd['right']}: ", style="grey35")
     info.append(fmt_dur(bd["b_pos"]), style="bold" if b_active else "")
     info.append(
-        "  ← aktiv\n" if b_active else "\n", style="cyan" if b_active else "dim"
+        "  ← aktiv\n" if b_active else "\n", style="cyan" if b_active else "grey35"
     )
-    info.append(f"Herausgeschnitten: {fmt_dur(gap)}   Normton: ", style="dim")
+    info.append(f"Herausgeschnitten: {fmt_dur(gap)}   Normton: ", style="grey35")
     info.append(
-        "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "dim"
+        "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "grey35"
     )
     info.append(
+        f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (2-30s)  "
         "[a] Fokus Ende  [b] Fokus Anfang  [+/-] ±0.5s  [++/--] ±2s  "
         "[ok] bestätigen  [u] rückgängig  [n] Normton  Offset: ±m:ss",
-        style="dim",
+        style="grey35",
     )
 
     return Panel(
-        Group(table, Rule(style="dim"), info),
+        Group(table, Rule(style="grey35"), info),
         title=f"[bold]{stem}[/bold]",
-        subtitle=f"[dim]Phase 2 · Crossfade · {cf_done_count}/{n} bestätigt[/dim]",
+        subtitle=f"[grey35]Phase 2 · Crossfade · {cf_done_count}/{n} bestätigt[/grey35]",
         expand=True,
         border_style="blue dim",
     )
@@ -240,13 +244,13 @@ def build_export_panel(
         status = export_status[i] if i < len(export_status) else ""
         if status == "✓":
             sym = Text("✓", style="green")
-            row_style = "dim"
+            row_style = "grey35"
         elif status == "…":
             sym = Text("…", style="bold cyan")
             row_style = "bold"
         else:
             sym = Text("○", style="dim yellow")
-            row_style = "dim"
+            row_style = "grey35"
         table.add_row(
             f"{i + 1:02d}",
             label,
@@ -268,9 +272,9 @@ def build_export_panel(
         info.append(f"Schneide Segment {done + 1}/{n}...", style="bold")
 
     return Panel(
-        Group(table, Rule(style="dim"), info),
+        Group(table, Rule(style="grey35"), info),
         title=f"[bold]{stem}[/bold]",
-        subtitle=f"[dim]Phase 3 · Schneiden & Verbinden · {done}/{n}[/dim]",
+        subtitle=f"[grey35]Phase 3 · Schneiden & Verbinden · {done}/{n}[/grey35]",
         expand=True,
         border_style="blue dim",
     )
@@ -288,17 +292,17 @@ def build_normalize_panel(
     peaks = Text()
     peaks.append(f"Links:     {left_db:+.2f} dBFS\n")
     peaks.append(f"Rechts:    {right_db:+.2f} dBFS\n")
-    peaks.append("Differenz: ", style="dim")
+    peaks.append("Differenz: ", style="grey35")
     peaks.append(f"{diff:+.2f} dB\n", style=diff_style)
 
     status_text = Text()
     for line in status_lines:
-        status_text.append(line + "\n", style="dim")
+        status_text.append(line + "\n", style="grey35")
 
     return Panel(
-        Group(peaks, Rule(style="dim"), status_text),
+        Group(peaks, Rule(style="grey35"), status_text),
         title=f"[bold]{stem}[/bold]",
-        subtitle="[dim]Phase 4 · Normalisierung[/dim]",
+        subtitle="[grey35]Phase 4 · Normalisierung[/grey35]",
         expand=True,
         border_style="blue dim",
     )

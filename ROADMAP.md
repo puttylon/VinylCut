@@ -805,6 +805,60 @@ Index bei vielen kleinen Ordnern viel häufiger neu gebaut als beabsichtigt
 wenn versehentlich pro Ordner bei 0 neu gestartet wird). Der Zähler muss
 also außerhalb der Ordner-Schleife leben, nicht pro Ordner neu.
 
+**✓ Nachtrag — Task #15 umgesetzt: Phasen laufen jetzt pro Ordner statt
+global.** Direkt im Anschluss an den obigen Walk-Fix angegangen (Nutzer:
+"gehe task #15 an. im anschluss werde ich testen."), mit der oben schon
+mitgegebenen Nebenbedingung zum IDF-Refresh-Zähler.
+
+**Umbau in `songtext_pipeline.py`:** `main()`s Schritt-Dispatch (scan/
+abfragen/nachholen/bewerten/schreiben) ist jetzt in eine geschlossene
+Closure `_run_selected_steps(step_root, step_files)` gewandert, die EINEN
+Ordner (oder global, `step_root=None`, für den PFAD-losen Fall) komplett
+durchläuft. Mit PFAD: `scan_songs._read_tagged_files()` liest den ganzen
+Baum EINMAL, danach werden die Dateien nach `path.parent` gruppiert und für
+jeden Ordner (sortiert) `_run_selected_steps(folder, folder_files)`
+aufgerufen -- inklusive einer Fortschrittszeile `Ordner i/N: <relativer
+Pfad> (M Datei(en))` davor. Kein Ordner mit Audiodateien gefunden (leeres
+PFAD-Verzeichnis) -> `_run_selected_steps` läuft trotzdem EINMAL mit leerer
+Datei-Liste, damit z.B. `--nachholen` weiterhin seine gewohnte "nichts
+gefunden"-Meldung zeigt statt komplett stillzubleiben. Ohne PFAD (z.B.
+`--nachholen` allein) bleibt es beim bisherigen einmaligen, globalen Aufruf
+über die ganze Cache-DB -- dort gibt es keine Ordner-Struktur.
+
+**IDF-Refresh-Zähler aus `evaluate_lyrics.py` in `lyrics_core.py`
+verschoben** (siehe oben mitgegebene Nebenbedingung): neue modulglobale
+`lyrics_core._contrastive_context_built_ever`/
+`_contrastive_context_evaluations_since_refresh` + neue
+`lyrics_core._note_contrastive_evaluation(refresh_interval)` -- vorher lebte
+dieser Zustand als lokale Variablen (`context_built`/`evaluated_count`) in
+`evaluate_all()` und wäre bei einem Aufruf pro Ordner bei JEDEM Ordner auf 0
+zurückgefallen, hätte den kontrastiven Kontext also viel öfter als die
+beabsichtigten 50 Songs neu aufgebaut. "Wurde je gebaut" wird dabei bewusst
+über ein EIGENES Flag verfolgt, nicht über `_contrastive_idf is None` --
+sonst hätte ein in Tests gemocktes `_build_contrastive_context` (das
+`_contrastive_idf` nicht setzt) bei jedem Song erneut als "nie gebaut"
+gegolten.
+
+4 neue Tests: `test_idf_refresh_zaehler_bleibt_ueber_mehrere_evaluate_all_
+aufrufe_erhalten` (zwei `evaluate_all()`-Aufrufe mit je einem Song, Refresh-
+Intervall 2 -- nur 1 statt 2 `_build_contrastive_context`-Aufrufe, weil der
+zweite Song insgesamt erst der zweite ist, nicht wieder der erste eines
+neuen Zählers); `test_main_verarbeitet_mehrere_ordner_nacheinander_komplett`
+(zwei Alben in getrennten Unterordnern, `--recursive`, prüft Ordner-
+Fortschrittszeilen UND dass jeder Ordner scan/abfragen/schreiben wirklich
+einzeln durchläuft -- zweimal "scan: 1 Song(s)...", nicht einmal "scan: 2
+Song(s)..."); `test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_
+einmal_durch` (leeres PFAD-Verzeichnis, kein Ordner gefunden, Schritte
+laufen trotzdem einmal). Bestehende Tests liefen unverändert durch, ohne
+Anpassung nötig (nutzen fast alle nur einen einzigen Ordner -- die
+Ordner-Schleife iteriert dann trivial genau einmal, identisch zum alten
+globalen Verhalten). Volle Suite: 467/467 grün. `ruff check`/`ruff format`
+sauber. `lyrics_core.__version__` auf `1.13.11` erhöht (siehe
+CLAUDE.md-Versionierungsregel).
+
+Noch nicht live gegen die echte Produktionsbibliothek getestet -- der
+Nutzer testet im Anschluss selbst.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

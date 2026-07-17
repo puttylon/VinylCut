@@ -37,6 +37,8 @@ class _GlobalsResetMixin:
         lyrics_core._contrastive_lang_pools = None
         lyrics_core._contrastive_song_texts = None
         lyrics_core._contrastive_song_words_cache = {}
+        lyrics_core._contrastive_context_built_ever = False
+        lyrics_core._contrastive_context_evaluations_since_refresh = 0
 
     def teardown_method(self):
         self.setup_method()
@@ -383,6 +385,53 @@ class TestEvaluateAll(_GlobalsResetMixin):
 
         # 1x initial + 1x nach Song 2 (Refresh-Intervall=2) = 2 Aufrufe fuer 3 Songs
         assert len(refresh_calls) == 2
+
+    def test_idf_refresh_zaehler_bleibt_ueber_mehrere_evaluate_all_aufrufe_erhalten(
+        self, tmp_path, monkeypatch
+    ):
+        """Regressionstest für Task #15 (Phasen pro Ordner, siehe ROADMAP.md):
+        songtext_pipeline.py wird evaluate_all() künftig mehrfach im selben
+        Prozess aufrufen (einmal pro Ordner). Der "wurde je gebaut"/"wie
+        viele Songs seit dem letzten Aufbau"-Fortschritt muss dabei ÜBER
+        mehrere Aufrufe hinweg erhalten bleiben -- sonst würde der Kontext
+        bei jedem Aufruf (jedem Ordner) erneut als "noch nie gebaut" gelten
+        und viel öfter als die beabsichtigten _IDF_REFRESH_INTERVAL Songs neu
+        aufgebaut werden."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "song a")
+        cs._get_or_create_song(conn, "artist b", "song b")
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(evaluate_lyrics, "_IDF_REFRESH_INTERVAL", 2)
+
+        refresh_calls = []
+        monkeypatch.setattr(
+            lyrics_core,
+            "_build_contrastive_context",
+            lambda: refresh_calls.append(1),
+        )
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            lambda conn, a, t, *ar, **kw: (
+                False,
+                "x",
+                {"reason": "kein-provider", "content": None},
+            ),
+        )
+
+        # simuliert zwei Ordner mit je einem Song, statt einem Aufruf mit
+        # scope=None über beide -- genau das, was eine Ordner-für-Ordner-
+        # Schleife in main() künftig tun würde.
+        evaluate_lyrics.evaluate_all(conn, scope={("artist a", "song a")})
+        evaluate_lyrics.evaluate_all(conn, scope={("artist b", "song b")})
+
+        # 1x initial (erster Song, erster Aufruf) -- der zweite Song im
+        # ZWEITEN Aufruf ist erst der insgesamt zweite bewertete Song, löst
+        # also (Refresh-Intervall=2) noch KEINEN erneuten Aufbau aus.
+        assert len(refresh_calls) == 1
 
 
 class TestEvaluateAllSkipUnveraendert(_GlobalsResetMixin):

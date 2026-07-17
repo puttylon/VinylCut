@@ -289,53 +289,91 @@ def main() -> None:
     conn = cache_store.open_cache(_default_db_path())
     root: Path | None = Path(args.path).resolve() if args.path else None
 
-    # Verzeichnis-Walk + Tag-Read passieren jetzt GENAU EINMAL pro Lauf,
-    # nicht mehr einmal pro Schritt (bis zu sechsmal derselbe Baum, siehe
-    # scan_songs._read_tagged_files-Docstring -- bei einer großen, ggf.
-    # netzwerk-gemounteten Bibliothek der eigentlich teure Teil, nicht die
-    # anschließenden reinen DB-Abgleiche). Wird an build_file_song_map/
-    # _scope_from_root durchgereicht statt dass die selbst erneut scannen.
-    files: list[tuple[Path, str, str, str]] | None = None
-    if root is not None:
-        files = scan_songs._read_tagged_files(root, args.recursive)
-
-    if root is not None and (run_scan or run_bewerten or run_schreiben):
-        file_song_map = build_file_song_map(root, args.recursive, conn, files=files)
-        print(
-            f"Datei-Zuordnung: {len(file_song_map)} Datei(en) einem Song in "
-            "der DB zugeordnet."
-        )
-
-    try:
+    def _run_selected_steps(
+        step_root: Path | None,
+        step_files: list[tuple[Path, str, str, str]] | None,
+    ) -> None:
+        """Führt die gewählten Schritte einmal aus -- entweder global (siehe
+        main() ohne PFAD, step_root=None) oder für GENAU EINEN Ordner (siehe
+        Ordner-für-Ordner-Schleife weiter unten). step_files: bereits
+        eingelesene (Pfad, Artist, Titel, Genre)-Tupel für step_root (siehe
+        scan_songs._read_tagged_files) -- erspart jedem Schritt den erneuten
+        Verzeichnis-Walk."""
         if run_scan:
-            if root is None:
+            if step_root is None:
                 print("scan: kein PFAD angegeben, nichts zu scannen.")
             else:
-                count = scan_songs.scan(root, args.recursive, conn, files=files)
+                count = scan_songs.scan(step_root, False, conn, files=step_files)
                 print(f"scan: {count} Song(s) gescannt/aktualisiert.")
 
         if run_abfragen:
-            scope = _scope_from_root(root, args.recursive, conn, files=files)
+            scope = _scope_from_root(step_root, False, conn, files=step_files)
             fetch_providers_normal(conn, scope=scope)
 
         if run_nachholen:
-            scope = _scope_from_root(root, args.recursive, conn, files=files)
+            scope = _scope_from_root(step_root, False, conn, files=step_files)
             fetch_providers_nachhol(conn, scope=scope)
 
         if run_bewerten:
-            scope = _scope_from_root(root, args.recursive, conn, files=files)
+            scope = _scope_from_root(step_root, False, conn, files=step_files)
             file_map: dict[tuple[str, str], Path] = {}
-            if root is not None:
-                mapping = build_file_song_map(root, args.recursive, conn, files=files)
+            if step_root is not None:
+                mapping = build_file_song_map(step_root, False, conn, files=step_files)
                 file_map = {(a, t): p for p, a, t in mapping}
             evaluate_lyrics_normal(conn, scope=scope, file_song_map=file_map)
 
         if run_schreiben:
-            if root is None:
+            if step_root is None:
                 print("schreiben: kein PFAD angegeben, nichts zu schreiben.")
             else:
-                mapping = build_file_song_map(root, args.recursive, conn, files=files)
+                mapping = build_file_song_map(step_root, False, conn, files=step_files)
                 write_lrc_normal(conn, mapping)
+
+    try:
+        if root is None:
+            # Kein PFAD -> keine Ordner zum Durchlaufen, bewusst weiterhin
+            # global über die ganze Bibliothek (--nachholen/--abfragen/
+            # --bewerten ohne PFAD, siehe Verwendung oben).
+            _run_selected_steps(None, None)
+        else:
+            # Verzeichnis-Walk + Tag-Read passieren GENAU EINMAL pro Lauf
+            # (siehe scan_songs._read_tagged_files-Docstring -- bei einer
+            # großen, ggf. netzwerk-gemounteten Bibliothek der eigentlich
+            # teure Teil, nicht die anschließenden reinen DB-Abgleiche).
+            # Danach nach Ordner gruppiert (siehe Nutzer-Feedback: "Phasen
+            # pro Ordner mit Musik durchlaufen" statt jeden Schritt global
+            # über den ganzen Baum) -- jeder Ordner durchläuft alle
+            # gewählten Schritte, BEVOR der nächste beginnt: sichtbarer
+            # Fortschritt Ordner für Ordner statt eines langen, stillen
+            # Laufs, und bei einem Abbruch mitten im Lauf sind bereits
+            # fertige Ordner schon geschrieben (siehe ROADMAP.md).
+            all_files = scan_songs._read_tagged_files(root, args.recursive)
+            folders: dict[Path, list[tuple[Path, str, str, str]]] = {}
+            for entry in all_files:
+                folders.setdefault(entry[0].parent, []).append(entry)
+
+            total_folders = len(folders)
+            if not folders:
+                # Kein Ordner mit Audiodateien unter PFAD gefunden --
+                # trotzdem EINMAL mit leerer Datei-Liste ausführen, damit
+                # z.B. --nachholen/--abfragen ihre gewohnte "nichts
+                # gefunden/nichts zu tun"-Rückmeldung geben, statt komplett
+                # stillzubleiben.
+                _run_selected_steps(root, [])
+            else:
+                print(f"{total_folders} Ordner mit Audiodateien gefunden.")
+                for i, folder in enumerate(sorted(folders), start=1):
+                    folder_files = folders[folder]
+                    try:
+                        rel = folder.relative_to(root)
+                        label = str(rel) if str(rel) != "." else folder.name
+                    except ValueError:
+                        label = str(folder)
+                    print(
+                        f"\nOrdner {i}/{total_folders}: {label} "
+                        f"({len(folder_files)} Datei(en))"
+                    )
+                    _run_selected_steps(folder, folder_files)
     finally:
         conn.close()
 

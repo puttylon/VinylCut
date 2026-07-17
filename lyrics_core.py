@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.10"
+__version__ = "1.13.11"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -247,6 +247,17 @@ _contrastive_song_texts: "dict[int, list[str]] | None" = (
     None  # song_id -> Kandidatentexte (roh)
 )
 _contrastive_song_words_cache: dict = {}  # song_id -> tokenisierte Kandidatentexte, memoisiert
+
+# Verfolgt "wurde der Kontext in diesem Prozess je gebaut" + "wie viele Songs
+# seit dem letzten Aufbau bewertet" -- bewusst NICHT als lokale Variablen in
+# evaluate_lyrics.evaluate_all() (siehe _note_contrastive_evaluation unten):
+# ruft songtext_pipeline.py evaluate_all() mehrfach im selben Prozess auf
+# (z.B. einmal pro Ordner bei einer Ordner-für-Ordner-Schleife), müssen
+# beide Zähler ÜBER diese Aufrufe hinweg erhalten bleiben, sonst würde der
+# Kontext bei jedem Aufruf erneut als "noch nie gebaut" gelten und viel
+# öfter als beabsichtigt (alle _IDF_REFRESH_INTERVAL Songs) neu aufgebaut.
+_contrastive_context_built_ever = False
+_contrastive_context_evaluations_since_refresh = 0
 
 
 def _ts() -> str:
@@ -923,6 +934,35 @@ def _build_contrastive_context() -> None:
         f"Kontrastiver Hintergrund-Kontext gebaut: {n_docs} IDF-Dokumente, "
         f"{len(song_texts)} Cache-Songs, {len(pools)} Sprachen mit Hintergrund-Pool."
     )
+
+
+def _note_contrastive_evaluation(refresh_interval: int) -> None:
+    """Von evaluate_lyrics.evaluate_all() vor JEDEM tatsächlich bewerteten
+    Song aufgerufen (nicht bei übersprungenen, siehe dortiger Skip) -- baut
+    den kontrastiven Kontext, falls in diesem Prozess noch nie gebaut, oder
+    aktualisiert ihn alle `refresh_interval` tatsächlich bewertete Songs.
+
+    Der Zustand (_contrastive_context_built_ever/_evaluations_since_refresh)
+    ist bewusst modulglobal, nicht lokal in evaluate_all() -- ruft
+    songtext_pipeline.py evaluate_all() mehrfach im selben Prozess auf (z.B.
+    einmal pro Ordner), bleibt der Fortschritt über diese Aufrufe hinweg
+    erhalten. "Built ever" wird dabei UNABHÄNGIG von _contrastive_idfs
+    tatsächlichem Wert verfolgt (nicht `_contrastive_idf is None` als
+    Signal) -- sonst würde ein in Tests gemocktes _build_contrastive_context
+    (das _contrastive_idf nicht setzt) bei jedem Song erneut als "nie
+    gebaut" gelten.
+    """
+    global \
+        _contrastive_context_built_ever, \
+        _contrastive_context_evaluations_since_refresh
+    if (
+        not _contrastive_context_built_ever
+        or _contrastive_context_evaluations_since_refresh >= refresh_interval
+    ):
+        _build_contrastive_context()
+        _contrastive_context_built_ever = True
+        _contrastive_context_evaluations_since_refresh = 0
+    _contrastive_context_evaluations_since_refresh += 1
 
 
 def _lookup_cache_song_id(artist_key: str, titel_key: str) -> int | None:

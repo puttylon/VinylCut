@@ -407,13 +407,16 @@ def evaluate_all(
     # Kontrastiver Kontext (siehe lyrics_core._build_contrastive_context) UND
     # der IDF-Refresh alle _IDF_REFRESH_INTERVAL Songs laufen bewusst NICHT
     # mehr vor der Schleife/nach Zeilen-Index, sondern lazy anhand
-    # tatsaechlich bewerteter Songs (evaluated_count) -- ein Lauf, in dem
-    # JEDER Song wegen _skip_reevaluation uebersprungen wird, baut den
-    # Kontext dann gar nicht erst auf (realer Befund: ein reiner
-    # Wiederholungslauf ueber einen unveraenderten Pfad baute den Kontext
-    # trotzdem jedes Mal, siehe ROADMAP.md).
-    context_built = False
-    evaluated_count = 0
+    # tatsaechlich bewerteter Songs (siehe lyrics_core._note_contrastive_
+    # evaluation) -- ein Lauf, in dem JEDER Song wegen _skip_reevaluation
+    # uebersprungen wird, baut den Kontext dann gar nicht erst auf (realer
+    # Befund: ein reiner Wiederholungslauf ueber einen unveraenderten Pfad
+    # baute den Kontext trotzdem jedes Mal, siehe ROADMAP.md). Der Fortschritt
+    # (wurde je gebaut, wie viele Songs seit dem letzten Aufbau) ist dabei
+    # bewusst modulglobal in lyrics_core.py, nicht lokal hier -- ruft
+    # songtext_pipeline.py evaluate_all() mehrfach im selben Prozess auf
+    # (z.B. einmal pro Ordner), bleibt der Fortschritt ueber diese Aufrufe
+    # hinweg erhalten, siehe dortiger Docstring.
 
     for i, (artist_key, titel_key) in enumerate(to_evaluate, start=1):
         flac_path = file_song_map.get((artist_key, titel_key))
@@ -427,12 +430,7 @@ def evaluate_all(
             counts["uebersprungen"] += 1
             continue
 
-        if not context_built:
-            lyrics_core._build_contrastive_context()
-            context_built = True
-        elif evaluated_count > 0 and evaluated_count % _IDF_REFRESH_INTERVAL == 0:
-            lyrics_core._build_contrastive_context()
-        evaluated_count += 1
+        lyrics_core._note_contrastive_evaluation(_IDF_REFRESH_INTERVAL)
 
         lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
 

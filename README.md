@@ -155,6 +155,8 @@ Steuer-Skript für die Songtexte-Pipeline (Architektur siehe `workflow für song
 
 Mit PFAD grenzt jedes Flag (außer `--scan`/`--schreiben`, die ohnehin PFAD brauchen) auf die Songs unter PFAD ein; ohne PFAD arbeitet es über die GANZE Bibliothek (explizite „alles nachziehen"-Absicht). Das gilt auch für `--nachholen` — gezielt nur die fehlenden Anbieter EINES Albums nachholen ist damit möglich, ohne die ganze Bibliothek anzufassen.
 
+**Mit PFAD läuft die Pipeline Ordner für Ordner:** Tags werden einmal für den ganzen Baum gelesen, dann nach Ordner gruppiert — für jeden Ordner (Album) laufen alle gewählten Schritte komplett durch (`scan` → `abfragen`/`nachholen` → `bewerten` → `schreiben`), bevor der nächste Ordner beginnt. Das gibt sichtbaren Fortschritt Ordner für Ordner statt eines langen, stillen Laufs über die ganze Bibliothek, und bei einem Abbruch mitten im Lauf sind bereits fertige Ordner schon geschrieben. Ohne PFAD (z.B. `--nachholen` allein) läuft weiterhin alles global in einem Rutsch über die ganze Cache-DB, da es dort keine Ordner-Struktur gibt.
+
 Für die lrclib-Quelle wird vor jeder echten Live-Abfrage zuerst ein lokaler LRCLib-Datenbank-Abzug durchsucht (`/Volumes/music/db.sqlite3`, falls erreichbar) — nur bei 0 Treffern dort wird wie bisher live gefragt. Kein eigenes Flag nötig; fehlt der Abzug (Mount nicht vorhanden), degradiert die Pipeline automatisch auf reines Live-Fragen (siehe `CACHE_DESIGN.md`).
 
 ```bash
@@ -281,7 +283,7 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Schritt 
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | z.B. `"1.13.10"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
+| `v` | z.B. `"1.13.11"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
 | `r` | `"ok"` / `"nf"` | Ergebnis: LRC vorhanden / nicht gefunden |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
@@ -298,13 +300,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.13.10", "r": "ok", "outcome": "write",
+  "v": "1.13.11", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
   "method": "whisper-large-v3", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.13.10", "r": "nf", "outcome": "delete",
+  "v": "1.13.11", "r": "nf", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "kein-provider", "words": null, "language": null, "ts": "2026-07-09T09:28:25"

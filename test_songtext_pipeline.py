@@ -680,6 +680,91 @@ def test_main_liest_tags_nicht_mehr_pro_schritt_neu(tmp_path, monkeypatch, capsy
     assert calls == [audio, audio, audio]
 
 
+def test_main_verarbeitet_mehrere_ordner_nacheinander_komplett(
+    tmp_path, monkeypatch, capsys
+):
+    """Task #15 (siehe ROADMAP.md): "Phasen pro Ordner mit Musik
+    durchlaufen" statt jeden Schritt global über den ganzen Baum. Zwei
+    Alben in getrennten Unterordnern -- jedes muss vollständig durchlaufen
+    werden (scan bis schreiben), inklusive der Ordner-Fortschrittsausgabe."""
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    album1 = tmp_path / "album1"
+    album1.mkdir()
+    audio1 = album1 / "01 - Song A.flac"
+    audio1.write_bytes(b"")
+
+    album2 = tmp_path / "album2"
+    album2.mkdir()
+    audio2 = album2 / "01 - Song B.flac"
+    audio2.write_bytes(b"")
+
+    tags_by_path = {
+        audio1: ("Artist X", "Song A", ""),
+        audio2: ("Artist Y", "Song B", ""),
+    }
+    monkeypatch.setattr(
+        songtext_pipeline.lyrics_core,
+        "_read_audio_tags",
+        lambda path: tags_by_path[path],
+    )
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    fake_run = _fake_subprocess_run({})  # kein Provider liefert etwas
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(tmp_path), "--recursive"]
+    )
+
+    try:
+        songtext_pipeline.main()
+    finally:
+        _reset_lyrics_core_globals()
+
+    out = capsys.readouterr().out
+    assert "2 Ordner mit Audiodateien gefunden." in out
+    assert "Ordner 1/2: album1 (1 Datei(en))" in out
+    assert "Ordner 2/2: album2 (1 Datei(en))" in out
+    # jeder Ordner durchläuft scan/abfragen/bewerten/schreiben EINZELN --
+    # also zweimal "scan: 1 Song(s)...", nicht einmal "scan: 2 Song(s)...".
+    assert out.count("scan: 1 Song(s) gescannt/aktualisiert.") == 2
+    assert out.count("abfragen: 1 Song(s) abgefragt.") == 2
+    assert out.count("nicht gefunden.") == 2  # kein Provider -> je 1 "nicht gefunden"
+
+    conn = cs.open_cache(db_path)
+    rows = conn.execute(
+        "SELECT artist_key, titel_key FROM songs ORDER BY artist_key"
+    ).fetchall()
+    assert rows == [
+        (cs.normalize_key("Artist X"), cs.normalize_key("Song A")),
+        (cs.normalize_key("Artist Y"), cs.normalize_key("Song B")),
+    ]
+
+
+def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
+    tmp_path, monkeypatch, capsys
+):
+    """Kein Ordner mit Audiodateien unter PFAD gefunden (leeres
+    Verzeichnis) -- die Schritte laufen trotzdem EINMAL mit leerer
+    Datei-Liste, statt komplett stillzubleiben (z.B. damit --nachholen
+    seine gewohnte "nichts gefunden"-Meldung zeigt)."""
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+    empty_dir = tmp_path / "leer"
+    empty_dir.mkdir()
+
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(empty_dir), "--recursive"]
+    )
+
+    songtext_pipeline.main()
+
+    out = capsys.readouterr().out
+    assert "Ordner mit Audiodateien gefunden" not in out
+    assert "scan: 0 Song(s) gescannt/aktualisiert." in out
+
+
 # --- Voller Pipeline-Lauf: scan -> abfragen -> bewerten -> schreiben ------
 # prüft die reale Verdrahtung zwischen den Modulen (nicht nur einzeln
 # gemockt wie in den Modul-eigenen Testdateien).

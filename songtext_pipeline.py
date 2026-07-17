@@ -45,7 +45,10 @@ import write_lrc
 
 
 def build_file_song_map(
-    root: Path, recursive: bool, conn: sqlite3.Connection
+    root: Path,
+    recursive: bool,
+    conn: sqlite3.Connection,
+    files: list[tuple[Path, str, str, str]] | None = None,
 ) -> list[tuple[Path, str, str]]:
     """Ordnet Audiodateien unter root ihren "songs"-Einträgen in der Cache-DB zu.
 
@@ -58,10 +61,16 @@ def build_file_song_map(
     (siehe Design-Dokument, Abschnitt 3, Randfall b). Es gibt bewusst KEINE
     dauerhafte Pfad-Speicherung in der DB -- diese Zuordnung wird bei jedem
     Lauf frisch berechnet.
+
+    files: optional vorab per scan_songs._read_tagged_files() eingelesene
+    Liste -- erspart einen erneuten Verzeichnis-Walk + Tag-Read (siehe
+    dortiger Docstring, "bis zu sechs volle Durchläufe desselben Baums").
     """
     mapping: list[tuple[Path, str, str]] = []
-    for audio_path in scan_songs._iter_audio_files(root, recursive):
-        artist, title, _genre = lyrics_core._read_audio_tags(audio_path)
+    entries = (
+        files if files is not None else scan_songs._read_tagged_files(root, recursive)
+    )
+    for audio_path, artist, title, _genre in entries:
         if not artist and not title:
             continue
         clean_title = lyrics_core._clean_query_title(title) if title else title
@@ -78,21 +87,28 @@ def build_file_song_map(
 
 
 def _scope_from_root(
-    root: Path | None, recursive: bool, conn: sqlite3.Connection
+    root: Path | None,
+    recursive: bool,
+    conn: sqlite3.Connection,
+    files: list[tuple[Path, str, str, str]] | None = None,
 ) -> set[tuple[str, str]] | None:
     """Berechnet den Scope (Menge von (artist_key, titel_key)) für root, oder
     None ohne PFAD (= keine Eingrenzung, ganze Cache-DB -- bewusste "alles
     nachziehen"-Absicht, siehe fetch_providers.fetch_all-Docstring).
 
-    Wird an mehreren Stellen in main() jeweils FRISCH aufgerufen, nie einmal
-    vorab wiederverwendet: läuft --scan im selben Aufruf VOR einem anderen
+    Wird an mehreren Stellen in main() jeweils FRISCH aufgerufen (der reine
+    DB-Abgleich ist billig) -- NIE aber der teure Verzeichnis-Walk selbst,
+    siehe `files`-Parameter: läuft --scan im selben Aufruf VOR einem anderen
     Schritt (Standardfall), stehen frisch gescannte Songs erst danach in der
     "songs"-Tabelle -- eine vorher berechnete Zuordnung sähe sie noch nicht
     (siehe ROADMAP.md, realer Bug: Datei-Zuordnung vor dem Scan zu klein).
+    Die Audiodateien SELBST und ihre Tags ändern sich dagegen innerhalb
+    eines Laufs nicht -- `files` wird deshalb einmal in main() eingelesen
+    und hier nur noch gegen die (ggf. frisch aktualisierte) DB abgeglichen.
     """
     if root is None:
         return None
-    mapping = build_file_song_map(root, recursive, conn)
+    mapping = build_file_song_map(root, recursive, conn, files=files)
     return {(artist_key, titel_key) for _, artist_key, titel_key in mapping}
 
 
@@ -273,8 +289,18 @@ def main() -> None:
     conn = cache_store.open_cache(_default_db_path())
     root: Path | None = Path(args.path).resolve() if args.path else None
 
+    # Verzeichnis-Walk + Tag-Read passieren jetzt GENAU EINMAL pro Lauf,
+    # nicht mehr einmal pro Schritt (bis zu sechsmal derselbe Baum, siehe
+    # scan_songs._read_tagged_files-Docstring -- bei einer großen, ggf.
+    # netzwerk-gemounteten Bibliothek der eigentlich teure Teil, nicht die
+    # anschließenden reinen DB-Abgleiche). Wird an build_file_song_map/
+    # _scope_from_root durchgereicht statt dass die selbst erneut scannen.
+    files: list[tuple[Path, str, str, str]] | None = None
+    if root is not None:
+        files = scan_songs._read_tagged_files(root, args.recursive)
+
     if root is not None and (run_scan or run_bewerten or run_schreiben):
-        file_song_map = build_file_song_map(root, args.recursive, conn)
+        file_song_map = build_file_song_map(root, args.recursive, conn, files=files)
         print(
             f"Datei-Zuordnung: {len(file_song_map)} Datei(en) einem Song in "
             "der DB zugeordnet."
@@ -285,22 +311,22 @@ def main() -> None:
             if root is None:
                 print("scan: kein PFAD angegeben, nichts zu scannen.")
             else:
-                count = scan_songs.scan(root, args.recursive, conn)
+                count = scan_songs.scan(root, args.recursive, conn, files=files)
                 print(f"scan: {count} Song(s) gescannt/aktualisiert.")
 
         if run_abfragen:
-            scope = _scope_from_root(root, args.recursive, conn)
+            scope = _scope_from_root(root, args.recursive, conn, files=files)
             fetch_providers_normal(conn, scope=scope)
 
         if run_nachholen:
-            scope = _scope_from_root(root, args.recursive, conn)
+            scope = _scope_from_root(root, args.recursive, conn, files=files)
             fetch_providers_nachhol(conn, scope=scope)
 
         if run_bewerten:
-            scope = _scope_from_root(root, args.recursive, conn)
+            scope = _scope_from_root(root, args.recursive, conn, files=files)
             file_map: dict[tuple[str, str], Path] = {}
             if root is not None:
-                mapping = build_file_song_map(root, args.recursive, conn)
+                mapping = build_file_song_map(root, args.recursive, conn, files=files)
                 file_map = {(a, t): p for p, a, t in mapping}
             evaluate_lyrics_normal(conn, scope=scope, file_song_map=file_map)
 
@@ -308,7 +334,7 @@ def main() -> None:
             if root is None:
                 print("schreiben: kein PFAD angegeben, nichts zu schreiben.")
             else:
-                mapping = build_file_song_map(root, args.recursive, conn)
+                mapping = build_file_song_map(root, args.recursive, conn, files=files)
                 write_lrc_normal(conn, mapping)
     finally:
         conn.close()

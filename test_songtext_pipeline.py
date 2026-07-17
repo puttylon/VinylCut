@@ -626,6 +626,60 @@ def test_main_pfad_ohne_flags_laesst_nachholen_aus(tmp_path, monkeypatch, capsys
         _reset_lyrics_core_globals()
 
 
+def test_main_liest_tags_nicht_mehr_pro_schritt_neu(tmp_path, monkeypatch, capsys):
+    """Regressionstest (siehe ROADMAP.md): ein voller Durchlauf (scan,
+    abfragen, bewerten, schreiben) las die Tags jeder Audiodatei früher bis
+    zu sechsmal für die reine Datei-Zuordnung/den Verzeichnis-Walk (einmal
+    pro Schritt, der scope/file_song_map braucht) -- bei einer großen,
+    netzwerk-gemounteten Bibliothek der eigentlich teure Teil eines Laufs.
+    Diese vier walk-basierten Aufrufe sind jetzt EIN einziger (via
+    scan_songs._read_tagged_files, an alle Schritte durchgereicht).
+
+    Übrig bleiben zwei ARCHITEKTURELL separate, kleine Aufrufe: bewerten und
+    schreiben lesen je EINMAL selbst die Tags nach, um über
+    evaluate_lyrics._resolve_expected_dur() die erwartete Songdauer zu
+    bestimmen -- das bleibt bewusst bestehen, weil jeder Schritt laut
+    Architektur-Dokument auch EINZELN, ohne die anderen im selben Prozess,
+    aufrufbar sein muss (schreiben kann nicht einfach bewertens Wert
+    wiederverwenden, wenn es in einem späteren, separaten Lauf läuft). Macht
+    insgesamt 1 (Walk) + 2 (Dauer-Auflösung) = 3 statt vorher bis zu 8
+    Aufrufe für diese eine Datei."""
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    album_dir = tmp_path / "album"
+    album_dir.mkdir()
+    audio = album_dir / "01 - Song.flac"
+    audio.write_bytes(b"")
+
+    calls: list[Path] = []
+
+    def _counting_read_audio_tags(path):
+        calls.append(path)
+        return ("Test Artist", "Test Song", "")
+
+    monkeypatch.setattr(
+        songtext_pipeline.lyrics_core, "_read_audio_tags", _counting_read_audio_tags
+    )
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: None)
+    fake_run = _fake_subprocess_run({})
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv", ["songtext_pipeline.py", str(album_dir), "--recursive"]
+    )
+
+    try:
+        songtext_pipeline.main()
+    finally:
+        _reset_lyrics_core_globals()
+
+    # 1x Verzeichnis-Walk (scan_songs._read_tagged_files) + 1x bewerten
+    # (_resolve_expected_dur) + 1x schreiben (_resolve_expected_dur) -- NICHT
+    # mehr die bis zu 6 walk-basierten Aufrufe von vorher.
+    assert calls == [audio, audio, audio]
+
+
 # --- Voller Pipeline-Lauf: scan -> abfragen -> bewerten -> schreiben ------
 # prüft die reale Verdrahtung zwischen den Modulen (nicht nur einzeln
 # gemockt wie in den Modul-eigenen Testdateien).

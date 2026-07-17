@@ -735,6 +735,76 @@ Test zählt jetzt korrekt als `skipped_up_to_date` statt als `queried` mit
 `ruff format` sauber. `lyrics_core.__version__` auf `1.13.9` erhöht
 (Bugfix, siehe CLAUDE.md-Versionierungsregel).
 
+**✓ Nachtrag — Verzeichnis-Walk + Tag-Read passiert nur noch einmal pro
+Lauf, nicht mehr bis zu sechsmal.** Auslöser: ein Lauf über
+`/Volumes/music/musik/_Various Artists` (viele Compilation-Alben, Netzlaufwerk)
+"dauerte ewig", hing sichtbar lange bei `Scanne: ...`. Nutzer-Anfrage war
+ursprünglich "Phasen pro Ordner statt global durchlaufen" (siehe unten,
+weiterhin nicht umgesetzt) -- eine Codeprüfung vor der Aufwandsschätzung
+ergab aber einen konkreteren, kleineren Übeltäter: ein normaler
+Komplett-Lauf (`scan`+`abfragen`+`bewerten`+`schreiben`) durchsuchte den
+kompletten Verzeichnisbaum **sechsmal** und las dabei jedes Mal für JEDE
+Datei erneut die Tags (Datei-Zuordnungs-Vorabmeldung, `scan` selbst,
+`abfragen`s Scope, `bewerten`s Scope, `bewerten`s eigene Datei-Zuordnung,
+`schreiben`s Datei-Zuordnung) -- auf einem SMB-Mount mit hunderten Alben
+vermutlich die eigentliche Ursache, nicht die Provider-/Whisper-Arbeit
+selbst.
+
+**Fix:** neue `scan_songs._read_tagged_files(root, recursive)` liest
+Verzeichnisbaum + Tags GENAU EINMAL pro `songtext_pipeline.py`-Lauf.
+`scan_songs.scan()` und `songtext_pipeline.build_file_song_map()`/
+`_scope_from_root()` bekommen einen neuen optionalen `files`-Parameter --
+wird er übergeben (immer der Fall, wenn `main()` sie aufruft), entfällt der
+erneute Walk komplett, nur noch der günstige DB-Abgleich läuft weiterhin
+mehrfach (nötig, weil frisch gescannte Songs erst nach `scan` in der
+DB stehen, siehe bestehende Doku dazu). Ohne `files` (z.B. bei
+eigenständiger Nutzung von `scan_songs.py`) bleibt das alte
+Selbst-Einlesen als Fallback erhalten.
+
+Übrig bleiben zwei architektonisch separate, kleinere Aufrufe: `bewerten`
+und `schreiben` lesen je einmal selbst die Tags nach (über
+`evaluate_lyrics._resolve_expected_dur()` für die erwartete Songdauer) --
+bewusst nicht mit angefasst, weil jeder Schritt laut Architektur-Dokument
+auch einzeln, ohne die anderen im selben Prozess, aufrufbar bleiben muss.
+Macht insgesamt 1 (Walk) + 2 (Dauer-Auflösung) = 3 statt vorher bis zu 8
+`_read_audio_tags`-Aufrufe pro Datei in einem Komplett-Lauf.
+
+Neuer Regressionstest `test_main_liest_tags_nicht_mehr_pro_schritt_neu`
+(zählt `_read_audio_tags`-Aufrufe über einen vollen Lauf, erwartet genau 3
+statt der alten bis zu 8). Volle Suite: 464/464 grün. `ruff check`/
+`ruff format` sauber. `lyrics_core.__version__` auf `1.13.10` erhöht
+(Bugfix, siehe CLAUDE.md-Versionierungsregel).
+
+**Weiterhin offen, NICHT umgesetzt (Nutzer-Wunsch, zurückgestellt bis
+geprüft ist ob nach diesem Fix überhaupt noch Bedarf besteht): Phasen pro
+Ordner statt global durchlaufen** -- statt `scan` global über den ganzen
+Baum, dann `abfragen` global, dann `bewerten` global, dann `schreiben`
+global, für jeden Ordner nacheinander alle gewählten Schritte durchlaufen.
+Bringt (im Gegensatz zum obigen Fix) keine Reduktion der Gesamtarbeit,
+sondern sichtbaren Fortschritt Ordner für Ordner und Abbruch-Sicherheit
+(bei einem Absturz mitten im Lauf sind bereits fertige Ordner schon
+geschrieben). Größerer Umbau von `main()`s Ablaufsteuerung, neues
+Konsolenausgabe-Format, kompletter Neuentwurf der `main()`-Integrationstests
+in `test_songtext_pipeline.py`.
+
+Vom Nutzer für eine spätere Umsetzung explizit mitgegeben, was dabei
+beachtet werden muss: das Whisper-Modell wird pro Lauf nur einmal geladen
+(`lyrics_core._get_whisper_model()`, modulglobal gecacht in
+`_whisper_models` -- gilt für den ganzen Prozess, nicht pro Aufruf) und
+DARF bei einer Ordner-für-Ordner-Schleife nicht pro Ordner neu geladen
+werden (bleibt automatisch so, solange alles im selben Prozess läuft, ohne
+Sonderbehandlung nötig). Der kontrastive Wort-Index (Hintergrund-Kontext,
+`lyrics_core._build_contrastive_context`) wird dagegen bewusst regelmäßig
+neu aufgebaut -- aktuell alle `_IDF_REFRESH_INTERVAL` (50) tatsächlich
+bewerteter Songs, gezählt in `evaluate_lyrics.evaluate_all()`s
+`evaluated_count` (siehe Nachtrag "'bewerten' bekommt einen Skip für
+unveränderte Songs" oben) -- dieser Zähler darf bei einer Ordner-für-
+Ordner-Schleife NICHT pro Ordner zurückgesetzt werden, sonst würde der
+Index bei vielen kleinen Ordnern viel häufiger neu gebaut als beabsichtigt
+(oder bei "IDF alle 50 Songs" mit lauter 3-Song-Ordnern faktisch nie neu,
+wenn versehentlich pro Ordner bei 0 neu gestartet wird). Der Zähler muss
+also außerhalb der Ordner-Schleife leben, nicht pro Ordner neu.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

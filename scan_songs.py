@@ -45,7 +45,34 @@ def _iter_audio_files(root: Path, recursive: bool) -> Iterable[Path]:
     )
 
 
-def scan(root: Path, recursive: bool, conn: sqlite3.Connection) -> int:
+def _read_tagged_files(root: Path, recursive: bool) -> list[tuple[Path, str, str, str]]:
+    """Liest EINMAL alle Audiodateien unter root ein: Pfad + rohe
+    Artist/Titel/Genre-Tags (lyrics_core._read_audio_tags).
+
+    Der Verzeichnis-Walk + das Tag-Lesen sind bei einer großen (insbesondere
+    netzwerk-gemounteten) Bibliothek der eigentlich teure Teil -- teurer als
+    die anschließenden reinen DB-Abgleiche. scan()/songtext_pipeline.
+    build_file_song_map() riefen früher beide unabhängig voneinander
+    _iter_audio_files()+_read_audio_tags() auf, songtext_pipeline.main()
+    zusätzlich mehrfach für scan/abfragen/bewerten/schreiben -- macht bis zu
+    sechs volle Durchläufe desselben Baums in einem einzigen Lauf (siehe
+    ROADMAP.md). Diese Funktion wird jetzt GENAU EINMAL pro
+    songtext_pipeline.py-Lauf aufgerufen, das Ergebnis an scan()/
+    build_file_song_map() durchgereicht (deren `files`-Parameter) statt
+    erneut zu scannen.
+    """
+    return [
+        (audio_path, *lyrics_core._read_audio_tags(audio_path))
+        for audio_path in _iter_audio_files(root, recursive)
+    ]
+
+
+def scan(
+    root: Path,
+    recursive: bool,
+    conn: sqlite3.Connection,
+    files: list[tuple[Path, str, str, str]] | None = None,
+) -> int:
     """Scannt Audiodateien unter root und trägt jeden Song in "songs" ein.
 
     Titel-Normalisierung wie beim bestehenden Anlegen von songs-Zeilen: erst
@@ -58,14 +85,20 @@ def scan(root: Path, recursive: bool, conn: sqlite3.Connection) -> int:
     Genre dauerhaft festschreiben (COALESCE greift nur bei NULL) und ein
     später gefundenes echtes Genre nie mehr übernehmen.
 
+    files: optional vorab per _read_tagged_files() eingelesene Liste --
+    erspart einen erneuten Verzeichnis-Walk + Tag-Read, wenn der Aufrufer
+    (siehe songtext_pipeline.main()) die Dateien im selben Lauf schon einmal
+    gelesen hat. None (Standard, z.B. bei eigenständiger Nutzung dieses
+    Moduls) liest wie bisher selbst ein.
+
     Gibt die Anzahl der Dateien mit lesbaren Tags zurück (= Anzahl
     neuer/aktualisierter songs-Einträge). Zwei Dateien mit identischem
     Künstler/Titel zählen beide einzeln, landen aber wegen des
     UNIQUE-Constraints in genau einer songs-Zeile.
     """
     count = 0
-    for audio_path in _iter_audio_files(root, recursive):
-        artist, title, genre = lyrics_core._read_audio_tags(audio_path)
+    entries = files if files is not None else _read_tagged_files(root, recursive)
+    for audio_path, artist, title, genre in entries:
         if not artist and not title:
             continue
         clean_title = lyrics_core._clean_query_title(title) if title else title

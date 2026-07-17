@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.16"
+__version__ = "1.13.17"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -711,6 +711,12 @@ def _get_whisper_model(name: str):
             from faster_whisper import WhisperModel
         except ImportError:
             return None
+        # _clear_status() vor dem ersten print(): löscht eine noch stehende
+        # transiente Statuszeile (z.B. "i/N: ..." aus fetch_providers.py oder
+        # "Whisper transkribiert..." aus _whisper_best), sonst "beißt" sich
+        # die Ausgabe auf derselben Terminalzeile (siehe ROADMAP.md, gleiche
+        # Ursache wie bei der Ordner-Kopfzeile).
+        _clear_status()
         print(f"   {_ts()}  Lade Whisper-Modell ({name})...", end=" ", flush=True)
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         # int8: schneller auf CPU, vermeidet float16-Warnung von ctranslate2

@@ -130,7 +130,10 @@ def write_all(
                 counts["skipped"] += 1
                 continue
 
-        lyrics_core._print_status(f"  {i}/{total}: {audio_path.name} ...")
+        # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
+        # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).
+        counter = f"{i}/{total}: " if total > 1 else ""
+        lyrics_core._print_status(f"  {counter}{audio_path.name} ...")
 
         expected_dur = evaluate_lyrics._resolve_expected_dur(audio_path)
         existing_lrc = lrc_path if lrc_path.exists() else None

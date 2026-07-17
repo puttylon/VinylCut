@@ -1201,6 +1201,30 @@ verifiziert (nicht nur behauptet): die Sequenz nach dem Fix ist exakt
 dieselbe Lösch-Sequenz, die die bestehenden Track-Ergebniszeilen schon
 korrekt verwenden.
 
+**Nachtrag — zweite, verwandte Fundstelle beim Live-Test des obigen Fixes
+entdeckt (nicht Teil der ursprünglichen Vermutung):** Nutzer sah live
+`  1/1: 48 Soda Pop.mp3 ...                          18:00:30  Lade
+Whisper-Modell (medium)... bereit.  18:00:30` -- wieder dieselbe Klasse
+Bug, an einer dritten Stelle. Ursache: `lyrics_core._get_whisper_model()`
+druckt "Lade Whisper-Modell (...)..." (Zeile ~714) über einen BLOSSEN
+`print(..., end=" ")` -- exakt derselbe Fehler wie bei der Ordner-Kopfzeile,
+nur diesmal beim erstmaligen Laden eines Whisper-Modells mitten in einem
+Lauf. **Fix:** `_clear_status()` direkt davor eingefügt, analog zum
+Ordner-Kopfzeile-Fix. Live per Rohbyte-Vergleich verifiziert: Sequenz ist
+jetzt `\r` + Statustext + `\r` + 100 Leerzeichen + `\r` + "Lade
+Whisper-Modell..." + "bereit." + `\n`.
+
+**Zusätzlich vom Nutzer angemerkt:** Der `i/total:`-Zähler in den
+transienten Statuszeilen (`fetch_providers.py`, `evaluate_lyrics.py`,
+`write_lrc.py`) zeigte im kombinierten Datei-für-Datei-Lauf aus
+songtext_pipeline.py IMMER `1/1:` (da dort stets genau eine Datei pro
+Aufruf verarbeitet wird) -- reine Redundanz ohne Information ("was soll
+dieses unnötige 1/1 Soda Pop.mp3?"). **Fix:** Der Zähler wird jetzt nur noch
+angezeigt, wenn `total > 1` (echte Mehrfach-Läufe, z.B. eigenständiges
+`--abfragen` über eine ganze Bibliothek) -- an allen drei Stellen konsistent
+geändert, neuer Test `test_statuszeile_zeigt_zaehler_bei_mehreren_songs`
+für den `total > 1`-Fall ergänzt. `lyrics_core.__version__` auf `1.13.17`.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

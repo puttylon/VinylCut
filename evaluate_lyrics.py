@@ -481,7 +481,10 @@ def evaluate_all(
 
         lyrics_core._note_contrastive_evaluation(_IDF_REFRESH_INTERVAL)
 
-        lyrics_core._print_status(f"  {i}/{total}: {label} ...")
+        # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
+        # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).
+        counter = f"{i}/{total}: " if total > 1 else ""
+        lyrics_core._print_status(f"  {counter}{label} ...")
 
         existing_lrc = flac_path.with_suffix(".lrc") if flac_path is not None else None
         expected_dur = (

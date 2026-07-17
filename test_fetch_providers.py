@@ -288,11 +288,39 @@ class TestFetchAll(_CacheGlobalsResetMixin):
 
         assert (queried, skipped_genre, skipped_up_to_date) == (1, 0, 0)
         assert len(status_calls) == 1
-        assert "1/1" in status_calls[0]
+        # Kein "1/1:"-Zaehler bei genau einem Song -- reine Redundanz ohne
+        # Info (Nutzer-Feedback, siehe ROADMAP.md); Zaehler nur bei
+        # echten Mehrfach-Laeufen (siehe Test unten).
+        assert "1/1" not in status_calls[0]
         assert "artist a" in status_calls[0]
         assert len(tprint_calls) == 1
         assert "artist a / title a" in tprint_calls[0]
-        assert "0/4" in tprint_calls[0]  # kein Provider lieferte einen Treffer
+
+    def test_statuszeile_zeigt_zaehler_bei_mehreren_songs(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        cs._get_or_create_song(conn, "artist b", "title b", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        status_calls: list[str] = []
+        monkeypatch.setattr(
+            lyrics_core, "_print_status", lambda msg: status_calls.append(msg)
+        )
+        monkeypatch.setattr(lyrics_core, "_tprint", lambda msg: None)
+        monkeypatch.setattr(
+            lyrics_core,
+            "_query_provider",
+            lambda query, provider, env, artist="", title="": (provider, None),
+        )
+
+        fetch_providers.fetch_all(conn)
+
+        assert len(status_calls) == 2
+        assert "1/2:" in status_calls[0]
+        assert "2/2:" in status_calls[1]
 
     def test_skip_genre_song_bekommt_keine_eigene_status_oder_ergebniszeile(
         self, tmp_path, monkeypatch

@@ -234,7 +234,11 @@ def fetch_all(
         label = (
             audio_path.name if audio_path is not None else f"{artist_key} / {titel_key}"
         )
-        lyrics_core._print_status(f"  {i}/{total}: {label} ...")
+        # "i/total: " nur bei echten Mehrfach-Laeufen (Nutzer-Feedback: bei
+        # total==1 -- dem Normalfall im kombinierten Datei-fuer-Datei-Lauf
+        # aus songtext_pipeline.py -- ist "1/1:" reine Redundanz ohne Info).
+        counter = f"{i}/{total}: " if total > 1 else ""
+        lyrics_core._print_status(f"  {counter}{label} ...")
         query = f"{artist_key} {titel_key}".strip()
 
         results = {}

@@ -1,7 +1,7 @@
 """Tests für write_lrc.py (Phase 5 der Songtexte-Pipeline, Meilenstein 4).
 
 Der JSON-Ordner-Cache/die Ordner-Sperre selbst (_load_cache/_save_cache/
-_try_claim_folder) sind unverändert aus fetch_songtext.py wiederverwendet und
+_try_claim_folder) sind unverändert aus lyrics_core.py wiederverwendet und
 schon dort ausführlich getestet (TestLoadCache, TestSaveCache,
 TestFolderClaim) -- hier deshalb nur Tests für write_all()s eigene Logik:
 Entscheidung von evaluate_lyrics.evaluate_song() übernehmen, schreiben/
@@ -12,16 +12,16 @@ from __future__ import annotations
 
 import cache_store as cs
 import evaluate_lyrics
-import fetch_songtext
+import lyrics_core
 import write_lrc
 
 
 class _GlobalsResetMixin:
     def setup_method(self):
-        fetch_songtext._cache_conn = None
-        fetch_songtext._cache_refresh = False
-        fetch_songtext._cache_only = False
-        fetch_songtext._lrclib_dump_conn = None
+        lyrics_core._cache_conn = None
+        lyrics_core._cache_refresh = False
+        lyrics_core._cache_only = False
+        lyrics_core._lrclib_dump_conn = None
 
     def teardown_method(self):
         self.setup_method()
@@ -44,7 +44,7 @@ class TestWriteAllSchreibenLoeschen(_GlobalsResetMixin):
     def test_gefundener_text_wird_geschrieben(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         monkeypatch.setattr(
             evaluate_lyrics,
@@ -73,7 +73,7 @@ class TestWriteAllSchreibenLoeschen(_GlobalsResetMixin):
     def test_nicht_gefunden_loescht_vorhandene_lrc(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         monkeypatch.setattr(
             evaluate_lyrics,
@@ -104,7 +104,7 @@ class TestWriteAllSchreibenLoeschen(_GlobalsResetMixin):
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         content = b"[00:01.00]Gleicher Text\n"
         monkeypatch.setattr(
@@ -137,7 +137,7 @@ class TestWriteAllJsonCacheSkip(_GlobalsResetMixin):
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         calls = []
 
@@ -162,7 +162,7 @@ class TestWriteAllJsonCacheSkip(_GlobalsResetMixin):
     def test_force_umgeht_json_cache_skip(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         calls = []
 
@@ -188,7 +188,7 @@ class TestWriteAllLeererScope(_GlobalsResetMixin):
     def test_leere_file_song_map_tut_nichts(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         counts = write_lrc.write_all(conn, [])
         assert counts == {"updated": 0, "skipped": 0, "not_found": 0, "errors": 0}

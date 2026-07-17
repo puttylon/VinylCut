@@ -16,7 +16,7 @@ def test_scan_liest_tags_und_traegt_song_ein(tmp_path, monkeypatch):
 
     _make_audio_file(tmp_path, "01 - Naturtraene.flac")
     monkeypatch.setattr(
-        scan_songs.fetch_songtext,
+        scan_songs.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Nina Hagen", "Naturtraene", "Punk"),
     )
@@ -38,7 +38,7 @@ def test_scan_ueberspringt_datei_ohne_tags(tmp_path, monkeypatch):
 
     _make_audio_file(tmp_path, "01 - NoTags.flac")
     monkeypatch.setattr(
-        scan_songs.fetch_songtext, "_read_audio_tags", lambda path: ("", "", "")
+        scan_songs.lyrics_core, "_read_audio_tags", lambda path: ("", "", "")
     )
 
     count = scan_songs.scan(tmp_path, recursive=False, conn=conn)
@@ -59,7 +59,7 @@ def test_scan_duplikate_erzeugen_nur_einen_songs_eintrag(tmp_path, monkeypatch):
         file_b: ("Artist", "Song", "Rock"),
     }
     monkeypatch.setattr(
-        scan_songs.fetch_songtext,
+        scan_songs.lyrics_core,
         "_read_audio_tags",
         lambda path: tags_by_path[path],
     )
@@ -79,7 +79,7 @@ def test_scan_uebernimmt_genre(tmp_path, monkeypatch):
 
     _make_audio_file(tmp_path, "01 - Song.flac")
     monkeypatch.setattr(
-        scan_songs.fetch_songtext,
+        scan_songs.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Artist", "Song", "Krautrock"),
     )
@@ -96,7 +96,7 @@ def test_scan_leeres_genre_wird_nicht_als_leerstring_gespeichert(tmp_path, monke
 
     _make_audio_file(tmp_path, "01 - Song.flac")
     monkeypatch.setattr(
-        scan_songs.fetch_songtext,
+        scan_songs.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Artist", "Song", ""),
     )
@@ -113,7 +113,7 @@ def test_scan_bereinigt_titel_klammerzusatz(tmp_path, monkeypatch):
 
     _make_audio_file(tmp_path, "01 - Song Title (Live Version).flac")
     monkeypatch.setattr(
-        scan_songs.fetch_songtext,
+        scan_songs.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Artist", "Song Title (Live Version)", ""),
     )
@@ -130,7 +130,7 @@ def test_scan_nur_artist_ohne_titel_wird_trotzdem_eingetragen(tmp_path, monkeypa
 
     _make_audio_file(tmp_path, "01 - Song.flac")
     monkeypatch.setattr(
-        scan_songs.fetch_songtext,
+        scan_songs.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Artist", "", ""),
     )

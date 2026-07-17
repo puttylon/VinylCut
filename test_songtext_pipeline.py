@@ -6,7 +6,7 @@ import pytest
 
 import cache_store as cs
 import fetch_providers
-import fetch_songtext
+import lyrics_core
 import songtext_pipeline
 
 
@@ -58,7 +58,7 @@ def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
     # faster-whisper-Modell laden (langsam, nicht Testgegenstand hier).
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
-    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(tmp_path)])
     try:
         songtext_pipeline.main()
@@ -80,7 +80,7 @@ def test_main_ohne_phase_aktiviert_alle_5(tmp_path, monkeypatch, capsys):
             "0 nicht gefunden." in out
         )
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 def test_main_phase_3_funktioniert_ohne_pfad(tmp_path, monkeypatch, capsys):
@@ -100,13 +100,13 @@ def test_main_phase_3_funktioniert_ohne_pfad(tmp_path, monkeypatch, capsys):
         assert "Phase 4" not in out
         assert "Phase 5" not in out
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
-    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -132,7 +132,7 @@ def test_main_phase_mehrfachauswahl_nur_gewaehlte_phasen(tmp_path, monkeypatch, 
             "0 nicht gefunden." in out
         )
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 def test_main_phase_1_ohne_pfad_meldet_und_ueberspringt(tmp_path, monkeypatch, capsys):
@@ -158,7 +158,7 @@ def test_main_phase_1_end_to_end_song_landet_in_songs_tabelle(
     audio_file.write_bytes(b"")
 
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext,
+        songtext_pipeline.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Nina Hagen", "Naturtraene", "Punk"),
     )
@@ -224,7 +224,7 @@ def test_build_file_song_map_ordnet_bekannte_datei_zu_und_ueberspringt_rest(
         return tags_by_path.get(path, ("", "", ""))
 
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext, "_read_audio_tags", fake_read_audio_tags
+        songtext_pipeline.lyrics_core, "_read_audio_tags", fake_read_audio_tags
     )
 
     mapping = songtext_pipeline.build_file_song_map(
@@ -255,7 +255,7 @@ def test_build_file_song_map_bereinigt_titel_klammerzusatz(tmp_path, monkeypatch
         return ("Artist", "Song Title (Live Version)", "")
 
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext, "_read_audio_tags", fake_read_audio_tags
+        songtext_pipeline.lyrics_core, "_read_audio_tags", fake_read_audio_tags
     )
 
     mapping = songtext_pipeline.build_file_song_map(
@@ -275,7 +275,7 @@ def test_build_file_song_map_leere_db_liefert_leere_liste(tmp_path, monkeypatch)
     audio_file.write_bytes(b"")
 
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext,
+        songtext_pipeline.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Artist", "Song", ""),
     )
@@ -292,7 +292,7 @@ def test_build_file_song_map_leere_db_liefert_leere_liste(tmp_path, monkeypatch)
 # Abfragen in Tests. _open_lrclib_dump_conn wird ebenfalls auf None gemockt,
 # damit die Tests unabhängig davon laufen, ob der externe LRCLib-Datenbank-
 # Abzug auf der jeweiligen Maschine gemountet ist (reiner Beschleuniger,
-# siehe fetch_providers._prepare_fetch_songtext_globals-Docstring).
+# siehe fetch_providers._prepare_lyrics_core_globals-Docstring).
 
 
 def _fake_subprocess_run(responses: dict[str, str] | None = None):
@@ -317,16 +317,16 @@ def _fake_subprocess_run(responses: dict[str, str] | None = None):
     return _run
 
 
-def _reset_fetch_songtext_globals():
-    """fetch_providers setzt beim Aufruf über main() fetch_songtext-Modul-
+def _reset_lyrics_core_globals():
+    """fetch_providers setzt beim Aufruf über main() lyrics_core-Modul-
     Globals direkt (nicht über monkeypatch, siehe fetch_providers.
-    _prepare_fetch_songtext_globals) -- ohne manuellen Reset bliebe nach dem
+    _prepare_lyrics_core_globals) -- ohne manuellen Reset bliebe nach dem
     Test eine geschlossene tmp_path-Connection als _cache_conn stehen und
     könnte andere Tests im selben pytest-Lauf stören."""
-    fetch_songtext._cache_conn = None
-    fetch_songtext._cache_refresh = False
-    fetch_songtext._cache_only = False
-    fetch_songtext._lrclib_dump_conn = None
+    lyrics_core._cache_conn = None
+    lyrics_core._cache_refresh = False
+    lyrics_core._cache_only = False
+    lyrics_core._lrclib_dump_conn = None
 
 
 def test_main_phase_2_fragt_songs_ab_und_schreibt_in_cache_db(
@@ -339,13 +339,13 @@ def test_main_phase_2_fragt_songs_ab_und_schreibt_in_cache_db(
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
-    # Neutralisiert den uncommitteten lokalen Debug-Hack in fetch_songtext.py
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    # Neutralisiert den uncommitteten lokalen Debug-Hack in lyrics_core.py
     # (_LRCLIB_LIVE_FALLBACK=False) -- dieser Test prüft das COMMITTETE
     # Verhalten (alle 4 Anbieter werden live gefragt), nicht den Hack.
-    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({"artist a": "[00:01.00]hallo"})
-    monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "abfragen"])
 
     try:
@@ -354,7 +354,7 @@ def test_main_phase_2_fragt_songs_ab_und_schreibt_in_cache_db(
         out = capsys.readouterr().out
         assert "Phase 2 (fetch_providers, Normal-Modus): 1 Song(s) abgefragt." in out
         assert len(fake_run.calls) == 4  # ein Song x 4 Anbieter
-        assert {p for _, p in fake_run.calls} == set(fetch_songtext._ALL_PROVIDERS)
+        assert {p for _, p in fake_run.calls} == set(lyrics_core._ALL_PROVIDERS)
 
         conn = cs.open_cache(db_path)
         assert cs.get_provider(conn, "lrclib", "artist a", "title a") == {
@@ -362,7 +362,7 @@ def test_main_phase_2_fragt_songs_ab_und_schreibt_in_cache_db(
             "content": "[00:01.00]hallo",
         }
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 def test_main_phase_3_holt_nur_nichts_fehlschlag_kombis_nach(
@@ -375,13 +375,13 @@ def test_main_phase_3_holt_nur_nichts_fehlschlag_kombis_nach(
     cs.put_provider(conn, "genius", "artist a", "title a", "treffer", "[00:01.00]x")
     conn.close()
 
-    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
-    # Neutralisiert den uncommitteten lokalen Debug-Hack in fetch_songtext.py
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    # Neutralisiert den uncommitteten lokalen Debug-Hack in lyrics_core.py
     # (_LRCLIB_LIVE_FALLBACK=False) -- dieser Test prüft das COMMITTETE
     # Verhalten (lrclib wird live gefragt), nicht den Hack.
-    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({"artist a": "[00:01.00]neu"})
-    monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "nachholen"])
 
     try:
@@ -400,7 +400,7 @@ def test_main_phase_3_holt_nur_nichts_fehlschlag_kombis_nach(
             "content": "[00:01.00]neu",
         }
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 # --- Regressionstest: Phase 2 muss auf den PFAD-Umfang eingrenzen ------
@@ -408,7 +408,7 @@ def test_main_phase_3_holt_nur_nichts_fehlschlag_kombis_nach(
 # Realer Produktions-Bug (siehe ROADMAP.md): ein Lauf über ein einzelnes
 # Album (`songtext_pipeline.py ALBUM_PFAD --recursive`, alle 5 Phasen) fragte
 # in Phase 2 JEDEN Song ab, der jemals in der Cache-DB gelandet war --
-# tausende Songs aus Jahren fetch_songtext.py-Nutzung, nicht nur die Songs
+# tausende Songs aus Jahren lyrics_core.py-Nutzung, nicht nur die Songs
 # des aktuellen Albums. Ursache: fetch_all() kannte keinen Scope, und die
 # Datei-Zuordnung wurde ohnehin VOR Phase 1 berechnet (sah die frisch
 # gescannten Songs also noch gar nicht).
@@ -441,14 +441,14 @@ def test_main_phase_1_2_fragt_nur_pfad_songs_ab_nicht_die_ganze_db(
         file_b: ("Album Artist", "Song B", ""),
     }
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext,
+        songtext_pipeline.lyrics_core,
         "_read_audio_tags",
         lambda path: tags_by_path.get(path, ("", "", "")),
     )
-    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
-    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({})
-    monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
     monkeypatch.setattr(
         "sys.argv", ["songtext_pipeline.py", str(album_dir), "--phase", "scan,abfragen"]
     )
@@ -476,7 +476,7 @@ def test_main_phase_1_2_fragt_nur_pfad_songs_ab_nicht_die_ganze_db(
             is None
         )
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 def test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab(
@@ -494,10 +494,10 @@ def test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab(
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
-    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
     fake_run = _fake_subprocess_run({})
-    monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
     monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", "--phase", "abfragen"])
 
     try:
@@ -507,7 +507,7 @@ def test_main_phase_2_ohne_pfad_fragt_weiterhin_die_ganze_db_ab(
         assert "Phase 2 (fetch_providers, Normal-Modus): 1 Song(s) abgefragt." in out
         assert any("andere band" in q for q, _p in fake_run.calls)
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 # --- Fix B: Phase 3 wird bei gesetztem PFAD übersprungen, nicht eingegrenzt
@@ -543,7 +543,7 @@ def test_main_pfad_plus_alle_phasen_ueberspringt_phase_3_und_ruft_retry_missing_
         )
         assert "Phase 3 (fetch_providers, Nachhol-Modus):" not in out
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
@@ -587,7 +587,7 @@ def test_main_pfad_plus_phase_3_allein_meldet_keine_phase_ohne_crash(
         out2 = capsys.readouterr().out
         assert "Keine passenden Cache-Einträge gefunden" in out2
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
 
 # --- Voller Pipeline-Lauf (Meilenstein 3+4): scan -> providers -> bewerten ->
@@ -609,20 +609,20 @@ def test_voller_lauf_scan_provider_bewerten_schreiben(tmp_path, monkeypatch, cap
     audio.write_bytes(b"")
 
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext,
+        songtext_pipeline.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Test Artist", "Test Song", ""),
     )
-    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
-    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
-    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
 
     def _fail_if_whisper_called(*a, **kw):
         raise AssertionError(
             "Whisper sollte bei 3-Provider-Konsens nicht aufgerufen werden"
         )
 
-    monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_whisper_called)
+    monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_whisper_called)
 
     fake_run = _fake_subprocess_run(
         {
@@ -651,7 +651,7 @@ def test_voller_lauf_scan_provider_bewerten_schreiben(tmp_path, monkeypatch, cap
 
         return _Result()
 
-    monkeypatch.setattr(fetch_songtext.subprocess, "run", _run)
+    monkeypatch.setattr(lyrics_core.subprocess, "run", _run)
 
     monkeypatch.setattr(
         "sys.argv", ["songtext_pipeline.py", str(album_dir), "--recursive"]
@@ -660,7 +660,7 @@ def test_voller_lauf_scan_provider_bewerten_schreiben(tmp_path, monkeypatch, cap
     try:
         songtext_pipeline.main()
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()
 
     out = capsys.readouterr().out
     assert "Phase 1 (scan_songs): 1 Song(s) gescannt/aktualisiert." in out
@@ -693,15 +693,15 @@ def test_voller_lauf_zweiter_durchlauf_ist_idempotent(tmp_path, monkeypatch, cap
     audio.write_bytes(b"")
 
     monkeypatch.setattr(
-        songtext_pipeline.fetch_songtext,
+        songtext_pipeline.lyrics_core,
         "_read_audio_tags",
         lambda path: ("Test Artist", "Test Song", ""),
     )
-    monkeypatch.setattr(fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None)
-    monkeypatch.setattr(fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
-    monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
+    monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
     monkeypatch.setattr(
-        fetch_songtext,
+        lyrics_core,
         "_whisper_best",
         lambda *a, **kw: (_ for _ in ()).throw(
             AssertionError("kein Whisper bei Konsens erwartet")
@@ -724,7 +724,7 @@ def test_voller_lauf_zweiter_durchlauf_ist_idempotent(tmp_path, monkeypatch, cap
             Path(cmd[3]).write_text(content, encoding="utf-8")
         return _Result()
 
-    monkeypatch.setattr(fetch_songtext.subprocess, "run", _run)
+    monkeypatch.setattr(lyrics_core.subprocess, "run", _run)
     monkeypatch.setattr(
         "sys.argv", ["songtext_pipeline.py", str(album_dir), "--recursive"]
     )
@@ -737,4 +737,4 @@ def test_voller_lauf_zweiter_durchlauf_ist_idempotent(tmp_path, monkeypatch, cap
         songtext_pipeline.main()
         assert lrc_path.stat().st_mtime_ns == mtime_after_first_run
     finally:
-        _reset_fetch_songtext_globals()
+        _reset_lyrics_core_globals()

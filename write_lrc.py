@@ -8,9 +8,10 @@ reiner Vergleich bereits gespeicherter Daten, deterministisch reproduzierbar
 egal ob im selben Lauf oder Tage später separat aufgerufen).
 
 Übernimmt das Schreib-/Vergleichsverhalten sowie den JSON-Ordner-Cache
-(.fetch_songtext.json) und die Ordner-Sperre unverändert aus
-fetch_songtext.main() (Zeile ~2260-2440 der committeten Version) -- gleiche
-Cache-Eintrag-Struktur (v/r/outcome/providers/...), damit bestehende
+(.fetch_songtext.json -- Dateiname bewusst unverändert, damit bestehende
+Caches in der Bibliothek weiter funktionieren) und die Ordner-Sperre
+unverändert aus dem früheren fetch_songtext.main() (siehe Git-Historie) --
+gleiche Cache-Eintrag-Struktur (v/r/outcome/providers/...), damit bestehende
 Werkzeuge (lrc_analyse.py, lrc_recheck.py) den Cache weiter lesen können.
 
 Bekannter, akzeptierter Unterschied zum alten fetch_songtext.py: der explizite
@@ -31,7 +32,7 @@ from pathlib import Path
 
 import evaluate_lyrics
 import fetch_providers
-import fetch_songtext
+import lyrics_core
 
 
 def write_all(
@@ -45,13 +46,13 @@ def write_all(
 
     force=True ignoriert den JSON-Cache-Skip (wie --force im alten Skript).
 
-    Bereitet dieselben fetch_songtext-Modul-Globals vor wie Phase 4 (siehe
-    fetch_providers._prepare_fetch_songtext_globals) -- notwendig, damit
+    Bereitet dieselben lyrics_core-Modul-Globals vor wie Phase 4 (siehe
+    fetch_providers._prepare_lyrics_core_globals) -- notwendig, damit
     evaluate_lyrics.evaluate_song() bei einem eigenständigen --phase 5-Lauf
     (ohne vorheriges Phase 4 im selben Prozess) den Whisper-Transkript-Cache
     findet, statt jeden Song ohne Cache neu zu transkribieren.
     """
-    fetch_providers._prepare_fetch_songtext_globals(conn)
+    fetch_providers._prepare_lyrics_core_globals(conn)
     counts = {"updated": 0, "skipped": 0, "not_found": 0, "errors": 0}
     total = len(file_song_map)
     if total:
@@ -66,29 +67,29 @@ def write_all(
         cache_key = unicodedata.normalize("NFC", audio_path.name)
 
         if audio_path.parent != current_parent:
-            fetch_songtext._release_folder(folder_lock)
+            lyrics_core._release_folder(folder_lock)
             current_parent = audio_path.parent
-            folder_lock = fetch_songtext._try_claim_folder(audio_path.parent)
-            if folder_lock is fetch_songtext._FOLDER_BUSY:
-                fetch_songtext._print_status(
+            folder_lock = lyrics_core._try_claim_folder(audio_path.parent)
+            if folder_lock is lyrics_core._FOLDER_BUSY:
+                lyrics_core._print_status(
                     f"  Übersprungen (andere Instanz aktiv): {audio_path.parent}"
                 )
                 continue
-            dir_cache = fetch_songtext._load_cache(audio_path.parent)
-        elif folder_lock is fetch_songtext._FOLDER_BUSY:
+            dir_cache = lyrics_core._load_cache(audio_path.parent)
+        elif folder_lock is lyrics_core._FOLDER_BUSY:
             continue
 
         if not force:
             entry = dir_cache.get(cache_key)
             if (
                 entry
-                and fetch_songtext._cache_entry_valid(entry)
+                and lyrics_core._cache_entry_valid(entry)
                 and (entry.get("r") != "ok" or lrc_path.exists())
             ):
                 counts["skipped"] += 1
                 continue
 
-        fetch_songtext._print_status(f"  {i}/{total}: {audio_path.name} ...")
+        lyrics_core._print_status(f"  {i}/{total}: {audio_path.name} ...")
 
         expected_dur = evaluate_lyrics._resolve_expected_dur(audio_path)
         existing_lrc = lrc_path if lrc_path.exists() else None
@@ -101,8 +102,8 @@ def write_all(
             had_lrc = lrc_path.exists()
             lrc_path.unlink(missing_ok=True)
             extras["outcome"] = "delete" if had_lrc else "none"
-            fetch_songtext._tprint(
-                f"{fetch_songtext._ts()}  {audio_path.name}  {info_str}  "
+            lyrics_core._tprint(
+                f"{lyrics_core._ts()}  {audio_path.name}  {info_str}  "
                 f"{'–' if had_lrc else '='}"
             )
             counts["not_found"] += 1
@@ -111,26 +112,26 @@ def write_all(
             old_content = lrc_path.read_bytes() if lrc_path.exists() else None
             if old_content == new_content:
                 extras["outcome"] = "none"
-                fetch_songtext._tprint(
-                    f"{fetch_songtext._ts()}  {audio_path.name}  {info_str}  ="
+                lyrics_core._tprint(
+                    f"{lyrics_core._ts()}  {audio_path.name}  {info_str}  ="
                 )
                 counts["skipped"] += 1
             else:
                 lrc_path.write_bytes(new_content)
                 extras["outcome"] = "write"
-                fetch_songtext._tprint(
-                    f"{fetch_songtext._ts()}  {audio_path.name}  {info_str}  ✓"
+                lyrics_core._tprint(
+                    f"{lyrics_core._ts()}  {audio_path.name}  {info_str}  ✓"
                 )
                 counts["updated"] += 1
             cache_result = "ok"
 
         dir_cache[cache_key] = {
-            "v": fetch_songtext.__version__,
+            "v": lyrics_core.__version__,
             "r": cache_result,
             "ts": datetime.now().isoformat(timespec="seconds"),
             **extras,
         }
-        fetch_songtext._save_cache(audio_path.parent, dir_cache, lockfile=folder_lock)
+        lyrics_core._save_cache(audio_path.parent, dir_cache, lockfile=folder_lock)
 
-    fetch_songtext._release_folder(folder_lock)
+    lyrics_core._release_folder(folder_lock)
     return counts

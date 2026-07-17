@@ -29,7 +29,7 @@ from pathlib import Path
 import cache_store
 import evaluate_lyrics
 import fetch_providers
-import fetch_songtext
+import lyrics_core
 import scan_songs
 import write_lrc
 
@@ -89,22 +89,22 @@ def build_file_song_map(
 ) -> list[tuple[Path, str, str]]:
     """Ordnet Audiodateien unter root ihren "songs"-Einträgen in der Cache-DB zu.
 
-    Liest Künstler/Titel-Tags je Datei (fetch_songtext._read_audio_tags) und
+    Liest Künstler/Titel-Tags je Datei (lyrics_core._read_audio_tags) und
     sucht per cache_store.normalize_key den passenden (artist_key, titel_key)
     in der Tabelle "songs" -- Titel dabei über _clean_query_title bereinigt,
-    genau wie beim Anlegen der songs-Zeile in fetch_songtext (siehe
-    CACHE_DESIGN.md, "Normalisierung"). Dateien ohne lesbare Tags oder ohne
-    passenden DB-Eintrag tauchen einfach nicht in der Rückgabe auf -- kein
-    Fehler (siehe Design-Dokument, Abschnitt 3, Randfall b). Es gibt bewusst
-    KEINE dauerhafte Pfad-Speicherung in der DB -- diese Zuordnung wird bei
-    jedem Lauf frisch berechnet.
+    genau wie beim Anlegen der songs-Zeile (siehe CACHE_DESIGN.md,
+    "Normalisierung"). Dateien ohne lesbare Tags oder ohne passenden
+    DB-Eintrag tauchen einfach nicht in der Rückgabe auf -- kein Fehler
+    (siehe Design-Dokument, Abschnitt 3, Randfall b). Es gibt bewusst KEINE
+    dauerhafte Pfad-Speicherung in der DB -- diese Zuordnung wird bei jedem
+    Lauf frisch berechnet.
     """
     mapping: list[tuple[Path, str, str]] = []
     for audio_path in scan_songs._iter_audio_files(root, recursive):
-        artist, title, _genre = fetch_songtext._read_audio_tags(audio_path)
+        artist, title, _genre = lyrics_core._read_audio_tags(audio_path)
         if not artist and not title:
             continue
-        clean_title = fetch_songtext._clean_query_title(title) if title else title
+        clean_title = lyrics_core._clean_query_title(title) if title else title
         artist_key = cache_store.normalize_key(artist)
         titel_key = cache_store.normalize_key(clean_title)
         row = conn.execute(

@@ -1,0 +1,288 @@
+1. ganze bibliothek
+wenn ich für die ganze bibliothek songtexte hole, dann starte ich einen lauf über alle verzeichnisse. die provider liefern dann die songtexte und am ende schaut whisper nochmal drüber ob alles passt. so wäre es perfekt.
+leider sind die provider nicht zuverlässig. selbst wenn sie einen text haben , heißt das nicht zwangsläufig, dass sie ihn zu dem Zeitpunkt, wo ich Abfrage den Text auch liefern können. Das kann an einem Rad Limit liegen oder an einem Netzwerkausfall oder oder oder... Im Moment ist es aber so, dass ein Konsens nur zu Stande kommt, wenn ich mindestens drei Provider vorliegen habe. Durch den Ausfall eines Providers kann der Konsens nicht mehr zu Stande kommen. Whisper würde dann langsam den Song testen. Das dauert unnötig lange.
+Für die Bibliothek schlage ich folgendes Vorgehen vor. 1. Zuerst scannen wir alle Titel und Artist und speichern diese in unsere Cache Datenbank ab. 2. Im zweiten Schritt holen wir für all diese Titel und Artist aus den Providern so viele Texte wie möglich von den providern. 3. Wir holen uns fehlende Provider hinzu die aus welchem Grund auch immer nicht abgefragt werden konnten Rate Limit, kein Netz...). 4. Nachdem Punkt drei abgeschlossen ist und so viel Provider wie möglich abgefragt positiv wurden, gehen wir zum Punkt Bewertung über das bedeutet. Nun gibt es entweder einen Konsens oder wir müssen Whisper einschalten. Das ist der finale Schritt. 
+2. einzelnes album, eizelner song
+Bei einem einzelnen Song oder einem einzelnen Album verhält es sich im prinzip genauso. 
+
+generell: 
+Jeder Schritt muss wiederholt werden können. 
+
+module
+1. artist songs des laufs identifizieren
+2. provider zu artist/song abfragen (lrclib lokal außer die datenbank ist nicht verfügbar dann über internet, rest über internet)
+3. providertexte bewerten
+4. whisper zu hilfe nehmen
+5. entscheiden und lrc schreiben, löschen
+
+
+================================================================
+ZIELARCHITEKTUR (Planung, noch nichts implementiert)
+================================================================
+(in einfacher Sprache — kurze Sätze, wenig Fachbegriffe)
+
+Wie es heute ist:
+Der ganze Ablauf steht heute in EINER Datei: fetch_songtext.py, über 2400
+Zeilen lang. Das Programm sucht die Audiodateien. Es liest die Tags
+(Künstler, Titel) direkt dabei. Dann ruft es für jeden Song eine große
+Funktion auf, die ALLES macht: Anbieter abfragen, Konsens prüfen, Whisper
+starten, den besten Text auswählen.
+
+Die Datei cache_store.py ist schon anders. Sie speichert nur Daten in der
+Datenbank. Sie weiß nichts über Anbieter oder Whisper. Das ist gut so und
+bleibt so.
+
+Ziel: Die 5 Phasen aus den Notizen oben werden zu eigenen Programmen. Ein
+Steuer-Programm ruft sie auf. Jede Phase kann man einzeln nochmal laufen
+lassen.
+
+PFAD ist einfach ein Pfad im Dateisystem — eine einzelne Datei oder ein
+Ordner (dann meist mit --recursive für alle Unterordner). Was darunter
+liegt, wird verarbeitet. Ob das eine ganze Sammlung, ein Album oder nur ein
+einzelner Song ist, macht für den Ablauf keinen Unterschied. Es gibt keine
+extra "Modus"-Unterscheidung dafür (siehe F1 in Abschnitt 5).
+
+
+----------------------------------------------------------------
+1. DIE PROGRAMME (Namen sind nur Vorschläge)
+----------------------------------------------------------------
+
+Steuer-Programm: songtext_pipeline.py
+  Ruft die Phasen auf. Macht selbst keine fachliche Arbeit.
+
+Phase 1 — scan_songs.py (komplett neu)
+  Was es tut: Geht die Audiodateien durch. Liest Künstler, Titel, Dauer und
+  Genre. Trägt jeden Song in die Datenbank ein.
+  Das gibt es heute noch nicht als eigenen Schritt. Heute werden die Tags
+  erst gelesen, während schon nach Songtexten gesucht wird.
+
+Phase 2 — fetch_providers.py
+  Was es tut: Fragt für jeden Song alle Anbieter ab (lrclib, musixmatch,
+  netease, genius). Speichert jedes Ergebnis in der Datenbank — auch wenn
+  eine Abfrage fehlschlägt.
+  Dieses eine Programm kann zwei Dinge (siehe F4 in Abschnitt 5):
+    - Normal-Modus: alle Songs im Umfang abfragen. Das ist Phase 2 aus den
+      Notizen oben.
+    - Nachhol-Modus (das ist Phase 3 aus den Notizen oben): nur die Songs
+      und Anbieter nochmal abfragen, bei denen es beim letzten Mal nicht
+      geklappt hat. Gibt es im Code schon fast fertig, heißt dort
+      _retry_missing.
+  Warum EIN Programm statt zwei: Der Code für beide Modi ist im
+  Bestehenden fast identisch — der einzige Unterschied ist, WELCHE Songs
+  geprüft werden. Ein zweites Programm nur dafür wäre unnötige Zeremonie.
+  Im Steuer-Programm: `--phase 2` startet den Normal-Modus, `--phase 3`
+  startet den Nachhol-Modus.
+
+Phase 4 — evaluate_lyrics.py
+  Was es tut: Entscheidet, welcher Songtext der richtige ist.
+  Erster Versuch: Stimmen mindestens 3 Anbieter überein? Das nennen wir
+  Konsens. Wenn ja, ist das die Antwort.
+  Wenn nein: Whisper hört sich den Song an und vergleicht die Texte damit.
+  Braucht fast nur die Datenbank. Eine Ausnahme: Wenn Whisper diesen Song
+  noch nie gehört hat, braucht Phase 4 die echte Audiodatei. (Mehr dazu
+  weiter unten bei "PFAD und Audiodateien".)
+
+Phase 5 — write_lrc.py
+  Was es tut: Schreibt die .lrc-Datei mit dem Songtext. Oder lässt sie
+  unverändert. Oder löscht sie. Je nachdem, was Phase 4 entschieden hat.
+  Pflegt außerdem eine kleine Extra-Datei pro Ordner (.fetch_songtext.json),
+  die sich merkt, was schon erledigt ist.
+
+
+----------------------------------------------------------------
+2. WIE DIE PHASEN ZUSAMMENHÄNGEN
+----------------------------------------------------------------
+
+Über die Datenbank:
+  Phase 1 gibt Phase 2 die Liste der Songs (Tabelle "songs").
+  Phase 2 markiert in der Tabelle "ergebnisse", was geklappt hat und was
+  nicht (Spalte "status": treffer / nichts / fehlschlag). Der Nachhol-Modus
+  (Phase 3) liest genau diese Markierung, um zu wissen, was er nachholen
+  muss.
+  Beide Modi legen die gefundenen Songtexte in der Tabelle "texte" ab.
+  Phase 4 liest diese Texte. Sie liest auch die Tabelle "transkripte" — dort
+  steht ein Whisper-Ergebnis, falls es das schon gibt.
+
+Über echte Dateien (nicht über die Datenbank):
+  Phase 5 schreibt echte .lrc-Dateien. Das muss so sein — ein Songtext muss
+  am Ende als Datei neben dem Song liegen.
+
+Gelöst: Wohin schreibt Phase 4 ihre Entscheidung ("dieser Text ist richtig"
+oder "kein Text")? Antwort: nirgendwohin — es braucht keinen neuen
+Ablageort in der Datenbank. Die Entscheidung ist nur ein Vergleich von
+Texten, die schon gespeichert sind: die Provider-Texte stehen in "texte",
+ein eventuelles Whisper-Ergebnis steht (falls Whisper den Song schon mal
+gehört hat) in "transkripte". Kein Netzwerk, kein neuer Whisper-Lauf nötig.
+
+Deshalb kann Phase 5 die Entscheidung bei Bedarf einfach selbst nochmal
+ausrechnen — sie ruft dieselbe Vergleichs-Funktion auf, die auch Phase 4
+benutzt (ein normaler Import aus evaluate_lyrics.py, kein Umweg über die
+Datenbank). Das funktioniert egal ob Phase 4 und 5 im selben Lauf
+zusammen laufen oder an verschiedenen Tagen ganz getrennt aufgerufen
+werden — die Antwort ist immer dieselbe, weil sie nur von den schon
+gespeicherten Daten abhängt.
+
+Eine Bedingung bleibt: Für einen Song ohne Konsens muss vorher schon ein
+Whisper-Ergebnis in "transkripte" stehen — genau dafür sorgt Phase 4. Fehlt
+es, kann Phase 5 für diesen Song nichts entscheiden. Dann wird der Song wie
+gewohnt übersprungen, nicht geraten — ein späterer Lauf mit Phase 4 holt
+das nach.
+
+
+----------------------------------------------------------------
+3. DAS STEUER-PROGRAMM
+----------------------------------------------------------------
+
+Beispiel-Aufrufe (so hast du es bestätigt):
+
+  songtext_pipeline.py PFAD [--recursive]
+      → alle 5 Phasen nacheinander
+
+  songtext_pipeline.py PFAD --phase 3
+      → nur der Nachhol-Modus von fetch_providers.py. PFAD ist hier egal —
+        dieser Modus braucht nur die Datenbank, keine echten Dateien.
+
+  songtext_pipeline.py PFAD --phase 2,4,5
+      → nur diese drei Phasen
+
+PFAD und Audiodateien (das war die offene Frage F5 — jetzt geklärt):
+  PFAD wird bei jedem Aufruf mitgegeben. Aber nur die Phasen benutzen ihn
+  wirklich, die eine echte Audiodatei brauchen: Phase 1 (zum Scannen) und
+  Phase 4 (nur wenn Whisper den Song noch nie gehört hat). Alle anderen
+  Phasen ignorieren PFAD einfach.
+
+  Es gibt KEINE dauerhafte Speicherung von Dateipfaden in der Datenbank.
+  Stattdessen sucht das Steuer-Programm bei jedem Lauf frisch: Es geht die
+  Dateien unter PFAD durch und ordnet sie über Künstler + Titel den
+  passenden Datenbank-Einträgen zu.
+
+  Dazu drei kurze Prüfungen:
+
+  a) Was, wenn PFAD nur ein Teil der Sammlung ist (z.B. nur ein Album),
+     aber Phase 4 für Songs außerhalb dieses Ordners laufen soll?
+     Dann findet Phase 4 für diese Songs keine Datei. Lösung: nicht raten,
+     sondern den Song überspringen — genau wie an anderen Stellen im Code
+     schon üblich (z.B. wenn kein Whisper-Modell verfügbar ist). Ein
+     späterer Lauf mit dem passenden PFAD holt diesen Song dann nach.
+
+  b) Was, wenn PFAD beim Aufruf ganz fehlt, aber die gewählte Phase
+     eigentlich eine Datei bräuchte?
+     Vorschlag: kein sofortiger Fehler beim Start. Stattdessen erst meckern,
+     wenn der Fall wirklich eintritt — also wenn ein Song ohne
+     Whisper-Ergebnis aus der Datenbank auftaucht. Grund: oft ist gar keine
+     Datei nötig, zum Beispiel wenn für alle betroffenen Songs schon ein
+     Whisper-Ergebnis gespeichert ist. Ein Fehler direkt am Anfang würde
+     solche Läufe unnötig blockieren.
+
+  c) Randfall, noch nicht gelöst: Kommt derselbe Künstler + Titel in zwei
+     Alben vor (z.B. eine Best-of-Platte und das Original-Album), könnte
+     die Zuordnung Datei ↔ Datenbank-Eintrag doppeldeutig sein. Vermutlich
+     selten genug, um das erstmal zu ignorieren.
+
+Wie ruft das Steuer-Programm die Phasen auf? Entschieden (siehe F3 in
+Abschnitt 5): Alles läuft in einem Programm. Die Phasen sind Funktionen,
+die direkt aufgerufen werden — kein eigener Prozess pro Phase.
+
+Grund: Deine harte Anforderung war, dass das Whisper-Modell nur EINMAL pro
+Lauf geladen wird, nicht pro Song. Bei einem eigenen Unterprogramm pro
+Phase müsste entweder Phase 4 sowieso in einem Rutsch alle Songs
+durchgehen (dann bringt die Aufteilung nichts mehr), oder das Modell würde
+mehrfach geladen. Ein Programm mit direkten Funktionsaufrufen erfüllt
+deine Anforderung am einfachsten, ohne Zusatzaufwand.
+
+Das gilt genauso für den IDF-Hintergrund (für die kontrastive Marge in
+Phase 4): Er wird einmal aufgebaut, bevor Phase 4 die Songs durchgeht —
+wie heute schon in _build_contrastive_context. Neue Songtexte sollen aber
+trotzdem mit einfließen, ohne dass man dafür jedes Mal komplett neu
+anfängt: Phase 4 zählt intern mit, wie viele Songs sie gerade fertig
+bewertet hat. Alle N Songs (N ist eine feste Zahl, z.B. 50 — genauer Wert
+bei der Umsetzung festlegen) ruft sie _build_contrastive_context noch
+einmal auf, damit der Hintergrund die neuesten Texte mitkennt.
+
+Wie verhindert man doppelte Arbeit, wenn man eine Phase nochmal laufen
+lässt?
+  - Phase 2: Ein Song mit einem gültigen Ergebnis wird nicht nochmal
+    abgefragt.
+  - Phase 4: Ein Song mit gespeichertem Whisper-Ergebnis wird nicht nochmal
+    transkribiert.
+  - Phase 5: Ein Song, der schon fertig geschrieben ist, wird übersprungen.
+  Ein nochmaliger Lauf einer Phase macht also heute schon meist nur die
+  offenen Fälle. Was fehlt, ist eine klare Übersicht "welcher Song ist in
+  welcher Phase gerade" (siehe Frage F2).
+
+
+----------------------------------------------------------------
+4. WAS KANN WEITERVERWENDET WERDEN, WAS MUSS NEU GEBAUT WERDEN
+----------------------------------------------------------------
+
+Kann fast unverändert übernommen werden:
+  - Phase 2: die Anbieter-Abfrage (Funktion _query_provider, Zeile 443) und
+    der Teil, der alle Anbieter gleichzeitig abfragt (Zeile 1354-1375).
+  - Nachhol-Modus (früher "Phase 3"): _retry_missing (Zeile 1825) — ist
+    schon fast fertig, wird zum zweiten Modus von fetch_providers.py.
+  - Phase 4: die Konsens-Prüfung (_provider_consensus, Zeile 1066), die
+    Whisper-Auswahl (_whisper_best, Zeile 1135) und die
+    Entscheidungs-Logik aus fetch_lrc (Zeile 1404-1599).
+  - Phase 5: der Teil, der die .lrc-Datei schreibt und die
+    .fetch_songtext.json pflegt (Zeile 2344-2440).
+
+Muss neu gebaut werden:
+  - Phase 1 komplett — gibt es als eigenen Schritt noch nicht.
+
+
+----------------------------------------------------------------
+5. OFFENE FRAGEN — hier musst du entscheiden
+----------------------------------------------------------------
+
+F1 — GELÖST (deine Antwort A1): PFAD ist einfach ein Pfad im Dateisystem —
+     egal ob das eine einzelne Datei ist oder ein Ordner mit vielen
+     Unterordnern (--recursive). Was darunter liegt, wird verarbeitet. Es
+     gibt keine extra Unterscheidung zwischen "Sammlung", "Album" und
+     "Song" — das wäre unnötige Zusatzarbeit gewesen. Siehe Abschnitt 1,
+     geänderter Einleitungstext.
+
+F2 — Deine Gegenfrage (A2): "wer ist 'man'?" — berechtigt, das hatte ich
+     nicht klar genug gesagt. Es gibt zwei mögliche Antworten, und sie
+     führen zu unterschiedlichen Lösungen. Vorschlag von mir, bitte
+     bestätigen oder korrigieren:
+
+     (1) Die Pipeline selbst muss wissen, was sie überspringen kann. Das
+         ist HEUTE SCHON gelöst, ganz ohne neue Status-Spalte: Phase 2, 4
+         und 5 prüfen jeweils einen vorhandenen Datenbank-Eintrag (siehe
+         Abschnitt 3, "Wie verhindert man doppelte Arbeit"). Dafür braucht
+         es nichts Neues zu bauen.
+
+     (2) Du selbst als Mensch willst sehen können "wie weit ist mein Lauf
+         gerade". Dafür gibt es aktuell noch NICHTS.
+
+     Mein Vorschlag: Falls (1) gemeint war, ist F2 damit erledigt — keine
+     neue Status-Spalte nötig, raus aus der Architektur-Frage. Falls du
+     (2) willst, würde ich das NICHT in die Pipeline selbst einbauen,
+     sondern als eigenes kleines Auswerte-Skript bauen — so wie
+     lrc_analyse.py das heute schon für den JSON-Cache macht. Das wäre
+     dann ein eigenes, späteres Mini-Vorhaben, keine Architektur-
+     Entscheidung jetzt. Bitte sag mir, ob das passt oder ob du etwas
+     Drittes meinst.
+
+A2: Passt. Der Benutzer schaut nicht in die Datenbank.
+
+F3 — GELÖST (deine Antwort A3): Alles läuft in einem Programm, mit
+     direkten Funktionsaufrufen statt eigener Unterprogramme pro Phase.
+     Begründung und technische Details siehe Abschnitt 3, "Wie ruft das
+     Steuer-Programm die Phasen auf?" — kurz: nur so lässt sich dein
+     Wunsch "Whisper-Modell und IDF-Hintergrund nur einmal pro Lauf laden,
+     IDF alle N Songs auffrischen" ohne Zusatzaufwand umsetzen.
+
+F4 — GELÖST (deine Antwort A4: "entscheidung bei dir"): Phase 3 bekommt
+     KEIN eigenes Programm. Sie wird der Nachhol-Modus von
+     fetch_providers.py (Phase 2). Begründung: _retry_missing (Zeile 1825)
+     unterscheidet sich vom Normal-Modus nur durch eine zusätzliche
+     Einschränkung, WELCHE Songs geprüft werden — derselbe Code für die
+     eigentliche Abfrage. Ein eigenes Programm nur für diese Einschränkung
+     wäre unnötige Zeremonie (YAGNI). Siehe Abschnitt 1, Phase 2.
+
+F5 — GELÖST: Siehe Abschnitt 3, "PFAD und Audiodateien" oben. Kein
+     dauerhafter Dateipfad in der Datenbank. PFAD ist ein Argument des
+     Steuer-Programms, das nur die Phasen nutzen, die wirklich eine Datei
+     brauchen (Phase 1 und manchmal Phase 4).
+

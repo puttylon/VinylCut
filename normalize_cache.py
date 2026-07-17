@@ -4,11 +4,11 @@
 Dateinamen (ä/ö/ü) können je nach Zugriffsweg (lokal geschrieben, dann über
 SMB gelesen) unterschiedlich Unicode-normalisiert ankommen — NFC (ü als ein
 Zeichen) vs. NFD (u + separater Akzent). Ohne Normalisierung verpasst der
-Cache-Lookup in fetch_songtext.py vorhandene Einträge und legt Duplikate an:
-zwei Einträge für denselben Track, optisch identisch, byte-verschieden.
+Cache-Lookup (siehe lyrics_core.py) vorhandene Einträge und legt Duplikate
+an: zwei Einträge für denselben Track, optisch identisch, byte-verschieden.
 
 Dieses Skript liest jede Cache-Datei, führt Duplikate zusammen (neuerer
-"ts"-Zeitstempel gewinnt — dieselbe Logik wie fetch_songtext._load_cache())
+"ts"-Zeitstempel gewinnt — dieselbe Logik wie lyrics_core._load_cache())
 und schreibt die bereinigte Version zurück. Fragt nichts neu ab, keine
 Provider-/Whisper-Aufrufe — reine lokale Bereinigung.
 
@@ -22,7 +22,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from fetch_songtext import _CACHE_FILENAME, _load_cache, _save_cache
+from lyrics_core import _CACHE_FILENAME, _load_cache, _save_cache
 
 
 def _find_cache_files(root: Path) -> list[Path]:

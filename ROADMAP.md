@@ -334,6 +334,66 @@ die CLI-Beispiele in `README.md` wurden auf die neue Syntax umgestellt.
 dieselben 13 bekannten, unabhängigen Fehlschläge. `ruff check`/`ruff format`
 sauber.
 
+**✓ Nachtrag — `fetch_songtext.py` gelöscht, `lyrics_core.py` als geteilte
+Bibliothek extrahiert:** Die oben offen gelassene Entscheidung („was passiert
+mit `fetch_songtext.py` selbst") ist jetzt gefallen — explizite
+Nutzer-Vorgabe: „fetch_songtext wird gelöscht. sorge dafür, das cut das neue
+programm oder die module nutzt und das user-erlebnis sich dadurch nicht
+wirklich ändert." Vorher wurde noch ein uncommitteter Debug-Hack aus einer
+früheren Session entfernt (`_LRCLIB_LIVE_FALLBACK = False`, blockierte jeden
+Live-Fallback für lrclib) — Ursache der 13 bis dahin bekannten, als
+„unabhängig" geführten Testfehlschläge; nach Entfernen sofort 471/471 grün.
+
+Die wiederverwendbaren Teile von `fetch_songtext.py` (Tag-Lesen, Provider-
+Abfrage inkl. Rate-Limit-Handling, Whisper-Helfer, kontrastive Marge,
+JSON-Ordner-Cache, `__version__`) wurden 1:1 nach `lyrics_core.py`
+übernommen — bewusst OHNE `fetch_lrc()`, `_whisper_rerun_needed()` und das
+alte `main()`/CLI, die mit der Phasen-Aufteilung ersatzlos entfallen sind
+(deren Aufgaben übernehmen `evaluate_lyrics.py`/`write_lrc.py`/
+`songtext_pipeline.py`). Alle Phasen-Module (`scan_songs.py`,
+`fetch_providers.py`, `evaluate_lyrics.py`, `write_lrc.py`,
+`songtext_pipeline.py`) sowie `cache_store.py`, `compare_whisper_models.py`
+und `normalize_cache.py` importieren jetzt `lyrics_core` statt
+`fetch_songtext` — die auf der Platte liegenden Cache-Dateinamen
+(`.fetch_songtext.json`/`.fetch_songtext.lock`/`fetch_songtext_cache.db`)
+blieben dabei bewusst unverändert, damit bestehende Bibliotheks-Caches
+weiter funktionieren.
+
+`cut.py` migriert: `_fetch_lyrics_for_track()` (neu) komponiert für EINEN
+frisch geschnittenen Track synchron denselben Ablauf wie die Pipeline
+(Song-Identität anlegen → alle 4 Provider parallel abfragen →
+`evaluate_lyrics.evaluate_song()` → `.lrc` schreiben/löschen), ersetzt den
+alten `fetch_songtext.fetch_lrc()`-Aufruf. Die Cache-DB wird jetzt einmal pro
+Schneide-Session geöffnet (vorher gar nicht) und Whisper-Modell +
+kontrastiver Kontext einmal geladen. **Nebenwirkung, kein bewusster
+Funktionsumbau:** `cut.py` öffnete vorher NIE die Cache-DB — die kontrastive
+Marge (braucht immer einen Hintergrund-Pool aus der DB) fiel dadurch
+still auf `margin=None`/Score 0.0 zurück, Whisper-Verifikation akzeptierte
+in `cut.py` also faktisch nie etwas. Mit echter Cache-DB kann Whisper jetzt
+auch beim Direkt-Schneiden wirklich akzeptieren — eine ECHTE
+Verhaltensänderung (mehr Songs bekommen einen `.lrc` über den Whisper-Pfad
+statt zuvor gar keinen), keine reine Umbenennung. Dem Nutzer noch nicht
+explizit zur Bestätigung vorgelegt.
+
+Testmigration: `test_fetch_songtext.py` → `test_lyrics_core.py` (die 27
+weiterhin gültigen Testklassen für reine Logikfunktionen), eine Klasse
+(`TestRetryMissingUsesLrclibDump`) nach `test_fetch_providers.py`
+verschoben und von `lyrics_core.main()`/`sys.argv`-Patching auf einen
+direkten `fetch_providers.retry_missing(conn)`-Aufruf umgestellt (der alte
+Bug, den dieser Test abdeckte, ist mit der Phasen-Aufteilung strukturell
+unmöglich geworden — der Test bleibt trotzdem als Ende-zu-Ende-Abdeckung
+sinnvoll). `fetch_songtext.py`/`test_fetch_songtext.py` per `git rm`
+gelöscht. `README.md` (komplette Neufassung des Songtexte-Abschnitts:
+`songtext_pipeline.py` statt `fetch_songtext.py`-Flags, Whisper-Modellwahl
+medium/large-v3 statt `small`, `--no-whisper`/`--fast`/`--force`/
+`--cache-only`/`--retry-missing`-Flags entfernt — existieren im neuen CLI
+nicht mehr) und `CACHE_DESIGN.md` (ein stehen gebliebener Modul-Verweis
+korrigiert) nachgezogen.
+
+Volle Suite: 441/441 grün (13 vorbestehende Fehlschläge durch den
+Hack-Fund vollständig aufgelöst, keine übrig). `ruff check` auf allen
+geänderten/neuen Dateien sauber.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der
@@ -569,6 +629,24 @@ Aufruf nach der Bibliotheksauflösung entfällt für diese Songs (nur
 Pflicht-Songs, die nicht stratifiziert werden, brauchen ihn weiterhin
 separat nach der Auflösung).
 
+**Bugfix — derselbe Künstler tauchte mehrfach in einer Stichprobe auf:**
+Ein echter Testlauf zeigte, dass `select_language_pools()` denselben
+Künstler mehrfach zog. Ursache: die Cache-DB ist extrem schief verteilt —
+von nur ~420 verschiedenen Künstlern haben einzelne hunderte gecachte Songs
+(Prince 392, Gary Numan 238, Green Day 105, …) — eine rein zufällige Ziehung
+pro (Artist, Titel)-Paar trifft solche Künstler überproportional oft, was
+den Modellvergleich unnötig auf deren Vokabular/Stimme verengt statt eine
+breite Stichprobe zu liefern. Fix: `select_language_pools()` merkt sich
+`artist_key` bereits aufgenommener Kandidaten (`used_artists`, über BEIDE
+Pools hinweg) und überspringt jeden weiteren Kandidaten desselben Künstlers
+— unabhängig von Sprache oder Puffer-Status. Neuer Parameter
+`exclude_artists` nimmt zusätzlich die Künstler der Pflicht-Songs entgegen
+(`main()` übergibt sie), damit z.B. „Nina Hagen Band" nicht zusätzlich per
+Zufall nochmal mit einem anderen Song gezogen wird. Am realen Cache-Bestand
+verifiziert (`--n 20`, Cache-DB mit 5758 klassifizierbaren Kandidaten): vorher
+kamen bei stichprobenartigen Läufen Wiederholungen vor, danach 48/48 bzw.
+12/12 unterschiedliche Künstler in beiden Pools, keine einzige Dopplung.
+
 **Gezielte Ein-Durchlauf-Suche mit Früh-Abbruch statt Voll-Index (v2):**
 Vorher baute das Skript IMMER zuerst einen kompletten Index über die gesamte
 Bibliothek auf (`build_library_index()`, jede der ~19.000 Dateien einzeln mit
@@ -648,6 +726,56 @@ er dedupliziert statt doppelt verarbeitet. Mit `--include ARTIST:TITEL`
 keinen Cache-Eintrag, nur einen Treffer im Bibliotheks-Scan. Fehlt die
 Audiodatei in der Bibliothek, erscheint das als klarer Hinweis in der
 Konsolenausgabe und als eigener Abschnitt in `modellvergleich_index.txt`.
+
+### ✓ Nachtrag: `large-v3` ergänzt + Entscheidung für den Produktivbetrieb
+
+**`--models`-Flag:** `compare_whisper_models.py` konnte bisher nur die fest
+verdrahteten drei Modelle (`small`/`medium`/`turbo`) laufen lassen. Neuer
+Parameter `--models MODELL1,MODELL2,...` (Standard weiterhin
+`small,medium,turbo`) erlaubt ein beliebiges zusätzliches Modell auf
+derselben Stichprobe. Existiert für einen Song schon eine Datei aus einem
+früheren Lauf im selben `--output-dir`, hängt `_existing_output_path()` den
+neuen Modell-Abschnitt an diese Datei an, statt (wie bisher) eine neue Datei
+mit `_2`-Suffix anzulegen — so lässt sich ein Modell nachträglich auf exakt
+derselben Stichprobe ergänzen, ohne die anderen drei neu zu rechnen.
+
+**Vierter Testlauf mit `large-v3`:** Auf denselben 21 Songs ergänzt
+(`--models large-v3`). Manuelle Auswertung (siehe
+`whisper_modellvergleich_ergebnis.md`) zunächst nur im Modell-zu-Modell-
+Vergleich, danach gegen echte `.lrc`-Songtexte von der Bibliothek geprüft
+(20 von 21 Songs hatten eine Referenz — bei "Joco – Cloud" existiert keine
+`.lrc`, der einzige gecachte Provider-Kandidat ist ein komplett anderer Song
+und wurde von der App zu Recht unterhalb der Score-Schwelle abgelehnt).
+
+Kernergebnis der Gegenprüfung: kein Modell ist frei von ausgelassenen
+Songabschnitten oder Halluzinationen — auch `medium` lässt an zwei Songs
+(Nina Hagen, Spliff) ganze Anfangszeilen weg, `small` verschluckt bei Nina
+Hagen sogar das komplette letzte Songdrittel. `large-v3` löst Turbos
+Aussetzer bei fehlenden Anfängen, hat aber ein eigenes Beispiel dafür
+(George Michael – Faith) und halluziniert genauso oft wie Turbo, nur mit
+anderen Phrasen. Der klare Unterschied zeigt sich bei der Sprache:
+
+- **Bei rein englischen und rein deutschen Songs** liegen `medium`,
+  `turbo` und `large-v3` nah beieinander — `large-v3` gewinnt zwar die
+  meisten Einzelvergleiche (trifft öfter das exakte Wort), aber der
+  Abstand ist klein und nicht bei jedem Song stabil.
+- **Beim Sprachwechsel innerhalb eines Songs** (Testfall "Ja, Panik",
+  Englisch/Deutsch gemischt) ist `large-v3` klar und deutlich am
+  genauesten — trifft mehrere komplette deutsche Zeilen wortgenau, wo
+  `medium`/`turbo`/`small` nur falsche englische Paraphrasen liefern.
+  `small` erkennt den Sprachwechsel gar nicht.
+- **Geschwindigkeit, isoliert gemessen** (5 Songs, `medium` und `large-v3`
+  je einzeln auf derselben Stichprobe, ohne Bibliotheks-Scan/Modell-
+  Ladezeit): `medium` ≈ 97 Sek/Song, `large-v3` ≈ 136 Sek/Song —
+  `large-v3` braucht **rund 40 % länger pro Song**.
+
+**Entscheidung für den Produktivbetrieb:** Englischsprachige Songs nutzen
+weiterhin `medium` (Qualitätsunterschied zu `large-v3` zu gering, um die
+40 % Mehrkosten zu rechtfertigen). Nicht-englische Songs (Sprach-Hint ≠
+`en`, insbesondere Deutsch und gemischtsprachige Songs) nutzen künftig
+`large-v3` — dort ist der Qualitätsgewinn real und deutlich. Umsetzung
+(Modellwahl in `fetch_songtext.py` anhand des Sprach-Hints verzweigen) ist
+noch offen.
 
 ## ✓ inspect_song.py — Diagnose-Werkzeug für einzelne Songs
 

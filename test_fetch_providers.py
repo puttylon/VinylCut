@@ -3,10 +3,10 @@ Songtexte-Pipeline, Meilenstein 2).
 
 Das Grundverhalten von _query_provider/Cache/Rate-Limit selbst ist
 unverändert wiederverwendet (siehe fetch_providers.py-Modul-Docstring) und
-schon in test_fetch_songtext.py (TestProviderCache, TestRetryMissing, ...)
+schon in test_lyrics_core.py (TestProviderCache, TestRetryMissing, ...)
 ausführlich getestet -- hier deshalb nur ein schlanker Smoke-Test für die
 neue Modul-Struktur: die Normal-Modus-Schleife über "songs" und das
-Globals-Setup, das beide Modi vor dem Aufruf von fetch_songtext braucht.
+Globals-Setup, das beide Modi vor dem Aufruf von lyrics_core braucht.
 
 _open_lrclib_dump_conn wird in jedem Test auf einen No-Op gemockt: die echte
 Funktion öffnet den externen LRCLib-Datenbank-Abzug -- ein reiner
@@ -18,18 +18,21 @@ Live-Provider-Abfrage.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 import cache_store as cs
 import fetch_providers
-import fetch_songtext
+import lyrics_core
 
 
 def _fake_run(responses: dict[str, str] | None = None):
-    """Ersetzt fetch_songtext.subprocess.run -- schreibt für Queries, die
+    """Ersetzt lyrics_core.subprocess.run -- schreibt für Queries, die
     einen der `responses`-Schlüssel enthalten, LRC-Inhalt in die Zieldatei,
     sonst bleibt sie leer (= sauberer Fehlschlag ohne Rate-Limit-Signal).
-    Analog zu TestRetryMissing._fake_run in test_fetch_songtext.py."""
+    Analog zu TestRetryMissing._fake_run in test_lyrics_core.py."""
     responses = responses or {}
 
     class _Result:
@@ -52,21 +55,21 @@ def _fake_run(responses: dict[str, str] | None = None):
 
 
 class _CacheGlobalsResetMixin:
-    """Setzt die fetch_songtext-Modul-Globals vor/nach jedem Test zurück --
-    dieselben Globals, die _prepare_fetch_songtext_globals setzt, dürfen
+    """Setzt die lyrics_core-Modul-Globals vor/nach jedem Test zurück --
+    dieselben Globals, die _prepare_lyrics_core_globals setzt, dürfen
     keinen Zustand zwischen Tests durchsickern lassen."""
 
     def setup_method(self):
-        fetch_songtext._cache_conn = None
-        fetch_songtext._cache_refresh = False
-        fetch_songtext._cache_only = False
-        fetch_songtext._lrclib_dump_conn = None
+        lyrics_core._cache_conn = None
+        lyrics_core._cache_refresh = False
+        lyrics_core._cache_only = False
+        lyrics_core._lrclib_dump_conn = None
 
     def teardown_method(self):
-        fetch_songtext._cache_conn = None
-        fetch_songtext._cache_refresh = False
-        fetch_songtext._cache_only = False
-        fetch_songtext._lrclib_dump_conn = None
+        lyrics_core._cache_conn = None
+        lyrics_core._cache_refresh = False
+        lyrics_core._cache_only = False
+        lyrics_core._lrclib_dump_conn = None
 
 
 class TestPrepareFetchSongtextGlobals(_CacheGlobalsResetMixin):
@@ -75,19 +78,19 @@ class TestPrepareFetchSongtextGlobals(_CacheGlobalsResetMixin):
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         # simuliert Zustand, den ein früherer Aufruf im selben Prozess
         # stehen gelassen haben könnte
-        fetch_songtext._cache_refresh = True
-        fetch_songtext._cache_only = True
+        lyrics_core._cache_refresh = True
+        lyrics_core._cache_only = True
 
-        fetch_providers._prepare_fetch_songtext_globals(conn)
+        fetch_providers._prepare_lyrics_core_globals(conn)
 
-        assert fetch_songtext._cache_conn is conn
-        assert fetch_songtext._cache_ttl_days == cs.DEFAULT_TTL_DAYS
-        assert fetch_songtext._cache_refresh is False
-        assert fetch_songtext._cache_only is False
+        assert lyrics_core._cache_conn is conn
+        assert lyrics_core._cache_ttl_days == cs.DEFAULT_TTL_DAYS
+        assert lyrics_core._cache_refresh is False
+        assert lyrics_core._cache_only is False
 
 
 class TestFetchAll(_CacheGlobalsResetMixin):
@@ -98,24 +101,22 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        # Neutralisiert den uncommitteten lokalen Debug-Hack in fetch_songtext.py
+        # Neutralisiert den uncommitteten lokalen Debug-Hack in lyrics_core.py
         # (_LRCLIB_LIVE_FALLBACK=False, siehe dortiger Modulkommentar) -- dieser
         # Test prüft das COMMITTETE Verhalten (alle 4 Anbieter werden live
         # gefragt), nicht den temporären Hack. raising=False macht das robust,
         # falls das Attribut nach Entfernen des Hacks gar nicht mehr existiert.
-        monkeypatch.setattr(
-            fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False
-        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
         fake_run = _fake_run({"artist a": "[00:01.00]hallo"})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         queried, skipped = fetch_providers.fetch_all(conn)
 
         assert (queried, skipped) == (2, 0)
         assert len(fake_run.calls) == 8  # 2 Songs x 4 Provider
-        assert {p for _, p in fake_run.calls} == set(fetch_songtext._ALL_PROVIDERS)
+        assert {p for _, p in fake_run.calls} == set(lyrics_core._ALL_PROVIDERS)
 
         assert cs.get_provider(conn, "lrclib", "artist a", "title a") == {
             "status": "treffer",
@@ -131,7 +132,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
 
         def _fail_if_called(*a, **k):
@@ -139,7 +140,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
                 "Live-Abfrage darf bei leerer songs-Tabelle nicht laufen"
             )
 
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
         assert fetch_providers.fetch_all(conn) == (0, 0)
 
@@ -151,7 +152,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
 
         def _fail_if_called(*a, **k):
@@ -159,7 +160,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
                 "Ein Song mit Skip-Genre darf bei keinem Anbieter live abgefragt werden"
             )
 
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
         queried, skipped = fetch_providers.fetch_all(conn)
 
@@ -173,16 +174,14 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        # Neutralisiert den uncommitteten lokalen Debug-Hack in fetch_songtext.py
+        # Neutralisiert den uncommitteten lokalen Debug-Hack in lyrics_core.py
         # (_LRCLIB_LIVE_FALLBACK=False) -- dieser Test prüft das COMMITTETE
         # Verhalten (alle 4 Anbieter werden live gefragt), nicht den Hack.
-        monkeypatch.setattr(
-            fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False
-        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
         fake_run = _fake_run({})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         # genre=None darf _is_skip_genre (ruft intern .lower() auf) nicht mit
         # einem AttributeError abstürzen lassen -- der Song muss stattdessen
@@ -203,13 +202,11 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        monkeypatch.setattr(
-            fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False
-        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
         fake_run = _fake_run({})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         queried, skipped = fetch_providers.fetch_all(
             conn, scope={("artist a", "title a")}
@@ -235,10 +232,10 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         fake_run = _fake_run({})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         fetch_providers.fetch_all(conn)
 
@@ -265,16 +262,16 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
 
         status_calls: list[str] = []
         tprint_calls: list[str] = []
         monkeypatch.setattr(
-            fetch_songtext, "_print_status", lambda msg: status_calls.append(msg)
+            lyrics_core, "_print_status", lambda msg: status_calls.append(msg)
         )
         monkeypatch.setattr(
-            fetch_songtext, "_tprint", lambda msg: tprint_calls.append(msg)
+            lyrics_core, "_tprint", lambda msg: tprint_calls.append(msg)
         )
 
         def _fake_query_provider(query, provider, env, artist="", title=""):
@@ -285,7 +282,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
             assert not tprint_calls, "Ergebniszeile darf noch nicht dastehen"
             return provider, None
 
-        monkeypatch.setattr(fetch_songtext, "_query_provider", _fake_query_provider)
+        monkeypatch.setattr(lyrics_core, "_query_provider", _fake_query_provider)
 
         queried, skipped = fetch_providers.fetch_all(conn)
 
@@ -305,15 +302,15 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         status_calls: list[str] = []
         tprint_calls: list[str] = []
         monkeypatch.setattr(
-            fetch_songtext, "_print_status", lambda msg: status_calls.append(msg)
+            lyrics_core, "_print_status", lambda msg: status_calls.append(msg)
         )
         monkeypatch.setattr(
-            fetch_songtext, "_tprint", lambda msg: tprint_calls.append(msg)
+            lyrics_core, "_tprint", lambda msg: tprint_calls.append(msg)
         )
 
         def _fail_if_called(*a, **k):
@@ -321,7 +318,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
                 "Ein Song mit Skip-Genre darf bei keinem Anbieter live abgefragt werden"
             )
 
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
         fetch_providers.fetch_all(conn)
 
@@ -334,13 +331,13 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
 
         def _fail_if_called(*a, **k):
             raise AssertionError("leerer scope darf nie live abfragen")
 
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", _fail_if_called)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
 
         assert fetch_providers.fetch_all(conn, scope=set()) == (0, 0)
 
@@ -353,10 +350,10 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         fake_run = _fake_run({})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         queried, skipped = fetch_providers.fetch_all(conn, scope=None)
 
@@ -371,13 +368,13 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         conn.commit()
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         fake_run = _fake_run({"artist a": "[00:01.00]hallo"})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         written_paths: list[Path] = []
-        orig_query_provider = fetch_songtext._query_provider
+        orig_query_provider = lyrics_core._query_provider
 
         def _spy(*a, **k):
             provider, path = orig_query_provider(*a, **k)
@@ -385,7 +382,7 @@ class TestFetchAll(_CacheGlobalsResetMixin):
                 written_paths.append(path)
             return provider, path
 
-        monkeypatch.setattr(fetch_songtext, "_query_provider", _spy)
+        monkeypatch.setattr(lyrics_core, "_query_provider", _spy)
 
         fetch_providers.fetch_all(conn)
 
@@ -400,11 +397,11 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         captured = {}
         monkeypatch.setattr(
-            fetch_songtext,
+            lyrics_core,
             "_retry_missing",
             lambda providers, artist, title: captured.update(
                 providers=providers, artist=artist, title=title
@@ -414,20 +411,20 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
         fetch_providers.retry_missing(conn)
 
         assert captured == {
-            "providers": fetch_songtext._ALL_PROVIDERS,
+            "providers": lyrics_core._ALL_PROVIDERS,
             "artist": None,
             "title": None,
         }
-        assert fetch_songtext._cache_conn is conn
+        assert lyrics_core._cache_conn is conn
 
     def test_providers_arg_wird_durchgereicht(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         captured = {}
         monkeypatch.setattr(
-            fetch_songtext,
+            lyrics_core,
             "_retry_missing",
             lambda providers, artist, title: captured.update(providers=providers),
         )
@@ -440,24 +437,22 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
         self, tmp_path, monkeypatch
     ):
         """Smoke-Test des kompletten Nachhol-Pfads über die echte (nicht
-        gemockte) fetch_songtext._retry_missing -- deren Kernverhalten ist
-        bereits in test_fetch_songtext.TestRetryMissing ausführlich getestet;
+        gemockte) lyrics_core._retry_missing -- deren Kernverhalten ist
+        bereits in test_lyrics_core.TestRetryMissing ausführlich getestet;
         hier nur: landet der Aufruf inkl. Globals-Setup wirklich bei ihr."""
         conn = cs.open_cache(tmp_path / "cache.db")
         cs.put_provider(conn, "lrclib", "artist a", "title a", "nichts", None)
         cs.put_provider(conn, "genius", "artist a", "title a", "treffer", "[00:01.00]x")
 
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        # Neutralisiert den uncommitteten lokalen Debug-Hack in fetch_songtext.py
+        # Neutralisiert den uncommitteten lokalen Debug-Hack in lyrics_core.py
         # (_LRCLIB_LIVE_FALLBACK=False) -- dieser Test prüft das COMMITTETE
         # Verhalten (lrclib wird live gefragt), nicht den temporären Hack.
-        monkeypatch.setattr(
-            fetch_songtext, "_LRCLIB_LIVE_FALLBACK", True, raising=False
-        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_LIVE_FALLBACK", True, raising=False)
         fake_run = _fake_run({"artist a": "[00:01.00]neu"})
-        monkeypatch.setattr(fetch_songtext.subprocess, "run", fake_run)
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
 
         fetch_providers.retry_missing(conn)
 
@@ -467,4 +462,123 @@ class TestRetryMissing(_CacheGlobalsResetMixin):
         assert cs.get_provider(conn, "lrclib", "artist a", "title a") == {
             "status": "treffer",
             "content": "[00:01.00]neu",
+        }
+
+
+class TestRetryMissingUsesLrclibDump:
+    """Regressionstest für einen echten Bug (Live-Test durch den Nutzer, siehe
+    ROADMAP.md v1.13.1): der --retry-missing-Zweig im alten fetch_songtext.py
+    main() endete mit `return`, BEVOR der Codeblock erreicht wurde, der
+    _lrclib_dump_conn öffnet -- _lrclib_dump_conn blieb für den GESAMTEN
+    --retry-missing-Lauf beim Modul-Default None, der lokale Datenbank-Abzug
+    wurde nie konsultiert, jede Anfrage ging sofort live raus (beobachtet:
+    5-10s pro Song, "weiterhin Fehler (rate_limit)"). Fix (damals):
+    _open_lrclib_dump_conn() wird aus main() aufgerufen.
+
+    In der neuen Pipeline ist dieser konkrete Bug strukturell nicht mehr
+    möglich -- es gibt nur noch EINEN Einstiegspunkt für den Nachhol-Modus
+    (fetch_providers.retry_missing), und _prepare_lyrics_core_globals() öffnet
+    die Dump-Verbindung dort IMMER, bevor _retry_missing() läuft (kein
+    main()-Verzweigungs-Bug mehr möglich). Test bleibt trotzdem als
+    Regressionsschutz erhalten: prüft end-to-end (nicht nur Einzelfunktionen
+    wie in test_lyrics_core.TestRetryMissing), dass ein Dump-Treffer einen
+    Nachhol-Lauf wirklich vor einer Live-Abfrage bewahrt -- über
+    fetch_providers.retry_missing() statt (nicht mehr existierendem)
+    lyrics_core.main()."""
+
+    def teardown_method(self):
+        lyrics_core._cache_conn = None
+        lyrics_core._lrclib_dump_conn = None
+        lyrics_core._cache_refresh = False
+        lyrics_core._cache_only = False
+        lyrics_core._retry_missing_active = False
+
+    def _make_dump_file(
+        self, tmp_path, artist_lower: str, title_lower: str, content: str
+    ) -> Path:
+        dump_path = tmp_path / "dump.db"
+        conn = sqlite3.connect(str(dump_path))
+        conn.executescript(
+            "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name_lower TEXT, artist_name_lower TEXT, last_lyrics_id INTEGER);"
+            "CREATE TABLE lyrics (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "plain_lyrics TEXT, synced_lyrics TEXT, has_plain_lyrics BOOLEAN, "
+            "has_synced_lyrics BOOLEAN);"
+        )
+        cur = conn.execute(
+            "INSERT INTO lyrics (synced_lyrics, has_synced_lyrics, has_plain_lyrics) "
+            "VALUES (?, 1, 0)",
+            (content,),
+        )
+        conn.execute(
+            "INSERT INTO tracks (name_lower, artist_name_lower, last_lyrics_id) "
+            "VALUES (?, ?, ?)",
+            (title_lower, artist_lower, cur.lastrowid),
+        )
+        conn.commit()
+        conn.close()
+        return dump_path
+
+    def test_end_to_end_dump_treffer_verhindert_live_abfrage(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs.put_provider(conn, "lrclib", "the artist", "the title", "nichts", None)
+
+        dump_path = self._make_dump_file(
+            tmp_path, "the artist", "the title", "[00:01.00]dump-inhalt"
+        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_DUMP_PATH", dump_path)
+
+        def _fail_if_called(*a, **k):
+            pytest.fail(
+                "retry_missing muss einen Dump-Treffer nutzen, nicht live fragen"
+            )
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+
+        fetch_providers.retry_missing(conn)
+
+        # Regressionscheck: die Dump-Verbindung wurde tatsächlich geöffnet.
+        assert lyrics_core._lrclib_dump_conn is not None
+        assert cs.get_provider(conn, "lrclib", "the artist", "the title") == {
+            "status": "treffer",
+            "content": "[00:01.00]dump-inhalt",
+        }
+
+    def test_end_to_end_fehlschlag_wird_durch_dump_treffer_zu_treffer(
+        self, tmp_path, monkeypatch
+    ):
+        """Startstatus 'fehlschlag' (nicht 'nichts') -- passend zum vom Nutzer
+        live beobachteten Symptom ("weiterhin Fehler (rate_limit)")."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs.put_provider(
+            conn,
+            "lrclib",
+            "the artist",
+            "the title",
+            "fehlschlag",
+            None,
+            fehlergrund="rate_limit",
+        )
+
+        dump_path = self._make_dump_file(
+            tmp_path, "the artist", "the title", "[00:01.00]dump-inhalt"
+        )
+        monkeypatch.setattr(lyrics_core, "_LRCLIB_DUMP_PATH", dump_path)
+
+        def _fail_if_called(*a, **k):
+            pytest.fail(
+                "retry_missing muss einen Dump-Treffer nutzen, nicht live fragen"
+            )
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+
+        fetch_providers.retry_missing(conn)
+
+        # Ohne jede Live-Abfrage: der Cache-Eintrag ist von 'fehlschlag' auf
+        # 'treffer' mit dem Dump-Inhalt gewechselt.
+        assert cs.get_provider(conn, "lrclib", "the artist", "the title") == {
+            "status": "treffer",
+            "content": "[00:01.00]dump-inhalt",
         }

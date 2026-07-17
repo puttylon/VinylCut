@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import atexit
+import sqlite3
 import sys
 import json
 import os
@@ -7,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -14,20 +16,85 @@ import fetch_metadata as mf
 from rich.console import Console
 from rich.live import Live
 
+import cache_store
+import evaluate_lyrics
+import fetch_providers
+import lyrics_core
 from cut_ui import build_cutting_panel, build_metadata_panel, live_input
-from fetch_songtext import (
-    fetch_lrc,
-    _load_env,
-    _load_cache,
-    _save_cache,
-    _cache_entry_valid,
-)
-from fetch_songtext import __version__ as _fetch_songtext_version
+from lyrics_core import _load_cache, _save_cache, _cache_entry_valid
 
 __version__ = "1.9.17"
 
+
+def _default_db_path() -> Path:
+    return Path(__file__).parent / "fetch_songtext_cache.db"
+
+
+def _fetch_lyrics_for_track(
+    conn: sqlite3.Connection,
+    query: str,
+    lrc_path: Path,
+    env: dict,
+    expected_dur: float,
+    flac_path: Path,
+    artist: str,
+    title: str,
+) -> tuple[bool, str, dict]:
+    """Ersetzt das alte fetch_songtext.fetch_lrc() -- komponiert für EINEN
+    frisch geschnittenen Track synchron Scan (Song-Identität anlegen),
+    Anbieter-Abfrage (alle 4 gleichzeitig), Bewertung (Konsens/Whisper, siehe
+    evaluate_lyrics.evaluate_song) und Schreiben, exakt wie beim Schneiden
+    gebraucht: sofortiges Ergebnis für einen Track, kein Batch.
+
+    Nutzt dieselben Bausteine wie die Pipeline (lyrics_core._query_provider,
+    evaluate_lyrics.evaluate_song) -- aber ohne Ordner-Sperre/JSON-Cache-Skip
+    (die pflegt cut.py selbst schon, siehe Aufrufer unten) und ohne
+    Scope-Konzept (hier immer genau ein Song).
+
+    Gibt (gefunden, info_str, extras) zurück -- exakt dieselbe Form wie das
+    alte fetch_lrc().
+    """
+    artist_key = cache_store.normalize_key(artist)
+    titel_key = cache_store.normalize_key(title)
+    cache_store._get_or_create_song(conn, artist_key, titel_key, None)
+    conn.commit()
+
+    with ThreadPoolExecutor(max_workers=len(lyrics_core._ALL_PROVIDERS)) as pool:
+        futures = [
+            pool.submit(
+                lyrics_core._query_provider,
+                query,
+                provider,
+                env,
+                artist=artist_key,
+                title=titel_key,
+            )
+            for provider in lyrics_core._ALL_PROVIDERS
+        ]
+        for future in as_completed(futures):
+            _provider, path = future.result()
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+    existing_lrc = lrc_path if lrc_path.exists() else None
+    found, info_str, extras = evaluate_lyrics.evaluate_song(
+        conn, artist_key, titel_key, flac_path, expected_dur, existing_lrc
+    )
+    new_content = extras.pop("content", None)
+    if found and new_content is not None:
+        old_content = lrc_path.read_bytes() if lrc_path.exists() else None
+        if old_content != new_content:
+            lrc_path.write_bytes(new_content)
+    elif not found:
+        lrc_path.unlink(missing_ok=True)
+
+    return found, info_str, extras
+
+
 DEFAULT_PLAY_DURATION_SEC = 3.0
-_MAX_PLAUSIBLE_GAP = 10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
+_MAX_PLAUSIBLE_GAP = (
+    10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
+)
 _MIN_PREVIEW_SEC = 2.0  # Untergrenze für "p<Sek>" (Bedienfehler-Schutz)
 _MAX_PREVIEW_SEC = 30.0  # Obergrenze für "p<Sek>"
 
@@ -73,7 +140,9 @@ def parse_preview_duration(action: str) -> float | None:
     return None
 
 
-def compute_last_gap(current_start: float, prev_start: float, prev_dur_s: float) -> float:
+def compute_last_gap(
+    current_start: float, prev_start: float, prev_dur_s: float
+) -> float:
     """Abweichung zwischen bestätigtem Start und reiner Summenschätzung.
 
     Große Abweichungen (>= _MAX_PLAUSIBLE_GAP) sind vermutlich eine falsche
@@ -133,12 +202,24 @@ def play_snippet_with_tone(flac_path: Path, start_time: float, duration: float) 
         )
         subprocess.run(
             [
-                "ffmpeg", "-y", "-v", "quiet",
-                "-f", "lavfi", "-i", "sine=frequency=220:duration=0.25",
-                "-ss", f"{start_time:.3f}", "-t", str(duration),
-                "-i", str(flac_path),
-                "-filter_complex", filter_complex,
-                "-map", "[out]",
+                "ffmpeg",
+                "-y",
+                "-v",
+                "quiet",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:duration=0.25",
+                "-ss",
+                f"{start_time:.3f}",
+                "-t",
+                str(duration),
+                "-i",
+                str(flac_path),
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[out]",
                 str(tmp_path),
             ],
             capture_output=True,
@@ -233,7 +314,10 @@ def run_metadata_search(
             "Gespeicherte Metadaten verwenden? [j/N]: ",
         )
         if ans.lower() == "j":
-            return saved, None  # Cover kam bereits in einem früheren Lauf, kein Thread nötig
+            return (
+                saved,
+                None,
+            )  # Cover kam bereits in einem früheren Lauf, kein Thread nötig
 
     # Frische Suche gewünscht (oder keine release.json vorhanden) — ein alter
     # Fortschritt passt zu neuen Metadaten nicht mehr zuverlässig zusammen.
@@ -635,7 +719,9 @@ def main():
 
                 if not skip_play:
                     if normton:
-                        play_snippet_with_tone(flac_path, current_start, preview_duration)
+                        play_snippet_with_tone(
+                            flac_path, current_start, preview_duration
+                        )
                     else:
                         play_snippet(flac_path, current_start, preview_duration)
                 skip_play = False
@@ -731,49 +817,77 @@ def main():
             live.refresh()
 
         if not no_songtext:
-            env = _load_env()
+            env = lyrics_core._load_env()
             artist = data.get("artist", "")
             lrc_cache = _load_cache(track_out_dir)
-            for idx, track in enumerate(data["tracks"]):
-                safe = track["title"].replace("/", "_")
-                audio_name = f"{idx + 1:02d} - {safe}.flac"
-                lrc_path = track_out_dir / f"{idx + 1:02d} - {safe}.lrc"
-                flac_path = track_out_dir / f"{idx + 1:02d} - {safe}.flac"
-                query = f"{artist} {track['title']}".strip()
-                entry = lrc_cache.get(audio_name)
-                if (
-                    entry
-                    and _cache_entry_valid(entry)
-                    and (entry.get("r") != "ok" or lrc_path.exists())
-                ):
-                    lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
+
+            # Cache-DB einmal pro Schneide-Sitzung öffnen (nicht pro Track) --
+            # dieselben Globals wie Phase 2/4 vorbereiten (öffnet u.a. den
+            # lokalen LRCLib-Datenbank-Abzug), Whisper-Modell + kontrastiven
+            # Kontext einmal laden, nicht pro Track (siehe evaluate_lyrics.py).
+            conn = cache_store.open_cache(_default_db_path())
+            fetch_providers._prepare_lyrics_core_globals(conn)
+            if (
+                lyrics_core._get_whisper_model(evaluate_lyrics._WHISPER_MODEL_EN)
+                is None
+            ):
+                print(
+                    "Warnung: faster-whisper nicht verfügbar -- Songtexte ohne "
+                    "3-Provider-Konsens werden nicht verifiziert."
+                )
+            else:
+                lyrics_core._build_contrastive_context()
+
+            try:
+                for idx, track in enumerate(data["tracks"]):
+                    safe = track["title"].replace("/", "_")
+                    audio_name = f"{idx + 1:02d} - {safe}.flac"
+                    lrc_path = track_out_dir / f"{idx + 1:02d} - {safe}.lrc"
+                    flac_path = track_out_dir / f"{idx + 1:02d} - {safe}.flac"
+                    query = f"{artist} {track['title']}".strip()
+                    entry = lrc_cache.get(audio_name)
+                    if (
+                        entry
+                        and _cache_entry_valid(entry)
+                        and (entry.get("r") != "ok" or lrc_path.exists())
+                    ):
+                        lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
+                        live.update(panel("songtext", export_status, lrc_status))
+                        live.refresh()
+                        continue
+
+                    lrc_status[idx] = "…"
                     live.update(panel("songtext", export_status, lrc_status))
                     live.refresh()
-                    continue
-
-                lrc_status[idx] = "…"
-                live.update(panel("songtext", export_status, lrc_status))
-                live.refresh()
-                try:
-                    _found, _info, _extras = fetch_lrc(
-                        query, lrc_path, env, track.get("dur_s", 0.0), flac_path
-                    )
-                except FileNotFoundError:
-                    lrc_status[idx] = "✗"
-                    for j in range(idx + 1, n):
-                        lrc_status[j] = "✗"
-                    break
-                found = lrc_path.exists()
-                lrc_status[idx] = "✓" if found else "✗"
-                lrc_cache[audio_name] = {
-                    "v": _fetch_songtext_version,
-                    "r": "ok" if found else "nf",
-                    "ts": datetime.now().isoformat(timespec="seconds"),
-                    **_extras,
-                }
-                _save_cache(track_out_dir, lrc_cache)
-                live.update(panel("songtext", export_status, lrc_status))
-                live.refresh()
+                    try:
+                        _found, _info, _extras = _fetch_lyrics_for_track(
+                            conn,
+                            query,
+                            lrc_path,
+                            env,
+                            track.get("dur_s", 0.0),
+                            flac_path,
+                            artist,
+                            track["title"],
+                        )
+                    except FileNotFoundError:
+                        lrc_status[idx] = "✗"
+                        for j in range(idx + 1, n):
+                            lrc_status[j] = "✗"
+                        break
+                    found = lrc_path.exists()
+                    lrc_status[idx] = "✓" if found else "✗"
+                    lrc_cache[audio_name] = {
+                        "v": lyrics_core.__version__,
+                        "r": "ok" if found else "nf",
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        **_extras,
+                    }
+                    _save_cache(track_out_dir, lrc_cache)
+                    live.update(panel("songtext", export_status, lrc_status))
+                    live.refresh()
+            finally:
+                conn.close()
 
         last_phase = "songtext" if not no_songtext else "export"
         last_es = export_status

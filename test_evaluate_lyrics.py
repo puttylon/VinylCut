@@ -1,7 +1,7 @@
 """Tests für evaluate_lyrics.py (Phase 4 der Songtexte-Pipeline, Meilenstein 3).
 
 Die eigentlichen Algorithmen (_provider_consensus, _whisper_best,
-_whisper_accept, _heuristic_best) sind unverändert aus fetch_songtext.py
+_whisper_accept, _heuristic_best) sind unverändert aus lyrics_core.py
 wiederverwendet und schon dort ausführlich getestet (TestProviderConsensus,
 TestWhisperAccept, TestWhisperBest...) -- hier deshalb nur Tests für die neue
 Modul-Struktur: Kandidaten aus der Cache-DB statt Live-Abfrage, kein
@@ -13,11 +13,10 @@ _get_whisper_model wird in jedem Test, der Whisper-Pfade durchläuft, gemockt
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import cache_store as cs
 import evaluate_lyrics
-import fetch_songtext
+import lyrics_core
 
 LRC_A = "[00:10.00]Girl you know it's true I love you\n[00:15.00]I'm in love with you girl\n"
 LRC_B = "[00:10.00]Girl you know it's true yes I love you\n[00:15.00]I'm in love girl cause you're on my mind\n"
@@ -29,14 +28,14 @@ LRC_WRONG = (
 
 class _GlobalsResetMixin:
     def setup_method(self):
-        fetch_songtext._cache_conn = None
-        fetch_songtext._cache_refresh = False
-        fetch_songtext._cache_only = False
-        fetch_songtext._lrclib_dump_conn = None
-        fetch_songtext._contrastive_idf = None
-        fetch_songtext._contrastive_lang_pools = None
-        fetch_songtext._contrastive_song_texts = None
-        fetch_songtext._contrastive_song_words_cache = {}
+        lyrics_core._cache_conn = None
+        lyrics_core._cache_refresh = False
+        lyrics_core._cache_only = False
+        lyrics_core._lrclib_dump_conn = None
+        lyrics_core._contrastive_idf = None
+        lyrics_core._contrastive_lang_pools = None
+        lyrics_core._contrastive_song_texts = None
+        lyrics_core._contrastive_song_words_cache = {}
 
     def teardown_method(self):
         self.setup_method()
@@ -94,7 +93,7 @@ class TestEvaluateSongKonsens(_GlobalsResetMixin):
         def _fail_if_called(*a, **kw):
             raise AssertionError("Whisper sollte bei Konsens nicht aufgerufen werden")
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_called)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
 
         found, info_str, extras = evaluate_lyrics.evaluate_song(conn, "artist", "title")
 
@@ -130,7 +129,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
             best = next(p for p in candidates if "true I love you" in p.read_text())
             return (best, 0.9, True, 42, "medium", "en", 0.5)
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
         found, info_str, extras = evaluate_lyrics.evaluate_song(
             conn, "artist", "title", flac_path=flac_path
@@ -150,7 +149,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
             return (candidates[0], 0.01, True, 5, "medium", "en", -0.5)
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
         found, info_str, extras = evaluate_lyrics.evaluate_song(
             conn, "artist", "title", flac_path=flac_path
@@ -169,7 +168,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
             return (None, 0.0, False, 0, "medium", "en", None)
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
         found, info_str, extras = evaluate_lyrics.evaluate_song(
             conn, "artist", "title", flac_path=flac_path
@@ -189,7 +188,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fake_whisper_best(flac, candidates, expected_dur, artist="", title=""):
             return (None, 0.0, False, 0, "medium", "en", None)
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
         found, _info, extras = evaluate_lyrics.evaluate_song(
             conn, "artist", "title", flac_path=flac_path
@@ -207,7 +206,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fail_if_called(*a, **kw):
             raise AssertionError("Whisper sollte bei fehlender Datei nicht laufen")
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fail_if_called)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
 
         found, _info, extras = evaluate_lyrics.evaluate_song(
             conn, "artist", "title", flac_path=tmp_path / "nicht_da.flac"
@@ -230,7 +229,7 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
             assert existing in candidates
             return (existing, 0.9, True, 10, "medium", "en", 0.5)
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _fake_whisper_best)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
 
@@ -245,19 +244,19 @@ class TestSelectWhisperModel(_GlobalsResetMixin):
     def test_englisch_waehlt_medium(self, monkeypatch, tmp_path):
         p = tmp_path / "a.lrc"
         p.write_text(LRC_A, encoding="utf-8")
-        monkeypatch.setattr(fetch_songtext, "_detect_lrc_language", lambda c: "en")
+        monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: "en")
         assert evaluate_lyrics._select_whisper_model([p]) == "medium"
 
     def test_deutsch_waehlt_large_v3(self, monkeypatch, tmp_path):
         p = tmp_path / "a.lrc"
         p.write_text(LRC_A, encoding="utf-8")
-        monkeypatch.setattr(fetch_songtext, "_detect_lrc_language", lambda c: "de")
+        monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: "de")
         assert evaluate_lyrics._select_whisper_model([p]) == "large-v3"
 
     def test_unbekannte_sprache_waehlt_large_v3(self, monkeypatch, tmp_path):
         p = tmp_path / "a.lrc"
         p.write_text(LRC_A, encoding="utf-8")
-        monkeypatch.setattr(fetch_songtext, "_detect_lrc_language", lambda c: None)
+        monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: None)
         assert evaluate_lyrics._select_whisper_model([p]) == "large-v3"
 
 
@@ -270,15 +269,15 @@ class TestWhisperModelOverrideRestored(_GlobalsResetMixin):
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
 
-        original = fetch_songtext._WHISPER_MODEL
-        monkeypatch.setattr(fetch_songtext, "_detect_lrc_language", lambda c: "de")
+        original = lyrics_core._WHISPER_MODEL
+        monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: "de")
         seen_models = []
 
         def _raising_whisper_best(flac, candidates, expected_dur, artist="", title=""):
-            seen_models.append(fetch_songtext._WHISPER_MODEL)
+            seen_models.append(lyrics_core._WHISPER_MODEL)
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(fetch_songtext, "_whisper_best", _raising_whisper_best)
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _raising_whisper_best)
 
         try:
             evaluate_lyrics.evaluate_song(conn, "artist", "title", flac_path=flac_path)
@@ -286,15 +285,15 @@ class TestWhisperModelOverrideRestored(_GlobalsResetMixin):
             pass
 
         assert seen_models == ["large-v3"]
-        assert fetch_songtext._WHISPER_MODEL == original
+        assert lyrics_core._WHISPER_MODEL == original
 
 
 class TestEvaluateAll(_GlobalsResetMixin):
     def test_kein_whisper_verfuegbar_bricht_sauber_ab(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
-        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: None)
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: None)
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         result = evaluate_lyrics.evaluate_all(conn)
         assert result == {}
@@ -303,9 +302,9 @@ class TestEvaluateAll(_GlobalsResetMixin):
         conn = cs.open_cache(tmp_path / "cache.db")
         cs._get_or_create_song(conn, "in scope", "song a")
         cs._get_or_create_song(conn, "out of scope", "song b")
-        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         seen = []
 
@@ -331,15 +330,15 @@ class TestEvaluateAll(_GlobalsResetMixin):
         conn = cs.open_cache(tmp_path / "cache.db")
         for i in range(3):
             cs._get_or_create_song(conn, f"artist {i}", "song")
-        monkeypatch.setattr(fetch_songtext, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
         monkeypatch.setattr(
-            fetch_songtext, "_open_lrclib_dump_conn", lambda no_cache: None
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
         monkeypatch.setattr(evaluate_lyrics, "_IDF_REFRESH_INTERVAL", 2)
 
         refresh_calls = []
         monkeypatch.setattr(
-            fetch_songtext,
+            lyrics_core,
             "_build_contrastive_context",
             lambda: refresh_calls.append(1),
         )
@@ -364,12 +363,12 @@ class TestResolveExpectedDur(_GlobalsResetMixin):
         flac_path = tmp_path / "01 Song.flac"
         flac_path.write_bytes(b"")
         monkeypatch.setattr(
-            fetch_songtext,
+            lyrics_core,
             "_read_audio_tags",
             lambda p: ("Artist", "Song", ""),
         )
         monkeypatch.setattr(
-            fetch_songtext,
+            lyrics_core,
             "_load_release",
             lambda folder: ("Artist", {"Song": 123.4}),
         )
@@ -379,7 +378,7 @@ class TestResolveExpectedDur(_GlobalsResetMixin):
         flac_path = tmp_path / "01 Song.flac"
         flac_path.write_bytes(b"")
         monkeypatch.setattr(
-            fetch_songtext, "_read_audio_tags", lambda p: ("Artist", "Song", "")
+            lyrics_core, "_read_audio_tags", lambda p: ("Artist", "Song", "")
         )
-        monkeypatch.setattr(fetch_songtext, "_load_release", lambda folder: ("", {}))
+        monkeypatch.setattr(lyrics_core, "_load_release", lambda folder: ("", {}))
         assert evaluate_lyrics._resolve_expected_dur(flac_path) == 0.0

@@ -539,7 +539,7 @@ class TestLookupLrclibDump:
 
     def test_case_sensitive_lookup_erwartet_bereits_normalisierte_keys(self, tmp_path):
         """lookup_lrclib_dump macht selbst KEINE Groß-/Kleinschreibungs-
-        Normalisierung -- der Aufrufer (fetch_songtext._query_provider)
+        Normalisierung -- der Aufrufer (lyrics_core._query_provider)
         übergibt bereits über cache_store.normalize_key normalisierte
         Schlüssel. Die Satzzeichen-Bereinigung (siehe Tests unten) passiert
         zusätzlich intern, ändert daran nichts."""

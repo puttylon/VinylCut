@@ -1,4 +1,5 @@
-"""SQLite-Speicherschicht für den fetch_songtext-Cache.
+"""SQLite-Speicherschicht für den Songtexte-Cache (fetch_songtext_cache.db --
+Dateiname bewusst unverändert, siehe open_cache()).
 
 Der Cache ist nur ein Beschleuniger, kein Fundament (siehe CACHE_DESIGN.md):
 fehlt die Datenbank oder ist sie leer, liefern alle get_*-Funktionen None und
@@ -21,7 +22,7 @@ damit der Aufrufer beim nächsten Lauf erneut live fragt.
 lookup_lrclib_dump() ist ein Sonderfall: liest NICHT die eigene Cache-DB,
 sondern einen externen, read-only geöffneten LRCLib-Datenbank-Abzug (eigenes
 Schema, siehe Docstring dort) — als Beschleuniger VOR einer echten Live-
-Abfrage bei lrclib (siehe fetch_songtext._query_provider).
+Abfrage bei lrclib (siehe lyrics_core._query_provider).
 """
 
 from __future__ import annotations
@@ -78,15 +79,16 @@ CREATE TABLE IF NOT EXISTS ergebnisse (
 def open_cache(db_path: Path) -> sqlite3.Connection:
     """Öffnet (und legt bei Bedarf an) die Cache-Datenbank unter db_path.
 
-    Setzt WAL-Modus und einen busy_timeout, damit parallele --fast-Läufe
+    Setzt WAL-Modus und einen busy_timeout, damit parallele Läufe
     gleichzeitig schreiben können, ohne sich gegenseitig zu blockieren.
 
-    check_same_thread=False: die Provider-Abfragen laufen in fetch_songtext.py
-    über einen ThreadPoolExecutor in Worker-Threads, während die Verbindung im
-    Hauptthread geöffnet wird. fetch_songtext._cache_lock serialisiert alle
-    Zugriffe bereits vollständig — ohne dieses Flag lehnt sqlite3 jeden Zugriff
-    aus einem anderen Thread mit "SQLite objects created in a thread can only
-    be used in that same thread" ab.
+    check_same_thread=False: die Provider-Abfragen laufen (z.B. in
+    fetch_providers.fetch_all) über einen ThreadPoolExecutor in Worker-
+    Threads, während die Verbindung im Hauptthread geöffnet wird.
+    lyrics_core._cache_lock serialisiert alle Zugriffe bereits vollständig —
+    ohne dieses Flag lehnt sqlite3 jeden Zugriff aus einem anderen Thread mit
+    "SQLite objects created in a thread can only be used in that same
+    thread" ab.
     """
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -118,7 +120,7 @@ def _migrate_transkripte_v1_to_v2(conn: sqlite3.Connection) -> None:
     if "datei_kennung" not in cols:
         return  # schon im neuen Format oder frische DB — nichts zu tun
 
-    import fetch_songtext  # lazy: fetch_songtext importiert seinerseits cache_store
+    import lyrics_core  # lazy: lyrics_core importiert seinerseits cache_store
 
     old_rows = conn.execute(
         "SELECT datei_kennung, modell, transkript, no_speech_prob, avg_logprob, datum "
@@ -156,13 +158,13 @@ def _migrate_transkripte_v1_to_v2(conn: sqlite3.Connection) -> None:
             failed.append((path_str, "Datei fehlt"))
             continue
         try:
-            artist, title, _genre = fetch_songtext._read_audio_tags(path)
+            artist, title, _genre = lyrics_core._read_audio_tags(path)
         except Exception:
             artist, title = "", ""
         if not artist and not title:
             failed.append((path_str, "keine Tags lesbar"))
             continue
-        clean_title = fetch_songtext._clean_query_title(title)
+        clean_title = lyrics_core._clean_query_title(title)
         artist_key = normalize_key(artist)
         titel_key = normalize_key(clean_title)
         migrated.append(
@@ -396,7 +398,7 @@ def lookup_lrclib_dump(
     conn: sqlite3.Connection, artist_key: str, title_key: str
 ) -> dict | None:
     """Sucht (artist_key, title_key) im lokalen LRCLib-Datenbank-Abzug (Original-
-    LRCLib-Schema, Tabellen `tracks`/`lyrics` — siehe fetch_songtext._query_provider).
+    LRCLib-Schema, Tabellen `tracks`/`lyrics` — siehe lyrics_core._query_provider).
 
     Exakter Abgleich auf `tracks.artist_name_lower`/`tracks.name_lower` — KEINE
     Dauer, KEINE Fuzzy-Ähnlichkeit: die echte lrclib-Live-Suche matcht laut

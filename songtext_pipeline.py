@@ -153,7 +153,8 @@ def evaluate_lyrics_normal(
     print(
         f"bewerten: {counts['konsens']} Konsens, "
         f"{counts['whisper-akzeptiert']} Whisper akzeptiert, "
-        f"{counts['abgelehnt']} abgelehnt, {counts['kein-provider']} ohne Provider."
+        f"{counts['abgelehnt']} abgelehnt, {counts['kein-provider']} ohne Provider, "
+        f"{counts['uebersprungen']} übersprungen (unverändert)."
     )
 
 

@@ -150,7 +150,7 @@ Steuer-Skript für die Songtexte-Pipeline (Architektur siehe `workflow für song
 | `--scan` | Audio-Tags lesen, Song-Identität (Artist/Titel) in der Cache-DB anlegen. Braucht PFAD. | `scan_songs.py` |
 | `--abfragen` | Alle vier Anbieter (`lrclib`, `musixmatch`, `netease`, `genius`) gleichzeitig abfragen, Ergebnis in die Cache-DB schreiben — überspringt dabei Songs mit Skip-Genre (Hörbuch/Hörspiel/Instrumental/…) | `fetch_providers.py` (`fetch_all`) |
 | `--nachholen` | Nachhol-Modus: fragt gezielt nur (Song, Anbieter)-Kombinationen mit `status IN ('nichts', 'fehlschlag')` erneut ab — z. B. nachdem ein Anbieter fälschlich als gesperrt galt, obwohl er längst wieder funktioniert. Läuft NIE von allein mit (auch nicht im Normal-Durchlauf ohne jedes Flag) — impliziert dann `--bewerten` + `--schreiben` mit. | `fetch_providers.py` (`retry_missing`) |
-| `--bewerten` | Entscheidet je Song: Provider-Konsens, sonst Whisper-Verifikation, sonst Dauer-Heuristik (siehe „Wie der Algorithmus funktioniert" unten) | `evaluate_lyrics.py` |
+| `--bewerten` | Entscheidet je Song: Provider-Konsens, sonst Whisper-Verifikation, sonst Dauer-Heuristik (siehe „Wie der Algorithmus funktioniert" unten). Mit PFAD wird ein Track übersprungen, wenn sein JSON-Ordner-Cache-Eintrag noch gültig ist UND die Cache-DB seitdem nichts Neueres hat (derselbe Vergleich wie bei `--schreiben`) — ein Wiederholungslauf über einen unveränderten Ordner bewertet dann nichts neu. | `evaluate_lyrics.py` |
 | `--schreiben` | `.lrc` schreiben/löschen je nach Bewertung, JSON-Ordner-Cache pflegen. Braucht PFAD. | `write_lrc.py` |
 
 Mit PFAD grenzt jedes Flag (außer `--scan`/`--schreiben`, die ohnehin PFAD brauchen) auf die Songs unter PFAD ein; ohne PFAD arbeitet es über die GANZE Bibliothek (explizite „alles nachziehen"-Absicht). Das gilt auch für `--nachholen` — gezielt nur die fehlenden Anbieter EINES Albums nachholen ist damit möglich, ohne die ganze Bibliothek anzufassen.
@@ -281,7 +281,7 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Schritt 
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | z.B. `"1.13.7"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
+| `v` | z.B. `"1.13.8"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
 | `r` | `"ok"` / `"nf"` | Ergebnis: LRC vorhanden / nicht gefunden |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
@@ -298,13 +298,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.13.7", "r": "ok", "outcome": "write",
+  "v": "1.13.8", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
   "method": "whisper-large-v3", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.13.7", "r": "nf", "outcome": "delete",
+  "v": "1.13.8", "r": "nf", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "kein-provider", "words": null, "language": null, "ts": "2026-07-09T09:28:25"

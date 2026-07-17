@@ -27,10 +27,12 @@ Nachtrag "Kein Bindeglied zwischen JSON-Cache und SQLite-Cache", live
 bestätigt an einem Produktions-Lauf): lyrics_core._cache_entry_valid() prüft
 nur die Skript-Version, kein TTL -- ein einmal geschriebener JSON-Eintrag
 gilt sonst FÜR IMMER als aktuell, auch wenn Phase "bewerten"/"nachholen"
-seitdem etwas Neues in der DB gefunden haben. _db_newer_than_json_entry()
-vergleicht deshalb vor jedem Skip den JSON-Eintrags-Zeitstempel mit dem
-jüngsten DB-Zeitstempel für diesen Song (cache_store.latest_result_timestamp)
--- ist die DB neuer, wird trotz gültigem JSON-Eintrag neu bewertet.
+seitdem etwas Neues in der DB gefunden haben. lyrics_core.
+_db_newer_than_json_entry() (gemeinsam mit evaluate_lyrics.py genutzt, siehe
+dortiger Skip) vergleicht deshalb vor jedem Skip den JSON-Eintrags-
+Zeitstempel mit dem jüngsten DB-Zeitstempel für diesen Song
+(cache_store.latest_result_timestamp) -- ist die DB neuer, wird trotz
+gültigem JSON-Eintrag neu bewertet.
 """
 
 from __future__ import annotations
@@ -40,40 +42,9 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
-import cache_store
 import evaluate_lyrics
 import fetch_providers
 import lyrics_core
-
-
-def _db_newer_than_json_entry(
-    conn: sqlite3.Connection, artist_key: str, titel_key: str, entry_ts: str | None
-) -> bool:
-    """True wenn die Cache-DB einen jüngeren Provider- oder Whisper-Datensatz
-    für diesen Song hat als entry_ts (der "ts"-Wert des JSON-Ordner-Cache-
-    Eintrags, lokale Zeit ohne Zeitzone -- siehe write_all weiter unten).
-
-    entry_ts fehlt oder ist nicht parsbar -> konservativ True (nicht
-    überspringen, lieber einmal zu oft neu bewerten als für immer eine
-    veraltete Entscheidung stehen lassen). Kein DB-Datensatz für diesen Song
-    -> False (nichts Neues, der bisherige Skip bleibt gültig).
-    """
-    if not entry_ts:
-        return True
-    try:
-        entry_dt = datetime.fromisoformat(entry_ts).astimezone()
-    except ValueError:
-        return True
-
-    db_ts = cache_store.latest_result_timestamp(conn, artist_key, titel_key)
-    if db_ts is None:
-        return False
-    try:
-        db_dt = datetime.fromisoformat(db_ts)
-    except ValueError:
-        return True
-
-    return db_dt > entry_dt
 
 
 def write_all(
@@ -126,7 +97,7 @@ def write_all(
                 entry
                 and lyrics_core._cache_entry_valid(entry)
                 and (entry.get("r") != "ok" or lrc_path.exists())
-                and not _db_newer_than_json_entry(
+                and not lyrics_core._db_newer_than_json_entry(
                     conn, artist_key, titel_key, entry.get("ts")
                 )
             ):

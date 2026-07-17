@@ -15,10 +15,16 @@ sie gibt (gefunden, info_str, extras) zurueck, extras["content"] enthaelt bei
 gefunden=True den rohen Songtext.
 
 Whisper-Modell und der kontrastive Hintergrund-Kontext (siehe
-lyrics_core._build_contrastive_context) werden EINMAL pro Lauf geladen,
-nicht pro Song -- IDF wird alle _IDF_REFRESH_INTERVAL Songs aufgefrischt,
-damit neu hinzugekommene Texte/Transkripte einfliessen (siehe Design-
-Dokument, Abschnitt 3, Antwort A3).
+lyrics_core._build_contrastive_context) werden HOECHSTENS EINMAL pro Lauf
+geladen, nicht pro Song -- IDF wird alle _IDF_REFRESH_INTERVAL TATSAECHLICH
+bewerteter Songs aufgefrischt, damit neu hinzugekommene Texte/Transkripte
+einfliessen (siehe Design-Dokument, Abschnitt 3, Antwort A3). "Hoechstens"
+bewusst: mit zugeordneter Audiodatei prueft evaluate_all() vorher
+_skip_reevaluation() (JSON-Ordner-Cache-Eintrag noch gueltig UND DB seitdem
+nicht neuer, siehe dortiger Docstring) -- wird JEDER Song im Scope
+uebersprungen, wird der Kontext gar nicht erst gebaut. Ohne PFAD (keine
+Datei-Zuordnung) ist dieser Skip nicht moeglich, jeder Song wird wie bisher
+neu bewertet.
 
 Modellwahl nach Sprache (siehe ROADMAP.md, "Nachtrag: large-v3 ergänzt +
 Entscheidung für den Produktivbetrieb" -- dort als "noch offen" markiert,
@@ -313,6 +319,41 @@ def _resolve_expected_dur(flac_path: Path) -> float:
     return tracks_by_title.get(unicodedata.normalize("NFC", title), 0.0)
 
 
+def _skip_reevaluation(
+    conn: sqlite3.Connection, audio_path: Path, artist_key: str, titel_key: str
+) -> bool:
+    """True wenn dieser Track NICHT neu bewertet werden muss -- spiegelt
+    genau den Skip in write_lrc.write_all() (siehe ROADMAP.md, Songtexte-
+    Pipeline-Umbau, "'bewerten' hat keinen Skip für unveränderte Songs"):
+    ein gültiger JSON-Ordner-Cache-Eintrag existiert UND die Cache-DB hat
+    seitdem nichts Neueres für diesen Song (lyrics_core.
+    _db_newer_than_json_entry).
+
+    Rein lesend -- KEINE Ordner-Sperre wie in write_lrc.write_all (das dort
+    zusätzlich schreibt). Ein Race mit einem gleichzeitig laufenden
+    --schreiben ist unkritisch: hier wird nichts geschrieben, nur eine
+    Lese-Entscheidung getroffen -- im schlimmsten Fall wird einmal zu viel
+    statt zu wenig bewertet.
+
+    Braucht audio_path, um dieselbe JSON-Datei wie write_lrc.write_all zu
+    finden (.fetch_songtext.json im selben Ordner) -- ohne zugeordnete Datei
+    (kein PFAD-Lauf) kann diese Prüfung nicht stattfinden, siehe Aufrufer.
+    """
+    dir_cache = lyrics_core._load_cache(audio_path.parent)
+    cache_key = unicodedata.normalize("NFC", audio_path.name)
+    entry = dir_cache.get(cache_key)
+    if not entry:
+        return False
+    if not lyrics_core._cache_entry_valid(entry):
+        return False
+    lrc_path = audio_path.with_suffix(".lrc")
+    if entry.get("r") == "ok" and not lrc_path.exists():
+        return False
+    return not lyrics_core._db_newer_than_json_entry(
+        conn, artist_key, titel_key, entry.get("ts")
+    )
+
+
 def evaluate_all(
     conn: sqlite3.Connection,
     scope: set[tuple[str, str]] | None = None,
@@ -345,7 +386,6 @@ def evaluate_all(
         return {}
 
     fetch_providers._prepare_lyrics_core_globals(conn)
-    lyrics_core._build_contrastive_context()
 
     file_song_map = file_song_map or {}
     rows = conn.execute(
@@ -361,15 +401,41 @@ def evaluate_all(
         "whisper-akzeptiert": 0,
         "abgelehnt": 0,
         "kein-provider": 0,
+        "uebersprungen": 0,
     }
 
+    # Kontrastiver Kontext (siehe lyrics_core._build_contrastive_context) UND
+    # der IDF-Refresh alle _IDF_REFRESH_INTERVAL Songs laufen bewusst NICHT
+    # mehr vor der Schleife/nach Zeilen-Index, sondern lazy anhand
+    # tatsaechlich bewerteter Songs (evaluated_count) -- ein Lauf, in dem
+    # JEDER Song wegen _skip_reevaluation uebersprungen wird, baut den
+    # Kontext dann gar nicht erst auf (realer Befund: ein reiner
+    # Wiederholungslauf ueber einen unveraenderten Pfad baute den Kontext
+    # trotzdem jedes Mal, siehe ROADMAP.md).
+    context_built = False
+    evaluated_count = 0
+
     for i, (artist_key, titel_key) in enumerate(to_evaluate, start=1):
-        if i > 1 and (i - 1) % _IDF_REFRESH_INTERVAL == 0:
+        flac_path = file_song_map.get((artist_key, titel_key))
+
+        # Skip nur moeglich MIT zugeordneter Audiodatei (JSON-Ordner-Cache
+        # ist datei-basiert) -- ohne PFAD (file_song_map leer) wird wie
+        # bisher jeder Song neu bewertet.
+        if flac_path is not None and _skip_reevaluation(
+            conn, flac_path, artist_key, titel_key
+        ):
+            counts["uebersprungen"] += 1
+            continue
+
+        if not context_built:
             lyrics_core._build_contrastive_context()
+            context_built = True
+        elif evaluated_count > 0 and evaluated_count % _IDF_REFRESH_INTERVAL == 0:
+            lyrics_core._build_contrastive_context()
+        evaluated_count += 1
 
         lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
 
-        flac_path = file_song_map.get((artist_key, titel_key))
         existing_lrc = flac_path.with_suffix(".lrc") if flac_path is not None else None
         expected_dur = (
             _resolve_expected_dur(flac_path) if flac_path is not None else 0.0

@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.7"
+__version__ = "1.13.8"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1497,6 +1497,44 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
 
 def _cache_entry_valid(entry: dict) -> bool:
     return _parse_version(entry.get("v", "0")) >= _parse_version(_CACHE_MIN_VERSION)
+
+
+def _db_newer_than_json_entry(
+    conn: sqlite3.Connection, artist_key: str, titel_key: str, entry_ts: str | None
+) -> bool:
+    """True wenn die Cache-DB einen jüngeren Provider- oder Whisper-Datensatz
+    für diesen Song hat als entry_ts (der "ts"-Wert eines JSON-Ordner-Cache-
+    Eintrags, lokale Zeit ohne Zeitzone -- siehe write_lrc.write_all).
+
+    Gemeinsam genutzt von write_lrc.py (Skip beim Schreiben) und
+    evaluate_lyrics.py (Skip beim Bewerten, siehe ROADMAP.md, Songtexte-
+    Pipeline-Umbau, "'bewerten' hat keinen Skip für unveränderte Songs") --
+    beide vergleichen denselben JSON-Zeitstempel gegen denselben DB-Stand,
+    um zu entscheiden, ob ein gültiger JSON-Eintrag noch aktuell ist.
+
+    entry_ts fehlt oder ist nicht parsbar -> konservativ True (nicht
+    überspringen, lieber einmal zu oft neu bewerten als für immer eine
+    veraltete Entscheidung stehen lassen). Kein DB-Datensatz für diesen Song
+    -> False (nichts Neues, der bisherige Skip bleibt gültig).
+    """
+    if not entry_ts:
+        return True
+    try:
+        entry_dt = datetime.fromisoformat(entry_ts).astimezone()
+    except ValueError:
+        return True
+
+    if cache_store is None:
+        return True
+    db_ts = cache_store.latest_result_timestamp(conn, artist_key, titel_key)
+    if db_ts is None:
+        return False
+    try:
+        db_dt = datetime.fromisoformat(db_ts)
+    except ValueError:
+        return True
+
+    return db_dt > entry_dt
 
 
 def _clear_status() -> None:

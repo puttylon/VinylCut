@@ -17,6 +17,7 @@ from __future__ import annotations
 import cache_store as cs
 import evaluate_lyrics
 import lyrics_core
+import write_lrc
 
 LRC_A = "[00:10.00]Girl you know it's true I love you\n[00:15.00]I'm in love with you girl\n"
 LRC_B = "[00:10.00]Girl you know it's true yes I love you\n[00:15.00]I'm in love girl cause you're on my mind\n"
@@ -321,6 +322,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
             "whisper-akzeptiert": 0,
             "abgelehnt": 0,
             "kein-provider": 0,
+            "uebersprungen": 0,
         }
 
     def test_scope_grenzt_auf_angegebene_songs_ein(self, tmp_path, monkeypatch):
@@ -381,6 +383,123 @@ class TestEvaluateAll(_GlobalsResetMixin):
 
         # 1x initial + 1x nach Song 2 (Refresh-Intervall=2) = 2 Aufrufe fuer 3 Songs
         assert len(refresh_calls) == 2
+
+
+class TestEvaluateAllSkipUnveraendert(_GlobalsResetMixin):
+    """Regressionstests für ROADMAP.md, Songtexte-Pipeline-Umbau, "'bewerten'
+    hat keinen Skip für unveränderte Songs": evaluate_all() bewertete bisher
+    JEDEN Song im Scope bei JEDEM Lauf neu, auch wenn write_lrc.write_all()
+    (--schreiben) für denselben Track schon einen gültigen, unveränderten
+    JSON-Cache-Eintrag hatte -- reale Whisper-/Kontext-Arbeit verpuffte
+    ungenutzt bei jedem Wiederholungslauf. evaluate_all() nutzt jetzt
+    denselben Skip wie write_lrc.write_all() (_skip_reevaluation, teilt sich
+    lyrics_core._db_newer_than_json_entry mit write_lrc.py)."""
+
+    def test_track_mit_gueltigem_json_cache_wird_uebersprungen(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist", "title")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        audio = tmp_path / "01 Song.flac"
+        audio.write_bytes(b"")
+
+        calls = []
+
+        def _tracking_evaluate_song(conn, artist_key, titel_key, *a, **kw):
+            calls.append((artist_key, titel_key))
+            return (
+                True,
+                "3/4: … │ Konsens 90%",
+                {"method": "konsens", "content": b"[00:01.00]Text\n"},
+            )
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _tracking_evaluate_song)
+
+        # Ein --schreiben-Lauf legt den echten JSON-Cache-Eintrag an -- so
+        # wie er nach einem normalen Durchlauf tatsächlich aussieht.
+        write_lrc.write_all(conn, [(audio, "artist", "title")])
+        assert len(calls) == 1
+        calls.clear()
+
+        counts = evaluate_lyrics.evaluate_all(
+            conn, file_song_map={("artist", "title"): audio}
+        )
+
+        assert calls == []  # nicht erneut bewertet
+        assert counts["uebersprungen"] == 1
+        assert counts["konsens"] == 0
+
+    def test_track_mit_neuerem_db_eintrag_wird_trotzdem_bewertet(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist", "title")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        audio = tmp_path / "01 Song.flac"
+        audio.write_bytes(b"")
+
+        calls = []
+
+        def _tracking_evaluate_song(conn, artist_key, titel_key, *a, **kw):
+            calls.append((artist_key, titel_key))
+            return (
+                True,
+                "3/4: … │ Konsens 90%",
+                {"method": "konsens", "content": b"[00:01.00]Text\n"},
+            )
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _tracking_evaluate_song)
+
+        write_lrc.write_all(conn, [(audio, "artist", "title")])
+        assert len(calls) == 1
+        calls.clear()
+
+        # simuliert: --nachholen hat inzwischen einen neuen Provider-Treffer
+        # gefunden -- ein neuer ergebnisse-Datensatz NACH dem JSON-Eintrag.
+        cs.put_provider(conn, "genius", "artist", "title", "treffer", "[00:01.00]y")
+        conn.commit()
+
+        counts = evaluate_lyrics.evaluate_all(
+            conn, file_song_map={("artist", "title"): audio}
+        )
+
+        assert calls == [("artist", "title")]  # erneut bewertet, nicht übersprungen
+        assert counts["uebersprungen"] == 0
+        assert counts["konsens"] == 1
+
+    def test_ohne_datei_zuordnung_wird_immer_bewertet(self, tmp_path, monkeypatch):
+        """Ohne file_song_map-Eintrag (z.B. --bewerten ohne PFAD, ganze
+        Bibliothek) gibt es keinen JSON-Ordner-Cache zu prüfen -- der Song
+        wird wie bisher immer neu bewertet."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist", "title")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        calls = []
+
+        def _tracking_evaluate_song(conn, artist_key, titel_key, *a, **kw):
+            calls.append((artist_key, titel_key))
+            return (
+                False,
+                "0/4: — │ kein Provider",
+                {"reason": "kein-provider", "content": None},
+            )
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _tracking_evaluate_song)
+
+        counts = evaluate_lyrics.evaluate_all(conn)
+        counts2 = evaluate_lyrics.evaluate_all(conn)
+
+        assert calls == [("artist", "title"), ("artist", "title")]
+        assert counts["uebersprungen"] == 0
+        assert counts2["uebersprungen"] == 0
 
 
 class TestResolveExpectedDur(_GlobalsResetMixin):

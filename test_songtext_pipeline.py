@@ -44,7 +44,7 @@ def test_main_ohne_flags_aktiviert_scan_abfragen_bewerten_schreiben(
         assert "abfragen: 0 Song(s) abgefragt." in out
         assert "nachholen:" not in out
         assert (
-            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider."
+            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider, 0 übersprungen (unverändert)."
             in out
         )
         assert "schreiben: 0 geschrieben, 0 übersprungen, 0 nicht gefunden." in out
@@ -72,7 +72,7 @@ def test_main_nachholen_impliziert_bewerten_und_schreiben(
         assert "scan:" not in out
         assert "abfragen:" not in out
         assert (
-            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider."
+            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider, 0 übersprungen (unverändert)."
             in out
         )
         assert "schreiben: kein PFAD angegeben, nichts zu schreiben." in out
@@ -103,7 +103,7 @@ def test_main_einzelne_flags_nur_diese_schritte(tmp_path, monkeypatch, capsys):
         assert "abfragen: 0 Song(s) abgefragt." in out
         assert "nachholen:" not in out
         assert (
-            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider."
+            "bewerten: 0 Konsens, 0 Whisper akzeptiert, 0 abgelehnt, 0 ohne Provider, 0 übersprungen (unverändert)."
             in out
         )
         assert "schreiben: 0 geschrieben, 0 übersprungen, 0 nicht gefunden." in out

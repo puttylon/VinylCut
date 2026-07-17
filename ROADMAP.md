@@ -650,6 +650,51 @@ Test `test_kein_whisper_verfuegbar_bricht_sauber_ab` auf
 check`/`ruff format` sauber. `lyrics_core.__version__` auf `1.13.7` erhöht
 (Bugfix, siehe CLAUDE.md-Versionierungsregel).
 
+**✓ Nachtrag — "bewerten" bekommt einen echten Skip für unveränderte Songs
+(Punkt aus der Diskussion zum vorherigen Nachtrag, jetzt umgesetzt).**
+`evaluate_lyrics.evaluate_all()` bewertete bislang JEDEN Song im Scope bei
+JEDEM Lauf neu -- anders als `write_lrc.write_all()` (`--schreiben`) kannte
+`bewerten` keinerlei "hat sich seitdem etwas geändert"-Skip. Live am
+Beispiel "Betterov - Olympia" nachvollzogen: ein reiner Wiederholungslauf
+über denselben, unveränderten Ordner bewertete trotzdem alle 13 Songs neu
+(inkl. Whisper-Vergleich für 3 Songs ohne Provider-Konsens) und baute jedes
+Mal den kontrastiven Hintergrund-Kontext neu, obwohl `schreiben` hinterher
+korrekt "0 geschrieben, 13 übersprungen" meldete -- die eigentliche Arbeit
+in `bewerten` war also für die Katz.
+
+**Fix:** `evaluate_all()` bekommt denselben Skip wie `write_lrc.write_all()`
+-- dieselbe Frage ("hat die DB seit dem JSON-Cache-Eintrag etwas Neueres?"),
+dieselbe Antwort. Dafür wurde `_db_newer_than_json_entry()` aus `write_lrc.py`
+nach `lyrics_core.py` verschoben (jetzt von beiden Modulen gemeinsam
+genutzt, statt dupliziert) und eine neue, rein lesende
+`evaluate_lyrics._skip_reevaluation(conn, audio_path, artist_key,
+titel_key)` ergänzt, die denselben Vergleich anstellt wie `write_lrc.py`s
+Skip -- OHNE die Ordner-Sperre von `write_lrc.write_all` (reine
+Lese-Entscheidung, kein Schreibvorgang, ein Race mit einem gleichzeitigen
+`--schreiben` ist unkritisch). Der Skip ist nur mit zugeordneter Audiodatei
+möglich (JSON-Ordner-Cache ist datei-basiert) -- ohne PFAD (ganze Bibliothek,
+kein `file_song_map`) bewertet `bewerten` weiterhin jeden Song wie bisher.
+
+Zusätzlich wurde das Bauen des kontrastiven Hintergrund-Kontexts
+(`lyrics_core._build_contrastive_context`) von "immer vor der Schleife" auf
+"lazy, beim ersten tatsächlich bewerteten Song" umgestellt (inkl. des
+IDF-Refresh-Intervalls, jetzt an `evaluated_count` statt am rohen
+Schleifenindex gezählt) -- werden ALLE Songs im Scope übersprungen, wird der
+Kontext gar nicht erst aufgebaut. Neue Zählgröße `counts["uebersprungen"]`,
+in `songtext_pipeline.py`s `bewerten:`-Ausgabe mit aufgenommen.
+
+3 neue Tests in `test_evaluate_lyrics.py`
+(`TestEvaluateAllSkipUnveraendert`): ein Track mit gültigem JSON-Cache-
+Eintrag (über einen echten `write_lrc.write_all()`-Lauf erzeugt, nicht
+handgebaut) wird beim nächsten `evaluate_all()` nicht erneut bewertet; ein
+neuer DB-Eintrag seit dem JSON-Zeitstempel erzwingt trotzdem eine
+Neubewertung; ein Song ohne Datei-Zuordnung wird weiterhin immer bewertet.
+Bestehender `test_idf_wird_alle_n_songs_aufgefrischt` unverändert grün
+(keine Datei-Zuordnung im Test, daher nie ein Skip -- reines Verhalten wie
+vorher). Volle Suite: 461/461 grün. `ruff check`/`ruff format` sauber.
+`lyrics_core.__version__` auf `1.13.8` erhöht (Bugfix, siehe
+CLAUDE.md-Versionierungsregel).
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

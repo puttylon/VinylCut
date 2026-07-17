@@ -885,6 +885,57 @@ Suite: 473/473 grün. `ruff format` auf die eigenen neuen Zeilen angewendet
 `_open_lrclib_dump_conn`/`_heuristic_best`-Aufrufen). `lyrics_core.
 __version__` auf `1.13.12` erhöht.
 
+**✓ Nachtrag — Phasen laufen jetzt Datei für Datei statt Ordner für
+Ordner.** Nutzer, direkt im Anschluss an die obige Reihenfolgen-Frage zu
+Tequila (fehlender JSON-Eintrag, weil `bewerten` einen ganzen Ordner
+komplett durchläuft, bevor `schreiben` überhaupt anfängt): "dann will ich,
+dass die phasen für jeden einzelne datei laufen. dadurch haben die provider
+auch wieder länger leerlauf und wir fallen nicht in rate-limit." Ordner-für-
+Ordner (Task #15) reduzierte das Problem schon einmal (globaler Lauf über
+den ganzen Baum → Ordner-Batches), löst es aber nicht: innerhalb eines
+Ordners liefen weiterhin ALLE Songs gebündelt durch `--abfragen`, bevor
+`--bewerten` (mit ggf. mehrminütiger Whisper-Transkription pro Song) auch
+nur den ersten Song erreichte — die Anbieter-Abfragen blieben also weiterhin
+dicht hintereinander.
+
+**Umbau in `songtext_pipeline.py`:** `_run_selected_steps(step_root,
+step_files)` (siehe Task #15) brauchte keine Änderung — sie akzeptiert
+bereits jede beliebige `step_files`-Liste, ob Ordner-Batch oder Einzeldatei.
+Nur `main()`s äußere Schleife wurde geändert: statt `all_files` nach
+`path.parent` zu gruppieren und pro Ordner EINMAL `_run_selected_steps`
+aufzurufen, läuft jetzt eine flache Schleife über `all_files` (bereits in
+Datei-/Verzeichnisreihenfolge, siehe vorheriger Nachtrag), die
+`_run_selected_steps(audio_path.parent, [entry])` mit GENAU EINEM Element
+pro Aufruf ruft. Ein Ordnerwechsel (erkannt über `audio_path.parent !=
+current_folder`) druckt weiterhin eine `Ordner: <relativer Pfad>`-Zeile,
+zusätzlich zu `Datei i/N: <Dateiname>` vor jeder Datei.
+
+Kein Code in `fetch_providers.py`/`evaluate_lyrics.py`/`write_lrc.py`
+musste angefasst werden — alle drei akzeptierten schon vorher beliebig
+lange Listen (Task #15/Dateinamen-Reihenfolge-Nachtrag), ein-elementige
+Listen sind nur ein weiterer gültiger Fall. `write_lrc.write_all()` claimt/
+released den Ordner-Lock jetzt zwangsläufig bei JEDER Datei neu (Vergleich
+`audio_path.parent != current_parent` ist bei einer 1-Element-Liste immer
+wahr) statt einmal pro Ordner-Batch -- bewusst in Kauf genommen: der
+zusätzliche JSON-Lese-/Schreib-Overhead ist vernachlässigbar gegen eine
+Whisper-Transkription oder eine Netzwerk-Anfrage, und mehr Leerlauf
+zwischen den Anbieter-Abfragen ist hier ausdrücklich das Ziel, nicht ein
+Nebeneffekt.
+
+Bestehende Tests angepasst: `test_main_verarbeitet_mehrere_ordner_
+nacheinander_komplett` → `test_main_verarbeitet_dateien_ueber_
+ordnergrenzen_hinweg_einzeln` (Ausgabe-Format geändert: `Ordner: album1`
+statt `Ordner 1/2: album1 (1 Datei(en))`, `Datei 1/2: ...` statt implizit
+über den Ordner-Batch), `test_main_scan_abfragen_fragt_nur_pfad_songs_ab_
+nicht_die_ganze_db` (zwei Songs im selben Ordner: erwartete jetzt zweimal
+"scan: 1 Song(s)"/"abfragen: 1 Song(s)" statt einmal "scan: 2 Song(s)"/
+"abfragen: 2 Song(s)"). Neuer Test: `test_main_verarbeitet_dateien_im_
+selben_ordner_ebenfalls_einzeln` -- der eigentliche Regressionstest für
+diesen Umbau: zwei Songs IM SELBEN Ordner, prüft explizit zweimal "scan: 1
+Song(s)..." (NICHT einmal "scan: 2 Song(s)...") und genau EINE
+"Ordner: album"-Zeile trotz zwei Dateien. Volle Suite: 474/474 grün.
+`lyrics_core.__version__` auf `1.13.13` erhöht.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

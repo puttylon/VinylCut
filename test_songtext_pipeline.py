@@ -419,8 +419,11 @@ def test_main_scan_abfragen_fragt_nur_pfad_songs_ab_nicht_die_ganze_db(
         songtext_pipeline.main()
 
         out = capsys.readouterr().out
-        assert "scan: 2 Song(s) gescannt/aktualisiert." in out
-        assert "abfragen: 2 Song(s) abgefragt." in out
+        # Phasen laufen jetzt Datei fuer Datei (siehe ROADMAP.md) -- statt
+        # einem gebuendelten "scan: 2 Song(s)" zwei einzelne "scan: 1
+        # Song(s)"-Aufrufe.
+        assert out.count("scan: 1 Song(s) gescannt/aktualisiert.") == 2
+        assert out.count("abfragen: 1 Song(s) abgefragt.") == 2
 
         # 2 Album-Songs x 4 Provider -- NICHT der dritte, vorbestehende Song
         assert len(fake_run.calls) == 8
@@ -680,13 +683,15 @@ def test_main_liest_tags_nicht_mehr_pro_schritt_neu(tmp_path, monkeypatch, capsy
     assert calls == [audio, audio, audio]
 
 
-def test_main_verarbeitet_mehrere_ordner_nacheinander_komplett(
+def test_main_verarbeitet_dateien_ueber_ordnergrenzen_hinweg_einzeln(
     tmp_path, monkeypatch, capsys
 ):
-    """Task #15 (siehe ROADMAP.md): "Phasen pro Ordner mit Musik
-    durchlaufen" statt jeden Schritt global über den ganzen Baum. Zwei
-    Alben in getrennten Unterordnern -- jedes muss vollständig durchlaufen
-    werden (scan bis schreiben), inklusive der Ordner-Fortschrittsausgabe."""
+    """Phasen laufen jetzt Datei für Datei statt Ordner für Ordner (siehe
+    ROADMAP.md, Nutzer-Feedback: "ich will, dass die phasen für jeden
+    einzelne datei laufen [...] dadurch haben die provider auch wieder
+    länger leerlauf"). Zwei Alben in getrennten Unterordnern -- jede Datei
+    muss vollständig durchlaufen werden (scan bis schreiben), inklusive der
+    Ordner-Wechsel-Ausgabe."""
     db_path = tmp_path / "cache.db"
     monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
 
@@ -722,10 +727,12 @@ def test_main_verarbeitet_mehrere_ordner_nacheinander_komplett(
         _reset_lyrics_core_globals()
 
     out = capsys.readouterr().out
-    assert "2 Ordner mit Audiodateien gefunden." in out
-    assert "Ordner 1/2: album1 (1 Datei(en))" in out
-    assert "Ordner 2/2: album2 (1 Datei(en))" in out
-    # jeder Ordner durchläuft scan/abfragen/bewerten/schreiben EINZELN --
+    assert "2 Datei(en) gefunden." in out
+    assert "Ordner: album1" in out
+    assert "Ordner: album2" in out
+    assert "Datei 1/2: 01 - Song A.flac" in out
+    assert "Datei 2/2: 01 - Song B.flac" in out
+    # jede Datei durchläuft scan/abfragen/bewerten/schreiben EINZELN --
     # also zweimal "scan: 1 Song(s)...", nicht einmal "scan: 2 Song(s)...".
     assert out.count("scan: 1 Song(s) gescannt/aktualisiert.") == 2
     assert out.count("abfragen: 1 Song(s) abgefragt.") == 2
@@ -739,6 +746,54 @@ def test_main_verarbeitet_mehrere_ordner_nacheinander_komplett(
         (cs.normalize_key("Artist X"), cs.normalize_key("Song A")),
         (cs.normalize_key("Artist Y"), cs.normalize_key("Song B")),
     ]
+
+
+def test_main_verarbeitet_dateien_im_selben_ordner_ebenfalls_einzeln(
+    tmp_path, monkeypatch, capsys
+):
+    """Wie oben, aber INNERHALB eines einzigen Ordners: zwei Songs im selben
+    Album dürfen NICHT gemeinsam als ein scan/abfragen-Aufruf laufen (das
+    wäre noch die alte Ordner-für-Ordner-Bündelung aus Task #15) -- jede
+    Datei einzeln, ohne zweite Ordner-Wechsel-Zeile zwischen den beiden."""
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(songtext_pipeline, "_default_db_path", lambda: db_path)
+
+    album = tmp_path / "album"
+    album.mkdir()
+    audio1 = album / "01 - Song A.flac"
+    audio1.write_bytes(b"")
+    audio2 = album / "02 - Song B.flac"
+    audio2.write_bytes(b"")
+
+    tags_by_path = {
+        audio1: ("Artist X", "Song A", ""),
+        audio2: ("Artist X", "Song B", ""),
+    }
+    monkeypatch.setattr(
+        songtext_pipeline.lyrics_core,
+        "_read_audio_tags",
+        lambda path: tags_by_path[path],
+    )
+    monkeypatch.setattr(lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None)
+    fake_run = _fake_subprocess_run({})  # kein Provider liefert etwas
+    monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["songtext_pipeline.py", str(album), "--recursive"])
+
+    try:
+        songtext_pipeline.main()
+    finally:
+        _reset_lyrics_core_globals()
+
+    out = capsys.readouterr().out
+    assert "2 Datei(en) gefunden." in out
+    assert out.count("Ordner: album") == 1  # EIN Ordner-Wechsel, nicht pro Datei
+    assert "Datei 1/2: 01 - Song A.flac" in out
+    assert "Datei 2/2: 02 - Song B.flac" in out
+    # zwei getrennte scan/abfragen-Aufrufe je 1 Song, nicht ein gebündelter
+    # Aufruf mit 2 Songs -- das wäre noch die alte Ordner-Bündelung.
+    assert out.count("scan: 1 Song(s) gescannt/aktualisiert.") == 2
+    assert "scan: 2 Song(s)" not in out
+    assert out.count("abfragen: 1 Song(s) abgefragt.") == 2
 
 
 def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
@@ -761,7 +816,7 @@ def test_main_ohne_audiodateien_unter_pfad_laeuft_trotzdem_einmal_durch(
     songtext_pipeline.main()
 
     out = capsys.readouterr().out
-    assert "Ordner mit Audiodateien gefunden" not in out
+    assert "Datei(en) gefunden" not in out
     assert "scan: 0 Song(s) gescannt/aktualisiert." in out
 
 

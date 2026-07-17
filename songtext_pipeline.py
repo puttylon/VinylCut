@@ -299,11 +299,11 @@ def main() -> None:
         step_files: list[tuple[Path, str, str, str]] | None,
     ) -> None:
         """Führt die gewählten Schritte einmal aus -- entweder global (siehe
-        main() ohne PFAD, step_root=None) oder für GENAU EINEN Ordner (siehe
-        Ordner-für-Ordner-Schleife weiter unten). step_files: bereits
-        eingelesene (Pfad, Artist, Titel, Genre)-Tupel für step_root (siehe
-        scan_songs._read_tagged_files) -- erspart jedem Schritt den erneuten
-        Verzeichnis-Walk."""
+        main() ohne PFAD, step_root=None) oder für GENAU EINE Datei (siehe
+        Datei-für-Datei-Schleife weiter unten, step_files hat dann genau ein
+        Element). step_files: bereits eingelesene (Pfad, Artist, Titel,
+        Genre)-Tupel für step_root (siehe scan_songs._read_tagged_files) --
+        erspart jedem Schritt den erneuten Verzeichnis-Walk."""
         if run_scan:
             if step_root is None:
                 print("scan: kein PFAD angegeben, nichts zu scannen.")
@@ -348,40 +348,41 @@ def main() -> None:
             # (siehe scan_songs._read_tagged_files-Docstring -- bei einer
             # großen, ggf. netzwerk-gemounteten Bibliothek der eigentlich
             # teure Teil, nicht die anschließenden reinen DB-Abgleiche).
-            # Danach nach Ordner gruppiert (siehe Nutzer-Feedback: "Phasen
-            # pro Ordner mit Musik durchlaufen" statt jeden Schritt global
-            # über den ganzen Baum) -- jeder Ordner durchläuft alle
-            # gewählten Schritte, BEVOR der nächste beginnt: sichtbarer
-            # Fortschritt Ordner für Ordner statt eines langen, stillen
-            # Laufs, und bei einem Abbruch mitten im Lauf sind bereits
-            # fertige Ordner schon geschrieben (siehe ROADMAP.md).
+            # Danach DATEI FÜR DATEI durchlaufen, nicht mehr Ordner für
+            # Ordner (Nutzer-Feedback: "ich will, dass die phasen für jeden
+            # einzelne datei laufen. dadurch haben die provider auch wieder
+            # länger leerlauf und wir fallen nicht in rate-limit") -- jede
+            # Datei durchläuft alle gewählten Schritte (inkl. --bewerten mit
+            # ggf. mehrminütiger Live-Whisper-Transkription), BEVOR die
+            # nächste --abfragen überhaupt startet. Das schiebt von selbst
+            # genug Abstand zwischen zwei Anbieter-Abfragen, ganz ohne
+            # eigene Sleep-/Throttling-Logik (siehe ROADMAP.md). Reihenfolge
+            # weiterhin Datei-/Verzeichnisreihenfolge (siehe vorheriger
+            # Nachtrag "Dateinamen-Reihenfolge") -- `all_files` liefert das
+            # bereits (_iter_audio_dfs: pro Ebene alphabetisch).
             all_files = scan_songs._read_tagged_files(root, args.recursive)
-            folders: dict[Path, list[tuple[Path, str, str, str]]] = {}
-            for entry in all_files:
-                folders.setdefault(entry[0].parent, []).append(entry)
-
-            total_folders = len(folders)
-            if not folders:
-                # Kein Ordner mit Audiodateien unter PFAD gefunden --
-                # trotzdem EINMAL mit leerer Datei-Liste ausführen, damit
-                # z.B. --nachholen/--abfragen ihre gewohnte "nichts
-                # gefunden/nichts zu tun"-Rückmeldung geben, statt komplett
-                # stillzubleiben.
+            if not all_files:
+                # Keine Audiodatei unter PFAD gefunden -- trotzdem EINMAL
+                # mit leerer Datei-Liste ausführen, damit z.B. --nachholen/
+                # --abfragen ihre gewohnte "nichts gefunden/nichts zu
+                # tun"-Rückmeldung geben, statt komplett stillzubleiben.
                 _run_selected_steps(root, [])
             else:
-                print(f"{total_folders} Ordner mit Audiodateien gefunden.")
-                for i, folder in enumerate(sorted(folders), start=1):
-                    folder_files = folders[folder]
-                    try:
-                        rel = folder.relative_to(root)
-                        label = str(rel) if str(rel) != "." else folder.name
-                    except ValueError:
-                        label = str(folder)
-                    print(
-                        f"\nOrdner {i}/{total_folders}: {label} "
-                        f"({len(folder_files)} Datei(en))"
-                    )
-                    _run_selected_steps(folder, folder_files)
+                total_files = len(all_files)
+                print(f"{total_files} Datei(en) gefunden.")
+                current_folder: Path | None = None
+                for i, entry in enumerate(all_files, start=1):
+                    audio_path = entry[0]
+                    if audio_path.parent != current_folder:
+                        current_folder = audio_path.parent
+                        try:
+                            rel = current_folder.relative_to(root)
+                            label = str(rel) if str(rel) != "." else current_folder.name
+                        except ValueError:
+                            label = str(current_folder)
+                        print(f"\nOrdner: {label}")
+                    print(f"Datei {i}/{total_files}: {audio_path.name}")
+                    _run_selected_steps(audio_path.parent, [entry])
     finally:
         conn.close()
 

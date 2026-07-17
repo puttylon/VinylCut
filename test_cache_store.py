@@ -205,6 +205,7 @@ def test_transcript_roundtrip(tmp_path):
         "transcript": "gesungener text",
         "no_speech_prob": 0.02,
         "avg_logprob": -0.3,
+        "modell": None,
     }
 
 
@@ -396,6 +397,7 @@ class TestMigrationTranskripteV1ZuV2:
             "transcript": "alter transkribierter text",
             "no_speech_prob": 0.05,
             "avg_logprob": -0.3,
+            "modell": "small",
         }
 
         # Backup-Tabelle bleibt mit der Originalzeile erhalten.

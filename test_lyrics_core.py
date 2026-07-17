@@ -50,10 +50,12 @@ from lyrics_core import (
     _is_hallucination,
     _last_timestamp,
     _load_cache,
+    _looks_like_translation,
     _provider_consensus,
     _rate_limit_report,
     _rate_limit_wait,
     _release_folder,
+    _resolve_lrc_language,
     _save_cache,
     _song_candidate_words,
     _try_claim_folder,
@@ -826,6 +828,126 @@ class TestWhisperThresholdFor:
         assert _whisper_threshold_for("fr") == _WHISPER_MIN_OVERLAP
 
 
+_EN_LYRICS = (
+    "the sun is shining and the sky is blue today i feel so happy "
+    "walking down this empty street"
+)
+_ES_LYRICS = (
+    "el sol esta brillando y el cielo esta azul hoy me siento tan feliz "
+    "caminando por esta calle vacia"
+)
+
+
+class TestResolveLrcLanguage:
+    """_resolve_lrc_language() ersetzt _detect_lrc_language() als Sprach-
+    Hinweis fuer Whisper -- Bugfix zum Telepatía-Fall (ROADMAP.md): dort
+    kippte eine falsche Übersetzungsseite eines Providers die per-Textmix
+    erkannte Sprache auf 'en', obwohl der Song spanisch war."""
+
+    def test_einigkeit_liefert_die_sprache(self, tmp_path):
+        a = tmp_path / "a.lrc"
+        a.write_text(_ES_LYRICS, encoding="utf-8")
+        b = tmp_path / "b.lrc"
+        b.write_text(_ES_LYRICS, encoding="utf-8")
+        assert _resolve_lrc_language([a, b]) == "es"
+
+    def test_widerspruch_liefert_none(self, tmp_path):
+        en = tmp_path / "en.lrc"
+        en.write_text(_EN_LYRICS, encoding="utf-8")
+        es = tmp_path / "es.lrc"
+        es.write_text(_ES_LYRICS, encoding="utf-8")
+        assert _resolve_lrc_language([en, es]) is None
+
+    def test_widerspruch_kippt_nicht_wie_beim_alten_textmix(self, tmp_path):
+        """Direkte Gegenprobe zum Telepatía-Bug: der alte _detect_lrc_language()
+        vermischt beide Texte zu einem Textblock und erkennt dabei fälschlich
+        eine der beiden Sprachen (hier: 'en', weil der englische Textblock
+        zuerst kommt) -- _resolve_lrc_language() darf das NICHT tun."""
+        en = tmp_path / "en.lrc"
+        en.write_text(_EN_LYRICS, encoding="utf-8")
+        es = tmp_path / "es.lrc"
+        es.write_text(_ES_LYRICS, encoding="utf-8")
+        assert lyrics_core._detect_lrc_language([en, es]) == "en"
+        assert _resolve_lrc_language([en, es]) is None
+
+    def test_nur_ein_kandidat_mit_erkannter_sprache_gilt_als_einigkeit(self, tmp_path):
+        es = tmp_path / "es.lrc"
+        es.write_text(_ES_LYRICS, encoding="utf-8")
+        unbekannt = tmp_path / "unbekannt.lrc"
+        unbekannt.write_text("x y z", encoding="utf-8")  # zu kurz fuer langdetect
+        assert _resolve_lrc_language([es, unbekannt]) == "es"
+
+    def test_keine_erkennbare_sprache_liefert_none(self, tmp_path):
+        a = tmp_path / "a.lrc"
+        a.write_text("x y z", encoding="utf-8")
+        assert _resolve_lrc_language([a]) is None
+
+
+class TestLooksLikeTranslation:
+    """_looks_like_translation() filtert Übersetzungsseiten aus Provider-
+    Fetches heraus (siehe Telepatía-Fall, ROADMAP.md: Genius lieferte statt
+    des spanischen Originals die Seite "(English Translation)")."""
+
+    def test_erkennt_genius_uebersetzungs_kopfzeile(self):
+        content = (
+            "27 Contributors\nTranslations\nEspañol\nPortuguês\nDeutsch\n\n"
+            "Kali Uchis - telepatía (English Translation) Lyrics\n\n"
+            "[Chorus]\nWho would have known\n"
+        )
+        assert _looks_like_translation(content) is True
+
+    def test_erkennt_klammer_zusatz_auch_ohne_kopfzeile(self):
+        assert (
+            _looks_like_translation("Some Song (Deutsche Übersetzung) Lyrics\n") is True
+        )
+        assert _looks_like_translation("Une Chanson (Traduction Française)\n") is True
+
+    def test_normaler_songtext_wird_nicht_erkannt(self):
+        content = "[00:12.43]Quién lo diría\n[00:15.18]Que se podría hacer el amor\n"
+        assert _looks_like_translation(content) is False
+
+    def test_translations_menue_allein_loest_nicht_aus(self):
+        """Regressionstest: Genius zeigt das "Translations"-Sprachauswahl-
+        Menü auf JEDER Seite eines Songs, der irgendeine Übersetzung hat --
+        auch auf der Original-Seite selbst (echter Fund in der Produktions-
+        DB, song_id 5, "The Hollies - Long Cool Woman in a Black Dress":
+        korrekte Original-Lyrics, aber mit "Translations\\nTürkçe\\n..."-Kopf,
+        weil eine türkische Übersetzung existiert). Ein früherer Anlauf nutzte
+        genau diese Zeile als zweites Signal und erzeugte dadurch 1191 von
+        23504 False Positives in der echten DB -- das Signal wurde deshalb
+        wieder entfernt (siehe _looks_like_translation-Docstring)."""
+        content = (
+            "37 Contributors\nTranslations\nTürkçe\n"
+            "Long Cool Woman (In a Black Dress) Lyrics\n"
+            "The 1972 hit, one of the last for the Hollies...\n"
+        )
+        assert _looks_like_translation(content) is False
+
+    def test_translations_wort_tief_im_text_loest_nicht_aus(self):
+        content = "\n".join([f"line {i}" for i in range(20)] + ["Translations"])
+        assert _looks_like_translation(content) is False
+
+    def test_schluesselwort_ohne_sprachnamen_loest_nicht_aus(self):
+        """Regressionstest: 2 weitere echte False Positives aus der
+        Produktions-DB -- "Translation" allein (ohne Sprachnamen im selben
+        Klammer-Zusatz) sind legitime Songtext-Anmerkungen, keine
+        Übersetzungsseiten-Titel."""
+        assert (
+            _looks_like_translation(
+                "[03:00.83] (Translation in brackets)\n"
+                "[03:02.67] Vous etiez de l'autre cote de la salle\n"
+            )
+            is False
+        )
+        assert (
+            _looks_like_translation(
+                "[01:51.19] (Translation:)\n"
+                "[01:52.07] You have Adhikara over your respective duty only,\n"
+            )
+            is False
+        )
+
+
 class TestProviderCache:
     """_query_provider mit echtem cache_store (siehe CACHE_DESIGN.md)."""
 
@@ -887,6 +1009,61 @@ class TestProviderCache:
         assert path is None
         cached = cache_store.get_provider(conn, "lrclib", "a", "b")
         assert cached == {"status": "nichts", "content": None}
+
+    def test_uebersetzungsseite_wird_beim_live_fetch_verworfen(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix Telepatía-Fall (ROADMAP.md): Genius' Suche kann statt des
+        Originals eine Übersetzungsseite als ersten Treffer liefern -- die
+        darf nicht als 'treffer' gelten."""
+        conn = self._open(tmp_path)
+        translation_content = (
+            "27 Contributors\nTranslations\nEspañol\n\n"
+            "Kali Uchis - telepatía (English Translation) Lyrics\n\n"
+            "[Chorus]\nWho would have known\n"
+        )
+
+        class _Result:
+            stderr = ""
+
+        def _fake_run(cmd, **k):
+            Path(cmd[3]).write_text(translation_content, encoding="utf-8")
+            return _Result()
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fake_run)
+        provider, path = lyrics_core._query_provider(
+            "kali uchis telepatia", "genius", {}, artist="kali uchis", title="telepatía"
+        )
+        assert path is None
+        cached = cache_store.get_provider(conn, "genius", "kali uchis", "telepatía")
+        assert cached == {"status": "nichts", "content": None}
+
+    def test_alter_uebersetzungs_cache_eintrag_wird_beim_replay_verworfen(
+        self, tmp_path, monkeypatch
+    ):
+        """Selbstheilung fuer Cache-Einträge, die VOR diesem Filter als
+        'treffer' geschrieben wurden (z.B. der echte Telepatía-Fall in der
+        Produktions-DB) -- ein Replay aus dem Cache muss sie genauso
+        verwerfen wie ein frischer Live-Fetch."""
+        conn = self._open(tmp_path)
+        cache_store.put_provider(
+            conn,
+            "genius",
+            "kali uchis",
+            "telepatía",
+            "treffer",
+            "27 Contributors\nTranslations\nEspañol\n\n"
+            "Kali Uchis - telepatía (English Translation) Lyrics\n\n[Chorus]\n",
+        )
+
+        def _fail_if_called(*a, **k):
+            pytest.fail("Live-Abfrage darf bei Cache-Treffer nicht laufen")
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+        provider, path = lyrics_core._query_provider(
+            "kali uchis telepatia", "genius", {}, artist="kali uchis", title="telepatía"
+        )
+        assert path is None
 
     def test_transient_error_ist_kein_cache_treffer_aber_wird_festgehalten(
         self, tmp_path, monkeypatch

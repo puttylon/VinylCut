@@ -1163,6 +1163,89 @@ auch die `Whisper transkribiert...`/`1/1: ...`-Statuszeilen (aus
 `lyrics_core.py`, an mehreren Stellen) betroffen sind oder nur die neue
 Ordner-Kopfzeile.
 
+**✓ Nachtrag — Bugfix: Kali Uchis „Telepatía" bekam den falschen (englischen
+Übersetzungs-)Songtext.** Nutzer-Meldung: „kali uchis text von telepatia ist
+absolut falsch". Ursachenkette rekonstruiert direkt aus der Cache-DB
+(`fetch_songtext_cache.db`, song_id 51251):
+
+1. Genius lieferte über `syncedlyrics` nicht die Original-Lyrics, sondern die
+   Seite „Kali Uchis - telepatía (**English Translation**) Lyrics" — Genius'
+   Suche liefert bei `syncedlyrics/providers/genius.py` ungeprüft den ERSTEN
+   Suchtreffer (`data[0]["result"]["url"]`), das kann auch eine
+   Übersetzungsseite sein.
+2. `lyrics_core._detect_lrc_language()` erkennt die Song-Sprache, indem sie
+   den Text ALLER Kandidaten (Genius' englische Übersetzung + Netease'
+   spanisches Original) zu EINEM Textblock zusammenklebt, bevor `langdetect`
+   läuft. Live nachgestellt: Genius allein → `en`, Netease allein → `es`,
+   beide zusammen → `en` (das Original-Lied ist zudem selbst zweisprachig,
+   was das zusätzlich begünstigt).
+3. Dieses falsche `lrc_lang="en"` wird als erzwungener Sprach-Hinweis an
+   Whisper durchgereicht (`_transcribe(..., language=lrc_lang)`) — Whisper
+   bekommt die spanische Audiospur vorgesetzt, hält sie aber für Englisch.
+   Ergebnis laut gecachtem Transkript: ein durchgehend englischer,
+   übersetzungsartiger Text statt einer spanischen Mitschrift (bekannter
+   Whisper-Effekt bei erzwungener Fehl-Sprache).
+4. Der IDF-Jaccard-Vergleich matcht diesen englischen Fehltranskript
+   folgerichtig am besten gegen Genius' englische Übersetzung — Netease'
+   korrektes spanisches Original verliert trotz Richtigkeit.
+
+**Fix, zwei unabhängige Teile:**
+
+- **`lyrics_core._resolve_lrc_language()`** (neu, Drop-in-Ersatz für
+  `_detect_lrc_language()` an der Whisper-Sprach-Hinweis-Stelle in
+  `_whisper_best()`): erkennt die Sprache JE KANDIDAT einzeln statt als
+  Textmix. Sind sich alle Kandidaten mit erkannter Sprache einig, wird diese
+  zurückgegeben; bei Widerspruch `None` — Whisper bekommt dann keinen
+  Sprach-Hinweis und erkennt selbst aus dem Audio.
+- **`lyrics_core._looks_like_translation()`** (neu): erkennt
+  Übersetzungsseiten am Fetch-Text (Klammer-Zusatz wie „(English
+  Translation)"/„(Traducción al Español)" in beliebiger Wortreihenfolge,
+  sowie Genius' „Translations"-Sprachauswahl-Kopfzeile), provider-
+  unabhängig geprüft. Angewendet an drei Stellen in `_query_provider()`
+  (Live-Fetch, eigener Cache-Replay, lrclib-Dump-Replay) — verhindert neue
+  Vergiftung UND heilt alte Cache-Einträge beim nächsten `--abfragen`/
+  `--nachholen` selbst. Zusätzlich in `evaluate_lyrics._load_candidate_texts()`
+  angewendet, weil `--bewerten` Kandidaten direkt per SQL aus der DB liest,
+  NICHT über `_query_provider` — nur dort wird auch ein bereits (vor diesem
+  Fix) als `treffer` gespeicherter Übersetzungs-Fund wirksam ignoriert, ohne
+  die DB-Zeile selbst anfassen zu müssen.
+
+Bei der Umsetzung Redundanz vermieden: `evaluate_lyrics.py` hat mit
+`_select_whisper_model()` (Modul-Docstring: „ROADMAP.md, Nachtrag: large-v3
+ergänzt + Entscheidung für den Produktivbetrieb") bereits einen eigenen
+Modell-Wahl-Mechanismus (Englisch → `medium`, alles andere inkl. `None` →
+`large-v3`), der `lyrics_core._WHISPER_MODEL` vor jedem `_whisper_best()`-
+Aufruf kurzzeitig überschreibt. Ein Widerspruch (`None`) fällt dort
+automatisch unter „nicht Englisch" und erzwingt so bereits das große Modell
+— dafür genügte es, `_select_whisper_model()` von `_detect_lrc_language()`
+auf `_resolve_lrc_language()` umzustellen, ganz ohne einen zweiten,
+eigenen Eskalationsmechanismus in `lyrics_core.py` selbst (ein erster
+Anlauf mit eigener `_WHISPER_MODEL_ESCALATED`-Konstante + genereller
+Cache-Invalidierung bei Modell-Mismatch wurde verworfen: er hätte alle 1269
+noch mit dem alten `small`-Modell gecachten Transkripte in der Produktions-
+DB bei jedem Lauf neu transkribiert — genau das zurückgestellte Verhalten,
+siehe „Befund 7" oben, das der Nutzer bereits bewusst nicht umgesetzt haben
+wollte).
+
+Konkreter Song (Kali Uchis – Telepatía) zusätzlich manuell bereinigt: das
+veraltete, verunreinigte Whisper-Transkript (`modell=medium`, Cache-DB
+`transkripte`-Zeile zu song_id 51251) gelöscht, damit der nächste Lauf frisch
+transkribiert — dafür existiert kein CLI-Flag (`--nachholen` betrifft nur
+`status='nichts'/'fehlschlag'`, nie `'treffer'`; ein generisches
+`--force`/`--refresh-cache` ist in `songtext_pipeline.py` aktuell nicht
+verdrahtet). Live gegen die echte Cache-DB nachgewiesen: `_load_candidate_texts`
+liefert für song_id 51251 jetzt nur noch `netease`, `_resolve_lrc_language`
+→ `es`, `_select_whisper_model` → `large-v3`.
+
+17 neue Tests (`TestResolveLrcLanguage`, `TestLooksLikeTranslation`, zwei
+neue `TestProviderCache`-Fälle in `test_lyrics_core.py`; je ein neuer Fall in
+`TestLoadCandidateTexts`/`TestSelectWhisperModel` in `test_evaluate_lyrics.py`),
+2 bestehende Tests in `test_cache_store.py` angepasst (`cache_store.
+get_transcript()` liefert jetzt zusätzlich das Feld `"modell"`, war bisher
+nicht im Rückgabewert obwohl die Spalte längst existierte). Volle Suite:
+487/487 grün. `ruff check`/`format` sauber. `lyrics_core.__version__` auf
+`1.13.16` erhöht.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

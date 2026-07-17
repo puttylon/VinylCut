@@ -61,6 +61,31 @@ class TestLoadCandidateTexts(_GlobalsResetMixin):
 
         assert result == [("lrclib", "Text L"), ("genius", "Text G")]
 
+    def test_uebersetzungsseite_wird_trotz_treffer_status_ausgefiltert(self, tmp_path):
+        """Bugfix Telepatía-Fall (ROADMAP.md): ein Cache-Eintrag, der VOR dem
+        Übersetzungs-Filter in lyrics_core._query_provider geschrieben wurde
+        (oder ihn sonstwie umgeht), darf trotz status='treffer' nicht als
+        Kandidat durchgehen -- diese Funktion liest direkt aus der DB, nicht
+        über _query_provider."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        song_id = cs._get_or_create_song(conn, "kali uchis", "telepatía")
+        cs.put_provider(
+            conn,
+            "genius",
+            "kali uchis",
+            "telepatía",
+            "treffer",
+            "27 Contributors\nTranslations\nEspañol\n\n"
+            "Kali Uchis - telepatía (English Translation) Lyrics\n\n[Chorus]\n",
+        )
+        cs.put_provider(
+            conn, "netease", "kali uchis", "telepatía", "treffer", "Quién lo diría"
+        )
+
+        result = evaluate_lyrics._load_candidate_texts(conn, song_id)
+
+        assert result == [("netease", "Quién lo diría")]
+
 
 class TestEvaluateSongKeinProvider(_GlobalsResetMixin):
     def test_kein_song_in_db_liefert_kein_provider(self, tmp_path):
@@ -261,6 +286,27 @@ class TestSelectWhisperModel(_GlobalsResetMixin):
         p.write_text(LRC_A, encoding="utf-8")
         monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: None)
         assert evaluate_lyrics._select_whisper_model([p]) == "large-v3"
+
+    def test_widerspruechliche_kandidaten_waehlen_large_v3(self, tmp_path):
+        """Bugfix Telepatía-Fall (ROADMAP.md): OHNE Mock, mit echter
+        Spracherkennung -- ein englischer Kandidat (z.B. eine fälschlich
+        durchgerutschte Übersetzungsseite) und ein spanischer Kandidat (das
+        echte Original) dürfen sich nicht auf 'en' einigen (das alte
+        Verhalten via _detect_lrc_language) und damit `medium` statt
+        `large-v3` waehlen -- der Widerspruch muss auf `large-v3` fallen."""
+        en = tmp_path / "en.lrc"
+        en.write_text(
+            "the sun is shining and the sky is blue today i feel so happy "
+            "walking down this empty street",
+            encoding="utf-8",
+        )
+        es = tmp_path / "es.lrc"
+        es.write_text(
+            "el sol esta brillando y el cielo esta azul hoy me siento tan "
+            "feliz caminando por esta calle vacia",
+            encoding="utf-8",
+        )
+        assert evaluate_lyrics._select_whisper_model([en, es]) == "large-v3"
 
 
 class TestWhisperModelOverrideRestored(_GlobalsResetMixin):

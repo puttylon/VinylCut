@@ -58,10 +58,18 @@ _WHISPER_MODEL_OTHER = "large-v3"
 
 def _select_whisper_model(candidates: list[Path]) -> str:
     """Modellwahl nach Sprach-Hint, siehe Moduldocstring. Ruft dieselbe
-    lyrics_core._detect_lrc_language() auf, die _whisper_best() intern
+    lyrics_core._resolve_lrc_language() auf, die _whisper_best() intern
     sowieso nochmal aufruft -- billige, reine Textanalyse (kein Whisper-
-    Lauf), keine doppelte Sprach-Logik."""
-    lang = lyrics_core._detect_lrc_language(candidates)
+    Lauf), keine doppelte Sprach-Logik.
+
+    _resolve_lrc_language() erkennt die Sprache je Kandidat EINZELN statt
+    (wie das ältere _detect_lrc_language) alle Kandidaten zu einem Textblock
+    zu vermischen -- sonst kann ein einzelner falscher Kandidat (z.B. eine
+    Übersetzungsseite eines Providers) die Sprache kippen (siehe Telepatía-
+    Fall, ROADMAP.md). Sind sich die Kandidaten uneinig, liefert es None --
+    das faellt hier automatisch unter "nicht englisch" und erzwingt damit
+    bereits das grosse Modell, ganz ohne eigenen Sonderfall."""
+    lang = lyrics_core._resolve_lrc_language(candidates)
     return _WHISPER_MODEL_EN if lang == "en" else _WHISPER_MODEL_OTHER
 
 
@@ -70,17 +78,27 @@ def _load_candidate_texts(
 ) -> list[tuple[str, str]]:
     """(provider, inhalt) je Treffer fuer song_id, in _ALL_PROVIDERS-Reihenfolge
     (wichtig fuer _dedupe_by_content: "erster Treffer in Prioritaetsreihenfolge
-    bleibt")."""
+    bleibt").
+
+    Filtert Übersetzungsseiten (lyrics_core._looks_like_translation) trotz
+    status='treffer' heraus: diese Funktion liest direkt aus der Cache-DB,
+    NICHT über lyrics_core._query_provider -- Einträge, die VOR diesem Filter
+    (siehe dortiger Docstring) geschrieben wurden, könnten sonst trotz
+    laufendem Fix dauerhaft als gültiger Kandidat durchgehen (siehe Telepatía-
+    Fall, ROADMAP.md: Genius' "(English Translation)"-Seite stand bereits als
+    "treffer" in der DB, bevor der Filter existierte)."""
     rows = conn.execute(
         "SELECT e.quelle, t.inhalt FROM ergebnisse e "
         "JOIN texte t ON t.fingerabdruck = e.fingerabdruck "
         "WHERE e.song_id=? AND e.status='treffer'",
         (song_id,),
     ).fetchall()
-    by_provider = {quelle: inhalt for quelle, inhalt in rows if inhalt}
-    return [
-        (p, by_provider[p]) for p in lyrics_core._ALL_PROVIDERS if p in by_provider
-    ]
+    by_provider = {
+        quelle: inhalt
+        for quelle, inhalt in rows
+        if inhalt and not lyrics_core._looks_like_translation(inhalt)
+    }
+    return [(p, by_provider[p]) for p in lyrics_core._ALL_PROVIDERS if p in by_provider]
 
 
 def _write_temp_lrc(content: str) -> Path:
@@ -268,9 +286,7 @@ def evaluate_song(
                 "language": lrc_lang,
             }
     else:
-        best_content, _score = lyrics_core._heuristic_best(
-            all_candidates, expected_dur
-        )
+        best_content, _score = lyrics_core._heuristic_best(all_candidates, expected_dur)
         if best_content is not None:
             info_str = f"{prov_str} │ Heuristik"
             extras = {

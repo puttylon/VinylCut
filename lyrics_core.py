@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.15"
+__version__ = "1.13.16"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -451,6 +451,65 @@ def _rate_limit_report(provider: str, stderr: str) -> str | None:
         return grund
 
 
+# Provider-unabhängig: prüft nur den rohen Fetch-Text, egal von welchem
+# Provider er stammt (siehe _looks_like_translation). Bislang nur bei Genius
+# beobachtet (Genius indiziert Übersetzungsseiten als eigene Song-Objekte,
+# die syncedlyrics' Genius-Provider ungeprüft als ersten Suchtreffer übernimmt
+# -- siehe Telepatía-Fall, ROADMAP.md), Musixmatch/Netease/lrclib/Megalobiz
+# matchen dagegen über Titel-/Künstler-Ähnlichkeit und liefern strukturell
+# keine separaten Sprachvarianten. Der Filter ist trotzdem bewusst nicht auf
+# Genius beschränkt, falls ein anderer Provider künftig doch mal eine
+# Übersetzungsseite liefert.
+# Braucht BEIDES im selben Klammer-Zusatz: ein Übersetzungs-Schlüsselwort UND
+# einen Sprachnamen (in beliebiger Reihenfolge -- Genius mischt Konventionen:
+# "(English Translation)" keyword-LETZT, aber "(Traducción al Español)"/
+# "(Traduction Française)"/"(Tradução em Português)" keyword-ERST). Nur das
+# Schlüsselwort allein reicht NICHT: live gegen die echte Cache-DB geprüft,
+# ergab 2 echte False Positives, die beide lediglich "Translation" enthalten
+# OHNE Sprachnamen -- "(Translation in brackets)" (Prince -- Girls & Boys,
+# Musixmatch: Hinweis auf eine im Text eingeklammerte Übersetzung EINER
+# Songzeile) und "(Translation:)" (1 Giant Leap -- The Way You Dream,
+# lrclib/musixmatch: derselbe Fall) -- beides legitime Songtext-Anmerkungen,
+# keine Übersetzungsseiten-Titel (siehe ROADMAP.md).
+_TRANSLATION_KEYWORD_RE = (
+    r"(?:Translation|Übersetzung|Uebersetzung|Traducci[oó]n|Traduction|Tradu[cç][aã]o)"
+)
+_TRANSLATION_LANGUAGE_RE = (
+    r"(?:English|Deutsch\w*|Espa[nñ]ol|Fran[cç]ais\w*|Italiano|Portugu[eê]s|"
+    r"Türkçe|Turkish|R?ussian|Русский|Polski|Polish|Arabic|العربية|"
+    r"Japanese|日本語|Korean|한국어|Chinese|中文|Greek|Ελληνικά)"
+)
+_TRANSLATION_MARKER_RE = re.compile(
+    r"\((?=[^()]*" + _TRANSLATION_KEYWORD_RE + r")"
+    r"(?=[^()]*" + _TRANSLATION_LANGUAGE_RE + r")"
+    r"[^()]*\)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_translation(content: str) -> bool:
+    """Erkennt Übersetzungsseiten am Fetch-Text, unabhängig vom Provider.
+
+    NUR EIN Signal: ein Klammer-Zusatz wie "(English Translation)" oder
+    "(Traducción al Español)" irgendwo im Text (typischerweise im Genius-
+    Seitentitel, der mit in den Lyrics-Container gescrapt wird).
+
+    Bugfix (siehe ROADMAP.md): ein zweites Signal -- die Zeile "Translations"
+    in den ersten 15 Zeilen -- wurde probeweise ergaenzt und live gegen die
+    echte Cache-DB geprueft. Ergebnis: 1191 von 23504 Treffern schlugen an,
+    weit mehr als plausibel. Ursache: Genius zeigt dieses "Translations"-
+    Sprachauswahl-Menü auf JEDER Seite eines Songs, der IRGENDEINE Übersetzung
+    hat -- auch auf der Original-Seite selbst (Beleg: song_id 5, "The Hollies
+    -- Long Cool Woman in a Black Dress", ganz normale korrekte Original-
+    Lyrics mit "Translations\\nTürkçe\\nLong Cool Woman (In a Black Dress)
+    Lyrics" im Kopf -- keine Übersetzung, nur ein Song mit türkischer
+    Übersetzung verfügbar). Das Signal unterscheidet nicht zwischen "diese
+    Seite IST eine Übersetzung" und "dieser Song HAT Übersetzungen" -- damit
+    ungeeignet, wieder entfernt.
+    """
+    return bool(_TRANSLATION_MARKER_RE.search(content))
+
+
 def _query_provider(
     query: str, provider: str, env: dict, artist: str = "", title: str = ""
 ) -> tuple[str, Path | None]:
@@ -529,14 +588,20 @@ def _query_provider(
                 None  # Cache-Fehler dürfen den Lauf nie stören — einfach live abfragen
             )
         if cached is not None:
-            if cached["status"] == "treffer" and cached["content"]:
+            if (
+                cached["status"] == "treffer"
+                and cached["content"]
+                and not _looks_like_translation(cached["content"])
+            ):
                 with tempfile.NamedTemporaryFile(
                     suffix=".lrc", delete=False, mode="w", encoding="utf-8"
                 ) as tmp:
                     tmp.write(cached["content"])
                     tmp_path = Path(tmp.name)
                 return provider, tmp_path
-            return provider, None  # "nichts" gecacht
+            # "nichts" gecacht, oder nachträglich als Übersetzungsseite erkannt
+            # (self-healing für ältere Cache-Einträge von vor diesem Filter)
+            return provider, None
 
     if (
         provider == "lrclib"
@@ -554,7 +619,11 @@ def _query_provider(
                 None  # Dump-Fehler dürfen den Lauf nie stören — weiter wie bisher
             )
         if dump_result is not None:
-            if dump_result["status"] == "treffer" and dump_result["content"]:
+            if (
+                dump_result["status"] == "treffer"
+                and dump_result["content"]
+                and not _looks_like_translation(dump_result["content"])
+            ):
                 if use_cache:
                     try:
                         with _cache_lock:
@@ -574,7 +643,8 @@ def _query_provider(
                     tmp.write(dump_result["content"])
                     tmp_path = Path(tmp.name)
                 return provider, tmp_path
-            # Track im Dump gefunden, aber ohne Songtext ("nichts")
+            # Track im Dump gefunden, aber ohne Songtext ODER als Übersetzung
+            # verworfen -- beides "nichts"
             if use_cache:
                 try:
                     with _cache_lock:
@@ -636,6 +706,13 @@ def _query_provider(
         return provider, None
 
     found_path = tmp_path if tmp_path.exists() else None
+    if found_path is not None:
+        try:
+            if _looks_like_translation(found_path.read_text(encoding="utf-8")):
+                found_path.unlink(missing_ok=True)
+                found_path = None  # zaehlt unten als "nichts", genau wie kein Treffer
+        except Exception:
+            pass
     if use_cache:
         try:
             if fehlergrund is not None:
@@ -780,6 +857,31 @@ def _detect_lrc_language(candidates: list[Path]) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _resolve_lrc_language(candidates: list[Path]) -> str | None:
+    """Erkennt die Song-Sprache je Kandidat EINZELN (nicht als Textmix wie
+    _detect_lrc_language) und vergleicht die Ergebnisse. Drop-in-Ersatz für
+    _detect_lrc_language mit exakt derselben Signatur.
+
+    Grund: ein einzelner falscher Kandidat (z.B. eine Übersetzungsseite eines
+    Providers) darf die Spracherkennung nicht kippen, wenn er mit den übrigen
+    Kandidaten zu einem Textblock vermischt wird -- siehe Telepatía-Fall
+    (ROADMAP.md): Genius' englische Übersetzung + Netease-Original zusammen
+    detektierten "en", einzeln detektierten sie "en" bzw. "es".
+
+    Sind sich alle Kandidaten mit erkannter Sprache einig (oder erkennt
+    höchstens einer eine Sprache), wird diese Sprache zurückgegeben. Bei
+    Widerspruch wird None zurückgegeben -- Whisper bekommt dann keinen
+    Sprach-Hinweis (erkennt selbst anhand des Audios) UND evaluate_lyrics.
+    _select_whisper_model() behandelt None wie jede nicht-englische Sprache,
+    erzwingt also automatisch das große Modell (siehe dortiger Docstring) --
+    kein eigenes Escalate-Flag hier nötig.
+    """
+    langs = {
+        lang for p in candidates if (lang := _detect_lrc_language([p])) is not None
+    }
+    return next(iter(langs)) if len(langs) == 1 else None
 
 
 def _word_overlap(a: list[str], b: list[str]) -> float:
@@ -1254,7 +1356,7 @@ def _whisper_best(
             starts.append(0.0)
     start = min(starts) if starts else 0.0
 
-    lrc_lang = _detect_lrc_language(candidates)
+    lrc_lang = _resolve_lrc_language(candidates)
     n_docs, df = _contrastive_idf or (0, {})
 
     use_cache = cache_store is not None and _cache_conn is not None

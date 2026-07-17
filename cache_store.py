@@ -381,18 +381,19 @@ def get_transcript(
     oder hat er noch kein Transkript, wird None geliefert.
     """
     row = conn.execute(
-        "SELECT t.transkript, t.no_speech_prob, t.avg_logprob "
+        "SELECT t.transkript, t.no_speech_prob, t.avg_logprob, t.modell "
         "FROM transkripte t JOIN songs s ON s.id = t.song_id "
         "WHERE s.artist_key=? AND s.titel_key=?",
         (artist_key, titel_key),
     ).fetchone()
     if row is None:
         return None
-    transkript, no_speech_prob, avg_logprob = row
+    transkript, no_speech_prob, avg_logprob, modell = row
     return {
         "transcript": transkript,
         "no_speech_prob": no_speech_prob,
         "avg_logprob": avg_logprob,
+        "modell": modell,
     }
 
 

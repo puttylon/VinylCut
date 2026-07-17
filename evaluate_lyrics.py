@@ -363,6 +363,15 @@ def evaluate_all(
     (siehe fetch_providers.fetch_all fuer dasselbe Scope-Prinzip: ohne PFAD
     bewusst die GANZE DB, mit PFAD nur die Songs des aktuellen Laufs).
 
+    Reihenfolge: mit nicht-leerem `file_song_map` wird in dessen
+    Einfuegereihenfolge iteriert (Datei-/Verzeichnisreihenfolge, siehe
+    songtext_pipeline.build_file_song_map) statt alphabetisch nach
+    Kuenstler/Titel -- Nutzer-Feedback: die Konsolenausgabe soll sich mit
+    der Tracklist im Ordner decken, nicht mit der DB-Sortierung. Ohne
+    file_song_map (kein PFAD) bleibt es bei der alphabetischen DB-Reihenfolge,
+    mangels jeder Datei-Information. Anzeige entsprechend: Dateiname wenn
+    vorhanden, sonst "artist_key / titel_key" als Fallback.
+
     `file_song_map` (artist_key, titel_key) -> Audiodatei-Pfad, siehe
     songtext_pipeline.build_file_song_map -- nur fuer Songs mit Eintrag dort
     kann Whisper bei einem Transkript-Cache-Miss live transkribieren; andere
@@ -388,10 +397,22 @@ def evaluate_all(
     fetch_providers._prepare_lyrics_core_globals(conn)
 
     file_song_map = file_song_map or {}
-    rows = conn.execute(
-        "SELECT artist_key, titel_key FROM songs ORDER BY artist_key, titel_key"
-    ).fetchall()
-    to_evaluate = [(a, t) for a, t in rows if scope is None or (a, t) in scope]
+    if file_song_map:
+        # Mit PFAD: in Datei-Reihenfolge iterieren (dict-Einfügereihenfolge
+        # -- file_song_map wird von songtext_pipeline.py aus derselben
+        # dateibasierten Liste gebaut wie build_file_song_map() sie liefert,
+        # also Verzeichnis-/Dateiname-Reihenfolge, NICHT alphabetisch nach
+        # Künstler/Titel). Nutzer-Feedback: Durchläufe sollen nach
+        # Dateinamen sortiert sein, nicht nach Band-/Songname, damit sich
+        # die Konsolenausgabe mit der Tracklist im Ordner deckt.
+        to_evaluate = list(file_song_map.keys())
+    else:
+        # Ohne PFAD (globaler Lauf über die ganze DB, keine Dateien bekannt)
+        # bleibt die bisherige alphabetische DB-Reihenfolge einzige Option.
+        rows = conn.execute(
+            "SELECT artist_key, titel_key FROM songs ORDER BY artist_key, titel_key"
+        ).fetchall()
+        to_evaluate = [(a, t) for a, t in rows if scope is None or (a, t) in scope]
     total = len(to_evaluate)
     if total:
         print(f"Bewerte {total} Song(s) ...")
@@ -420,6 +441,12 @@ def evaluate_all(
 
     for i, (artist_key, titel_key) in enumerate(to_evaluate, start=1):
         flac_path = file_song_map.get((artist_key, titel_key))
+        # Anzeige: Dateiname wenn vorhanden (Nutzer-Feedback -- besser
+        # nachvollziehbar als der normalisierte Cache-Schlüssel), sonst
+        # Fallback auf "artist_key / titel_key" (globaler Lauf ohne PFAD).
+        label = (
+            flac_path.name if flac_path is not None else f"{artist_key} / {titel_key}"
+        )
 
         # Skip nur moeglich MIT zugeordneter Audiodatei (JSON-Ordner-Cache
         # ist datei-basiert) -- ohne PFAD (file_song_map leer) wird wie
@@ -432,7 +459,7 @@ def evaluate_all(
 
         lyrics_core._note_contrastive_evaluation(_IDF_REFRESH_INTERVAL)
 
-        lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
+        lyrics_core._print_status(f"  {i}/{total}: {label} ...")
 
         existing_lrc = flac_path.with_suffix(".lrc") if flac_path is not None else None
         expected_dur = (
@@ -452,8 +479,6 @@ def evaluate_all(
         else:
             counts["abgelehnt"] += 1
 
-        lyrics_core._tprint(
-            f"{lyrics_core._ts()}  {artist_key} / {titel_key}  {info_str}"
-        )
+        lyrics_core._tprint(f"{lyrics_core._ts()}  {label}  {info_str}")
 
     return counts

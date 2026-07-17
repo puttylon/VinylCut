@@ -551,6 +551,71 @@ class TestEvaluateAllSkipUnveraendert(_GlobalsResetMixin):
         assert counts2["uebersprungen"] == 0
 
 
+class TestEvaluateAllFileOrder(_GlobalsResetMixin):
+    """Regressionstests für Nutzer-Feedback: die Durchläufe sollen nach
+    Dateiname sortiert sein (nicht alphabetisch nach Künstler/Titel wie
+    bisher) und den Dateinamen anzeigen, falls einer bekannt ist."""
+
+    def test_file_song_map_reihenfolge_bestimmt_bewertungsreihenfolge(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        # Alphabetisch nach Künstler wäre "apple band" zuerst -- die
+        # Einfügereihenfolge von file_song_map ist aber umgekehrt.
+        cs._get_or_create_song(conn, "apple band", "apple song")
+        cs._get_or_create_song(conn, "zebra band", "zebra song")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        seen: list[tuple[str, str]] = []
+
+        def _tracking_evaluate_song(conn, artist_key, titel_key, *a, **kw):
+            seen.append((artist_key, titel_key))
+            return (
+                False,
+                "0/4: — │ kein Provider",
+                {"reason": "kein-provider", "content": None},
+            )
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _tracking_evaluate_song)
+
+        file_song_map = {
+            ("zebra band", "zebra song"): tmp_path / "01 - Zebra Song.flac",
+            ("apple band", "apple song"): tmp_path / "02 - Apple Song.flac",
+        }
+
+        evaluate_lyrics.evaluate_all(conn, file_song_map=file_song_map)
+
+        assert seen == [("zebra band", "zebra song"), ("apple band", "apple song")]
+
+    def test_file_song_map_zeigt_dateinamen_statt_artist_titel(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            lambda conn, a, t, *ar, **kw: (
+                False,
+                "0/4: — │ kein Provider",
+                {"reason": "kein-provider", "content": None},
+            ),
+        )
+
+        file_song_map = {("artist a", "title a"): tmp_path / "01 - Mein Song.flac"}
+
+        evaluate_lyrics.evaluate_all(conn, file_song_map=file_song_map)
+
+        out = capsys.readouterr().out
+        assert "01 - Mein Song.flac" in out
+        assert "artist a / title a" not in out
+
+
 class TestResolveExpectedDur(_GlobalsResetMixin):
     def test_liest_dauer_aus_release_json(self, tmp_path, monkeypatch):
         flac_path = tmp_path / "01 Song.flac"

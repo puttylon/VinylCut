@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import cache_store
 import lyrics_core
@@ -62,7 +63,9 @@ def _prepare_lyrics_core_globals(conn: sqlite3.Connection) -> None:
 
 
 def fetch_all(
-    conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
+    conn: sqlite3.Connection,
+    scope: set[tuple[str, str]] | None = None,
+    file_order: list[tuple[Path, str, str]] | None = None,
 ) -> tuple[int, int, int]:
     """Normal-Modus (--abfragen): fragt Songs aus "songs" bei allen 4 Anbietern
     gleichzeitig ab (ThreadPoolExecutor, analog zum früheren Provider-Block
@@ -132,23 +135,54 @@ def fetch_all(
     Gibt (Anzahl tatsächlich abgefragter Songs, Anzahl wegen Genre
     übersprungener Songs, Anzahl bereits vollständig aktueller Songs) zurück
     -- Songs außerhalb von scope zählen in keinem der drei.
+
+    file_order: optional die (Pfad, artist_key, titel_key)-Liste aus
+    songtext_pipeline.build_file_song_map (bereits in Datei-/Verzeichnis-
+    Reihenfolge) -- ist sie gesetzt, wird in GENAU dieser Reihenfolge
+    iteriert (dedupliziert, mehrere Dateien können auf denselben Song
+    zeigen) statt alphabetisch nach Künstler/Titel, und die Konsolenzeilen
+    zeigen den Dateinamen statt "artist_key / titel_key" (Nutzer-Feedback:
+    die Ausgabe soll sich mit der Tracklist im Ordner decken). `scope` wird
+    dabei ignoriert -- file_order deckt dieselbe Eingrenzung bereits ab.
+    Ohne file_order (kein PFAD) bleibt es bei der alphabetischen
+    DB-Reihenfolge + `scope`-Filter wie bisher.
     """
     _prepare_lyrics_core_globals(conn)
     env = lyrics_core._load_env()
-    rows = conn.execute(
-        "SELECT id, artist_key, titel_key, genre FROM songs ORDER BY artist_key, titel_key"
-    ).fetchall()
+
+    if file_order is not None:
+        seen: set[tuple[str, str]] = set()
+        rows: list[tuple[int, str, str, str | None, Path | None]] = []
+        for path, artist_key, titel_key in file_order:
+            if (artist_key, titel_key) in seen:
+                continue
+            seen.add((artist_key, titel_key))
+            row = conn.execute(
+                "SELECT id, genre FROM songs WHERE artist_key=? AND titel_key=?",
+                (artist_key, titel_key),
+            ).fetchone()
+            if row is None:
+                continue
+            song_id, genre = row
+            rows.append((song_id, artist_key, titel_key, genre, path))
+    else:
+        rows = [
+            (song_id, artist_key, titel_key, genre, None)
+            for song_id, artist_key, titel_key, genre in conn.execute(
+                "SELECT id, artist_key, titel_key, genre FROM songs "
+                "ORDER BY artist_key, titel_key"
+            ).fetchall()
+            if scope is None or (artist_key, titel_key) in scope
+        ]
 
     # Erster Durchgang: pro Song die Anbieter bestimmen, die WIRKLICH
     # angefragt werden müssen (siehe Docstring oben) -- schon HIER, nicht
     # erst in der Schleife, damit "Frage N Song(s) ab" von vornherein nur
     # Songs mit echtem Anfragebedarf zählt, statt hinterher falsch zu wirken.
-    to_query: list[tuple[int, str, str, list[str]]] = []
+    to_query: list[tuple[int, str, str, Path | None, list[str]]] = []
     skipped_genre = 0
     skipped_up_to_date = 0
-    for song_id, artist_key, titel_key, genre in rows:
-        if scope is not None and (artist_key, titel_key) not in scope:
-            continue
+    for song_id, artist_key, titel_key, genre, audio_path in rows:
         if genre and lyrics_core._is_skip_genre(genre):
             skipped_genre += 1
             continue
@@ -172,7 +206,7 @@ def fetch_all(
         if not providers_to_ask:
             skipped_up_to_date += 1
             continue
-        to_query.append((song_id, artist_key, titel_key, providers_to_ask))
+        to_query.append((song_id, artist_key, titel_key, audio_path, providers_to_ask))
 
     total = len(to_query)
     if total:
@@ -181,10 +215,16 @@ def fetch_all(
             "Anbietern ab ..."
         )
 
-    for i, (song_id, artist_key, titel_key, providers_to_ask) in enumerate(
+    for i, (song_id, artist_key, titel_key, audio_path, providers_to_ask) in enumerate(
         to_query, start=1
     ):
-        lyrics_core._print_status(f"  {i}/{total}: {artist_key} / {titel_key} ...")
+        # Anzeige: Dateiname wenn vorhanden (Nutzer-Feedback -- besser
+        # nachvollziehbar als der normalisierte Cache-Schlüssel), sonst
+        # Fallback auf "artist_key / titel_key" (globaler Lauf ohne PFAD).
+        label = (
+            audio_path.name if audio_path is not None else f"{artist_key} / {titel_key}"
+        )
+        lyrics_core._print_status(f"  {i}/{total}: {label} ...")
         query = f"{artist_key} {titel_key}".strip()
 
         results = {}
@@ -201,19 +241,19 @@ def fetch_all(
                 for provider in providers_to_ask
             ]
             for future in as_completed(futures):
-                provider, path = future.result()
-                results[provider] = path
+                provider, tmp_path = future.result()
+                results[provider] = tmp_path
 
         provider_hits = []
         for provider in lyrics_core._ALL_PROVIDERS:  # Reihenfolge beibehalten
-            path = results.get(provider)
-            if path is not None:
+            tmp_path = results.get(provider)
+            if tmp_path is not None:
                 provider_hits.append(provider)
-                path.unlink(missing_ok=True)
+                tmp_path.unlink(missing_ok=True)
 
         hit_str = ", ".join(provider_hits) if provider_hits else "—"
         lyrics_core._tprint(
-            f"{lyrics_core._ts()}  {artist_key} / {titel_key}  "
+            f"{lyrics_core._ts()}  {label}  "
             f"{len(provider_hits)}/{len(lyrics_core._ALL_PROVIDERS)}: {hit_str}"
         )
 

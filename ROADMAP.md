@@ -859,6 +859,32 @@ CLAUDE.md-Versionierungsregel).
 Noch nicht live gegen die echte Produktionsbibliothek getestet -- der
 Nutzer testet im Anschluss selbst.
 
+**✓ Nachtrag — `--abfragen`/`--bewerten` laufen jetzt in Dateinamen-
+Reihenfolge statt alphabetisch nach Künstler/Titel, Konsole zeigt den
+Dateinamen.** Aus dem Live-Test des obigen Ordner-für-Ordner-Umbaus (Nutzer:
+"ich will die durchläufe der dateien nach dateinamen sortiert, nicht bane
+artist und songname. und ich will den dateinamen sehen, falls es die gibt.
+das macht es für mich besser nachvollzihbar") -- die Konsolenausgabe sollte
+sich mit der Tracklist im Ordner decken.
+
+`fetch_providers.fetch_all()` bekommt einen neuen optionalen Parameter
+`file_order: list[tuple[Path, str, str]] | None` (dieselbe Liste wie
+`scope`, aus `songtext_pipeline.build_file_song_map()`) -- mit Wert daraus
+werden die abzufragenden Songs in Datei-/Verzeichnisreihenfolge statt per
+`ORDER BY artist_key, titel_key` verarbeitet, `evaluate_lyrics.evaluate_all()`
+entsprechend über `file_song_map` (Dict-Einfügereihenfolge). Beide zeigen in
+der Konsole `label = audio_path.name if audio_path is not None else
+f"{artist_key} / {titel_key}"` -- Dateiname wenn eine Audiodatei bekannt
+ist (PFAD-Lauf), sonst weiterhin den normalisierten Cache-Schlüssel als
+Fallback (globaler Lauf ohne PFAD, dort gibt es keine Datei-Zuordnung).
+
+Neue Tests: `TestFetchAllFileOrder` (4 Tests, `test_fetch_providers.py`),
+`TestEvaluateAllFileOrder` (2 Tests, `test_evaluate_lyrics.py`). Volle
+Suite: 473/473 grün. `ruff format` auf die eigenen neuen Zeilen angewendet
+(nicht auf vorbestehende, unabhängige Formatierungs-Abweichungen in
+`_open_lrclib_dump_conn`/`_heuristic_best`-Aufrufen). `lyrics_core.
+__version__` auf `1.13.12` erhöht.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

@@ -113,7 +113,9 @@ def _scope_from_root(
 
 
 def fetch_providers_normal(
-    conn: sqlite3.Connection, scope: set[tuple[str, str]] | None = None
+    conn: sqlite3.Connection,
+    scope: set[tuple[str, str]] | None = None,
+    file_order: list[tuple[Path, str, str]] | None = None,
 ) -> None:
     """--abfragen: Normal-Modus von fetch_providers -- fragt Songs in "songs"
     bei allen 4 Anbietern ab (siehe fetch_providers.fetch_all).
@@ -121,7 +123,10 @@ def fetch_providers_normal(
     scope wird unverändert durchgereicht: ist er gesetzt (PFAD-Lauf, siehe
     main()), werden NUR die Songs des aktuellen Umfangs abgefragt, nicht die
     komplette, historisch gewachsene Cache-DB (siehe fetch_all-Docstring,
-    "Behebt einen echten Bug").
+    "Behebt einen echten Bug"). file_order (dieselbe Liste wie für scope,
+    siehe main()) bestimmt zusätzlich die Reihenfolge + zeigt den Dateinamen
+    in der Konsolenausgabe (Nutzer-Feedback: Dateireihenfolge statt
+    alphabetisch nach Künstler/Titel).
 
     Songs mit Skip-Genre (Hörbuch/Hörspiel/... ) werden dabei übersprungen --
     die Anzahl wird separat sichtbar gemacht, nicht nur stillschweigend
@@ -130,7 +135,7 @@ def fetch_providers_normal(
     Treffer/Nichts-Eintrag oder einen -- von --nachholen zu behandelnden --
     Fehlschlag, siehe fetch_all-Docstring)."""
     queried, skipped_genre, skipped_up_to_date = fetch_providers.fetch_all(
-        conn, scope=scope
+        conn, scope=scope, file_order=file_order
     )
     print(f"abfragen: {queried} Song(s) abgefragt.")
     if skipped_genre:
@@ -307,8 +312,11 @@ def main() -> None:
                 print(f"scan: {count} Song(s) gescannt/aktualisiert.")
 
         if run_abfragen:
-            scope = _scope_from_root(step_root, False, conn, files=step_files)
-            fetch_providers_normal(conn, scope=scope)
+            order: list[tuple[Path, str, str]] | None = None
+            if step_root is not None:
+                order = build_file_song_map(step_root, False, conn, files=step_files)
+            scope = {(a, t) for _, a, t in order} if order is not None else None
+            fetch_providers_normal(conn, scope=scope, file_order=order)
 
         if run_nachholen:
             scope = _scope_from_root(step_root, False, conn, files=step_files)

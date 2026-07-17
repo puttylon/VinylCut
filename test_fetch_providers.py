@@ -582,6 +582,117 @@ class TestFetchAll(_CacheGlobalsResetMixin):
         }
 
 
+class TestFetchAllFileOrder(_CacheGlobalsResetMixin):
+    """Regressionstests für Nutzer-Feedback: die Durchläufe sollen nach
+    Dateiname sortiert sein (nicht alphabetisch nach Künstler/Titel wie
+    bisher) und den Dateinamen anzeigen, falls einer bekannt ist."""
+
+    def test_file_order_bestimmt_reihenfolge_nicht_alphabet(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        # Alphabetisch nach Künstler wäre "apple band" zuerst -- die
+        # Dateireihenfolge ist aber bewusst umgekehrt (Zebra zuerst).
+        cs._get_or_create_song(conn, "apple band", "apple song", None)
+        cs._get_or_create_song(conn, "zebra band", "zebra song", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        fake_run = _fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        queried_order: list[str] = []
+        orig_query_provider = lyrics_core._query_provider
+
+        def _spy(query, provider, env, artist="", title=""):
+            queried_order.append(artist)
+            return orig_query_provider(query, provider, env, artist=artist, title=title)
+
+        monkeypatch.setattr(lyrics_core, "_query_provider", _spy)
+
+        file_order = [
+            (Path("01 - Zebra Song.flac"), "zebra band", "zebra song"),
+            (Path("02 - Apple Song.flac"), "apple band", "apple song"),
+        ]
+
+        fetch_providers.fetch_all(conn, file_order=file_order)
+
+        # alle 4 Anbieter je Song -- erst alle "zebra band"-Aufrufe, dann
+        # alle "apple band"-Aufrufe (Datei-Reihenfolge), nicht umgekehrt.
+        assert queried_order[:4] == ["zebra band"] * 4
+        assert queried_order[4:] == ["apple band"] * 4
+
+    def test_file_order_zeigt_dateinamen_statt_artist_titel(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        fake_run = _fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        file_order = [(Path("01 - Mein Song.flac"), "artist a", "title a")]
+
+        fetch_providers.fetch_all(conn, file_order=file_order)
+
+        out = capsys.readouterr().out
+        assert "01 - Mein Song.flac" in out
+        assert "artist a / title a" not in out
+
+    def test_file_order_dedupliziert_mehrere_dateien_desselben_songs(
+        self, tmp_path, monkeypatch
+    ):
+        """Zwei Dateien (z.B. Mono-/Stereo-Mix) können auf denselben Song
+        zeigen -- er darf dann nur einmal abgefragt werden."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist a", "title a", None)
+        conn.commit()
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        fake_run = _fake_run({})
+        monkeypatch.setattr(lyrics_core.subprocess, "run", fake_run)
+
+        file_order = [
+            (Path("01 - Mono.flac"), "artist a", "title a"),
+            (Path("01 - Stereo.flac"), "artist a", "title a"),
+        ]
+
+        queried, _skipped_genre, _skipped_up_to_date = fetch_providers.fetch_all(
+            conn, file_order=file_order
+        )
+
+        assert queried == 1
+        assert len(fake_run.calls) == 4  # nicht 8
+
+    def test_file_order_ohne_db_eintrag_wird_stillschweigend_ausgelassen(
+        self, tmp_path, monkeypatch
+    ):
+        """Eine Datei in file_order ohne passende songs-Zeile (z.B. nie
+        gescannt) darf nicht crashen -- einfach nicht mitgezählt."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+
+        def _fail_if_called(*a, **k):
+            raise AssertionError("unbekannter Song darf nie live abgefragt werden")
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fail_if_called)
+
+        file_order = [(Path("01 - Unbekannt.flac"), "nobody", "nothing")]
+
+        assert fetch_providers.fetch_all(conn, file_order=file_order) == (0, 0, 0)
+
+
 class TestRetryMissing(_CacheGlobalsResetMixin):
     def test_ohne_providers_arg_werden_alle_4_anbieter_angefragt(
         self, tmp_path, monkeypatch

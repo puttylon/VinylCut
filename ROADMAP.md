@@ -443,6 +443,69 @@ Fehlschlag wird komplett ohne Live-Aufruf übersprungen, und als Kehrseite:
 `ruff check`/`ruff format` sauber. `lyrics_core.__version__` auf `1.13.3`
 erhöht (Bugfix, siehe CLAUDE.md-Versionierungsregel).
 
+**✓ Nachtrag — `db_analyse.py`: Aggregat-Statistiken über die Cache-DB.**
+Erster der drei zuvor bewusst zurückgestellten "Weiterhin offen"-Punkte
+(siehe oben, Punkt 1): `lrc_analyse.py` wertet nur den JSON-Ordner-Cache
+aus, nie die eigentliche `fetch_songtext_cache.db`. Neues, eigenständiges
+Skript `db_analyse.py` (kein CLI-Flag, reiner Report): liest pro Anbieter
+die Treffer-/Nichts-/Fehlschlag-Quote inkl. Fehlschlag-Gründen, Songs ganz
+ohne Provider-Treffer, Songs mit allen 4 Providern fehlgeschlagen
+(Kandidaten für `--phase nachholen`), Whisper-Transkript-Abdeckung +
+Modell-Aufschlüsselung (small/medium/large-v3) sowie Provider-Aktivität der
+letzten 24h/7 Tage. Trennung von `collect_stats(conn) -> dict` (reine
+SQL-Aggregation) und `print_stats(stats)` (Formatierung) macht die Zahlen
+ohne stdout-Capturing testbar. Live gegen die echte Produktions-DB
+gegengeprüft (9936 Songs, u.a. Musixmatch-Fehlschlagquote 78,7 % — fast
+ausschließlich `gesperrt`, ein echter, vorher unsichtbarer Befund). 7 neue
+Tests in `test_db_analyse.py`. `ruff check`/`ruff format` sauber.
+
+**✓ Nachtrag — Kein Bindeglied zwischen JSON-Cache und SQLite-Cache
+(Punkt 2) behoben.** Live an einem echten `--recursive`-Lauf über
+`/Volumes/music/musik/_aktuell` bestätigt: Phase "bewerten" hatte an einem
+Tag 56 frische Whisper-Transkripte erzeugt (u.a. ZZ Top "Stages"/"Woke Up
+With Wood"), aber KEINE einzige `.fetch_songtext.json` im ganzen Baum wurde
+aktualisiert. Ursache: `lyrics_core._cache_entry_valid()` prüft nur die
+Skript-Version (≥ 1.7.1), kein TTL — ein einmal geschriebener JSON-Eintrag
+gilt für Phase "schreiben" FÜR IMMER als aktuell, egal was Phase
+"bewerten"/"nachholen" seitdem in der DB gefunden haben. `evaluate_song()`
+wird für solche Tracks nie wieder aufgerufen, frische Whisper-Arbeit
+verpufft ungenutzt.
+
+**Fix:** neue `cache_store.latest_result_timestamp(conn, artist_key,
+titel_key)` liefert den jüngsten `datum`-Zeitstempel über alle
+`ergebnisse`- und `transkripte`-Zeilen eines Songs. `write_lrc.py`s
+Skip-Check vergleicht diesen jetzt zusätzlich gegen den `ts`-Wert des
+JSON-Eintrags (`_db_newer_than_json_entry`) — ist die DB neuer, wird trotz
+gültigem JSON-Eintrag neu bewertet. Ein echter Zeitvergleich, kein reiner
+String-Vergleich: der JSON-`ts` ist lokale Zeit ohne Zeitzone
+(`datetime.now().isoformat()`), der DB-`datum` UTC-aware
+(`datetime.now(timezone.utc).isoformat()`) — beide Formate sind NICHT direkt
+als String vergleichbar, `_db_newer_than_json_entry` parst deshalb über
+`datetime.fromisoformat()` und hängt an den naiven JSON-`ts` per
+`.astimezone()` die lokale Zeitzone an, bevor verglichen wird. Fehlt/ist der
+JSON-`ts` nicht parsbar, wird konservativ NICHT übersprungen (lieber einmal
+zu oft neu bewerten als für immer eine veraltete Entscheidung stehen
+lassen). Kein DB-Datensatz für den Song → nichts Neues → Skip bleibt
+gültig. Die zusätzliche Abfrage ist ein einzelnes, über `song_id` indiziertes
+`MAX(datum)` je übersprungenem Track — der eigentliche Performance-Vorteil
+des JSON-Cache-Skips für tatsächlich unveränderte Songs bleibt erhalten.
+
+Gegen die echte Produktions-DB verifiziert: der ZZ-Top-Fall wird jetzt
+korrekt als "neu zu bewerten" erkannt (`latest_result_timestamp` liefert
+2026-07-17T01:47 gegenüber dem JSON-`ts` vom 2026-07-11). 3 neue Tests in
+`test_cache_store.py`, 3 neue Tests in `test_write_lrc.py`
+(`TestWriteAllDbNeuerAlsJsonEintrag`: neuerer DB-Eintrag erzwingt
+Neubewertung, unveränderte DB bleibt beim Skip, fehlender `ts` erzwingt
+konservativ Neubewertung). Volle Suite: 459/459 grün. `ruff check`/
+`ruff format` sauber. `lyrics_core.__version__` auf `1.13.4` erhöht
+(Bugfix, siehe CLAUDE.md-Versionierungsregel).
+
+Bewusst NICHT Teil dieses Fixes (siehe Diskussion mit dem Nutzer): ein
+manueller "Plausibilitätsprüfung"-Modus, der eine bereits akzeptierte `.lrc`
+auch OHNE neue DB-Daten neu bewerten kann (z.B. weil inzwischen ein besseres
+Whisper-Modell zur Verfügung steht) — auf die To-do-Liste vertagt, siehe
+Punkt 3 oben.
+
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 
 **Auslöser:** Neben der eigenen Cache-DB gibt es jetzt einen lokalen Abzug der

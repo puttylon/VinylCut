@@ -254,6 +254,48 @@ def test_transcript_modell_ist_reine_info_spalte(tmp_path):
     assert anzahl == 1
 
 
+def test_latest_result_timestamp_ohne_song_gibt_none(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    assert cs.latest_result_timestamp(conn, "nobody", "nothing") is None
+
+
+def test_latest_result_timestamp_song_ohne_zeilen_gibt_none(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs._get_or_create_song(conn, "artist a", "title a", None)
+    conn.commit()
+    assert cs.latest_result_timestamp(conn, "artist a", "title a") is None
+
+
+def test_latest_result_timestamp_nimmt_juengsten_ergebnisse_eintrag(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs.put_provider(conn, "lrclib", "artist a", "title a", "treffer", "[00:01.00]x")
+    datum_lrclib = conn.execute(
+        "SELECT datum FROM ergebnisse WHERE quelle='lrclib'"
+    ).fetchone()[0]
+    # kuenstlich ein aelteres Datum fuer genius setzen, um sicherzustellen,
+    # dass der juengere (lrclib-)Zeitstempel gewinnt, nicht der zuletzt
+    # geschriebene.
+    cs.put_provider(conn, "genius", "artist a", "title a", "nichts", None)
+    conn.execute(
+        "UPDATE ergebnisse SET datum=? WHERE quelle='genius'",
+        ("2000-01-01T00:00:00+00:00",),
+    )
+    conn.commit()
+
+    assert cs.latest_result_timestamp(conn, "artist a", "title a") == datum_lrclib
+
+
+def test_latest_result_timestamp_beruecksichtigt_transkripte(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs.put_provider(conn, "lrclib", "artist a", "title a", "treffer", "[00:01.00]x")
+    conn.execute("UPDATE ergebnisse SET datum=?", ("2000-01-01T00:00:00+00:00",))
+    cs.put_transcript(conn, "artist a", "title a", "text", 0.1, -0.5, "medium")
+    conn.commit()
+
+    transkript_datum = conn.execute("SELECT datum FROM transkripte").fetchone()[0]
+    assert cs.latest_result_timestamp(conn, "artist a", "title a") == transkript_datum
+
+
 def test_normalize_key():
     assert cs.normalize_key("  The Beatles  ") == "the beatles"
     assert cs.normalize_key("HEY JUDE") == "hey jude"

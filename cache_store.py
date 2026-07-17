@@ -247,6 +247,43 @@ def _get_or_create_song(
     return row[0]
 
 
+def latest_result_timestamp(
+    conn: sqlite3.Connection, artist_key: str, titel_key: str
+) -> str | None:
+    """Jüngster `datum`-Zeitstempel (ISO-8601, UTC-aware, siehe _now_iso) über
+    alle `ergebnisse`- und `transkripte`-Zeilen dieses Songs, oder None wenn
+    der Song nicht existiert oder noch keine Zeile hat.
+
+    Dient write_lrc.py als "hat sich seit dem JSON-Ordner-Cache-Eintrag etwas
+    in der DB getan"-Check (siehe ROADMAP.md, Songtexte-Pipeline-Umbau,
+    Nachtrag "Kein Bindeglied zwischen JSON-Cache und SQLite-Cache"): ohne
+    ihn würde Phase "schreiben" frische Arbeit aus Phase "bewerten"/
+    "nachholen" nie sehen, solange der JSON-Eintrag selbst noch als "gültig"
+    gilt (siehe _cache_entry_valid in lyrics_core.py -- reiner Versions-
+    Check, kein TTL).
+    """
+    row = conn.execute(
+        "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+        (artist_key, titel_key),
+    ).fetchone()
+    if row is None:
+        return None
+    song_id = row[0]
+
+    stamps: list[str] = []
+    r = conn.execute(
+        "SELECT MAX(datum) FROM ergebnisse WHERE song_id=?", (song_id,)
+    ).fetchone()
+    if r and r[0]:
+        stamps.append(r[0])
+    r = conn.execute(
+        "SELECT datum FROM transkripte WHERE song_id=?", (song_id,)
+    ).fetchone()
+    if r and r[0]:
+        stamps.append(r[0])
+    return max(stamps) if stamps else None
+
+
 def get_provider(
     conn: sqlite3.Connection,
     provider: str,

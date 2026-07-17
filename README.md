@@ -272,7 +272,7 @@ Ein Skip-Genre-Track (Hörbuch/Hörspiel/Instrumental/…) hat schon in Phase `a
 
 | Feld | Werte | Bedeutung |
 |------|-------|-----------|
-| `v` | z.B. `"1.13.3"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
+| `v` | z.B. `"1.13.4"` | `lyrics_core.__version__` zum Zeitpunkt des Schreibens |
 | `r` | `"ok"` / `"nf"` | Ergebnis: LRC vorhanden / nicht gefunden |
 | `outcome` | `"write"` / `"none"` / `"delete"` | Datei-Aktion: geschrieben / nichts / gelöscht |
 | `providers` | `0`–`4` | Anzahl Provider mit Treffer |
@@ -289,13 +289,13 @@ Beispiel-Einträge:
 
 ```json
 "01 Song.flac": {
-  "v": "1.13.3", "r": "ok", "outcome": "write",
+  "v": "1.13.4", "r": "ok", "outcome": "write",
   "providers": 2, "provider_names": ["lrclib", "genius"],
   "method": "whisper-large-v3", "no_vocal": false,
   "score": 0.62, "words": 265, "language": "de", "ts": "2026-07-09T09:28:20"
 },
 "02 Instrumental.flac": {
-  "v": "1.13.3", "r": "nf", "outcome": "delete",
+  "v": "1.13.4", "r": "nf", "outcome": "delete",
   "providers": 0, "provider_names": [],
   "method": null, "no_vocal": false,
   "score": null, "reason": "kein-provider", "words": null, "language": null, "ts": "2026-07-09T09:28:25"
@@ -317,6 +317,15 @@ python3 lrc_analyse.py /Musik/
 ```
 
 Ausgabe: Trefferquote, verwendete Methoden, Ablehnungsgründe, Score-Verteilung, Risiko-Tracks (niedriger Score oder nur ein Anbieter) und Tracks, die ohne Whisper-Verifikation gespeichert wurden.
+
+**`db_analyse.py`** — Gegenstück zu `lrc_analyse.py`: wertet nicht den JSON-Ordner-Cache aus, sondern direkt die SQLite-Cache-DB (`fetch_songtext_cache.db`):
+
+```bash
+python3 db_analyse.py
+python3 db_analyse.py --db /pfad/zu/anderer.db
+```
+
+Ausgabe: Treffer-/Nichts-/Fehlschlag-Quote je Anbieter inkl. Fehlschlag-Gründen, Songs ganz ohne Provider-Treffer, Songs mit allen 4 Providern fehlgeschlagen (Kandidaten für `--phase nachholen`), Whisper-Transkript-Abdeckung + Modell-Aufschlüsselung, Provider-Aktivität der letzten 24h/7 Tage.
 
 **`whisper_analyse.py`** — zeigt speziell, ob und warum Whisper pro Track gelaufen ist (unabhängig von der Skriptversion des Cache-Eintrags):
 

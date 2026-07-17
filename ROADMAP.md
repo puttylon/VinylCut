@@ -1,5 +1,93 @@
 # VinylCut Roadmap
 
+## ⧗ Offen — Aufräumen: welche Skripte werden noch gebraucht, welche können weg
+
+**Ziel:** Projekt schlank halten — alles, was nicht mehr gebraucht wird, weg.
+
+1. **Skript-Inventur:** Für jedes `.py`-Skript im Projektordner klären, ob es
+   noch aktiv gebraucht wird (von `cut.py`/`songtext_pipeline.py` aufgerufen,
+   eigenständiges Diagnose-/Analyse-Werkzeug mit echtem Nutzen) oder obsolet
+   ist (durch den Songtexte-Pipeline-Umbau ersetzt, einmaliges
+   Migrations-Skript das schon gelaufen ist, o.ä.). Kandidaten, die näher zu
+   prüfen sind: `normalize_cache.py` (einmalige NFC-Bereinigung — noch
+   nötig oder längst durchgelaufen?), `lrc_recheck.py` (Überschneidung mit
+   `--nachholen`?), `compare_whisper_models.py` (einmaliger
+   Modellvergleich, Ergebnis liegt bereits in
+   `whisper_modellvergleich_ergebnis.md` vor). Ergebnis: klare Weg/Bleibt-
+   Liste, unbenötigte Skripte (+ zugehörige Tests) löschen, README.md
+   „Skripte"-Abschnitt danach aktualisieren.
+2. **✓ Vergleich alt vs. neu (Funktionalität + Stabilität) — erledigt.** Das
+   alte, monolithische `fetch_songtext.py` (letzter Stand vor Löschung:
+   Commit `841e7b1`, danach gelöscht in `45b230f`) wurde der neuen Pipeline
+   (`songtext_pipeline.py` + `scan_songs.py` + `fetch_providers.py` +
+   `evaluate_lyrics.py` + `write_lrc.py` + `lyrics_core.py`)
+   gegenübergestellt. Kern-Algorithmen (Konsens/Whisper/Heuristik,
+   Rate-Limit-Backoff, `_query_provider`, Provider-Cache-Logik) sind
+   unverändert übernommen. 10 Einzelbefunde insgesamt, dem Nutzer in
+   einfacher Sprache vorgelegt; daraus ausgewählt für Weiterbearbeitung:
+   Punkte 3–5 unten. Nebenbefund: Der Hinweis-Absatz weiter unten in diesem
+   Dokument („Hinweis für eine spätere, hier noch nicht getroffene
+   Entscheidung … was mit fetch_songtext.py selbst passiert") ist veraltet
+   — die Löschung ist längst passiert.
+3. **Absturz statt sauberer Meldung, wenn `syncedlyrics` fehlt (z.B.
+   falsches venv aktiv).** Alt: `fetch_songtext.py` (Stand `841e7b1`, Zeile
+   1359-1367/2367-2371) fing `FileNotFoundError` ab, räumte bereits
+   geschriebene Temp-`.lrc`-Dateien anderer Anbieter auf und beendete den
+   Lauf mit klarer Meldung „syncedlyrics nicht gefunden — Abbruch.“. Neu:
+   `fetch_providers.fetch_all()` (`fetch_providers.py:243-257`) hat kein
+   `try/except` um `future.result()` — der ganze Lauf crasht mit rohem
+   Traceback aus einem Worker-Thread, Temp-Dateien bleiben liegen. Fix:
+   dieselbe `FileNotFoundError`-Behandlung wie im Altskript in
+   `fetch_providers.fetch_all()` nachziehen (inkl. Aufräumen der
+   Temp-`.lrc`-Dateien).
+4. **Ordner-Sperre schützt nur noch das Schreiben, nicht mehr Abfragen/
+   Whisper-Prüfung — Risiko bei zwei gleichzeitigen Läufen.** Alt: Die
+   Sperre (`_try_claim_folder`/`_release_folder`) umschloss im
+   monolithischen Skript die GESAMTE Verarbeitung eines Ordners. Neu: Sperre
+   sitzt nur noch in `write_lrc.py:90-101` (Phase „schreiben“) —
+   `scan_songs.py`, `fetch_providers.py`, `evaluate_lyrics.py` haben keine
+   Sperr-Logik. Laufen zwei `songtext_pipeline.py`-Instanzen über
+   überlappende Ordner, fragen beide unkoordiniert dieselben Anbieter live
+   ab und transkribieren denselben Song doppelt mit Whisper (mehrminütige
+   CPU-Last, doppelter Rate-Limit-Verbrauch). Fix-Idee (noch nicht
+   abgesegnet): Sperre schon beim Betreten eines Ordners in
+   `songtext_pipeline.py`s Datei-Schleife setzen, nicht erst in
+   `write_lrc.py`.
+5. **`-V`/`--version`-Flag fehlt in `songtext_pipeline.py`.** Alt:
+   `fetch_songtext.py` (Stand `841e7b1`, Zeile 2132-2134) hatte
+   `-V, --version`. Neu: `songtext_pipeline.py` kennt kein Version-Flag,
+   obwohl `lyrics_core.__version__` (aktuell `1.13.15`) intern weiterhin für
+   Cache-Einträge existiert. Fix: `-V`/`--version` in
+   `songtext_pipeline.py`s Argparse ergänzen, gibt `lyrics_core.__version__`
+   aus.
+6. **„Whisper transkribiert...“-Statuszeile zeigt nicht, WARUM Whisper für
+   diesen Track überhaupt läuft — für den Nutzer nicht nachvollziehbar.**
+   Live-Beobachtung des Nutzers (Lauf gegen echte Bibliothek): Zeile
+   `01 Das Meer.mp3  Whisper transkribiert...` erscheint ohne jeden Hinweis,
+   wieso kein Konsens/Cache-Treffer gereicht hat. Ursache im Code:
+   `_print_status(f"  {flac_path.name}  Whisper transkribiert...")`
+   (`lyrics_core.py:1342`) ist ein reiner Fest-Text ohne Kontext. Die
+   aufrufende Stelle in `evaluate_lyrics.py` (rund um Zeile 166:
+   `lyrics_core._provider_consensus(candidates)`) kennt zu diesem Zeitpunkt
+   bereits Provider-Anzahl und ggf. den Konsens-Jaccard-Wert, der unter der
+   40%-Schwelle lag — dieser Grund wird aber nicht bis in die Statuszeile
+   durchgereicht. Fix-Idee (noch nicht abgesegnet): Grund (z.B.
+   „2/4 Provider, Konsens 32% < 40%“ oder „nur 1/4 Provider, kein Konsens
+   möglich“) in die Statuszeile aufnehmen. Terminal-Änderung — laut
+   CLAUDE.md vor Abschluss live im laufenden Programm bestätigen, `pytest`
+   allein reicht nicht.
+
+**Zurückgestellt (nicht auf TODO gepackt, nur zur Erinnerung):** Befund 2
+(fehlgeschlagene Anbieter werden im Normal-Lauf nicht mehr automatisch
+nachgeholt, `--nachholen` nötig), Befund 4/5 (`--retry-missing` je
+Einzelprovider und mehrere alte Flags wie `--cache-only`/`--no-whisper`/
+`--fast` entfallen ersatzlos), Befund 7 (Alt-Songs mit altem Whisper-Modell
+`small` werden nie automatisch mit dem neuen, sprachabhängigen Modell
+nachgeprüft) — vom Nutzer geprüft, aber bewusst nicht in Bearbeitung
+genommen.
+
+---
+
 ## ✓ Songtexte-Pipeline-Umbau — Steuer-Skript + Phasen-Skripte (alle 5 Meilensteine erledigt)
 
 **Auslöser:** Nach dem lrclib-Dump-Bugfix (v1.13.1) und dem Fund, dass der

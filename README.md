@@ -53,7 +53,7 @@ python3 assemble.py "Artist - Album-raw.flac" --preview 12
 | 1 | Seitenerkennung, Anzahl Seiten bestätigen, Trim- und Grenzpunkte interaktiv setzen |
 | 2 | Crossfade-Vorschau je Seitengrenze, A/B feinjustieren |
 | 3 | Segmente schneiden und mit Crossfade zusammenfügen → `_prepared.flac` |
-| 4 | DC-Offset entfernen, optionaler Kanalausgleich, Peak-Normalisierung auf -0,1 dBFS → Ausgabedatei |
+| 4 | DC-Offset entfernen, optionaler Kanalausgleich, Peak-Normalisierung auf -1 dBFS → Ausgabedatei |
 
 **Steuerung Phase 1:**
 
@@ -369,8 +369,8 @@ pip install faster-whisper   # optional — Whisper-Verifikation
 `requirements.txt` enthält: `pytest`, `rich`
 
 **Systemprogramme:**
-- `ffprobe` / `ffplay` / `ffmpeg` — Analyse, Playback, Crossfade, Normton
-- `sox` — Schneiden, Normalisierung, DC-Offset, Kanalausgleich
+- `ffprobe` / `ffplay` / `ffmpeg` — Analyse, Playback, Crossfade, Normton, Normalisierung, DC-Offset, Kanalausgleich
+- `sox` — Schneiden (`cut.py`), Pegelmessung für Kanalausgleich (`assemble.py`)
 - `metaflac` — FLAC-Tagging und Cover-Einbettung
 
 **Tokens:**

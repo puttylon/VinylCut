@@ -2233,6 +2233,20 @@ Tests für `get_segments`, automatische Umbenennung der Ausgabedatei, ROADMAP ak
 ## ✓ v1.0 — Stabile Version
 README vollständig nachgezogen, Gesamtworkflow dokumentiert.
 
+## ✓ v1.1.4 — Zurück zu reiner Peak-Normalisierung auf -1 dBFS
+
+`normalize()` nutzte seit v1.1.2 ffmpeg `loudnorm` (Lautheitsangleichung auf
+-23 LUFS + True-Peak-Limit -1.0 dBTP). Auf Nutzerwunsch zurückgebaut auf
+reine Peak-Normalisierung wie vor v1.1.1 (damals sox, jetzt ffmpeg): Pass 1
+misst mit `volumedetect` den Spitzenpegel nach DC-Offset-Filter und
+optionalem Kanalausgleich (`max_volume` aus stderr geparst), Pass 2 wendet
+den nötigen Gain über `volume=XdB` an, sodass der Spitzenpegel exakt bei
+`PEAK_NORMALIZE_TARGET_DBFS = -1.0` dBFS landet. Kanalausgleich (optionaler
+`pan`-Filter vor der Messung) bleibt unverändert erhalten. Kein LUFS-Ziel
+mehr, keine Lautheitsangleichung — nur noch Spitzenpegel. Verifiziert an
+einer echten Datei: `ffmpeg volumedetect` nach der Normalisierung bestätigt
+`max_volume: -1.0 dB`, `ffprobe` bestätigt weiterhin 16 Bit (siehe v1.1.3).
+
 ## ✓ v1.1.3 — Bugfix: `_final.flac` doppelt so groß wie nötig (24 statt 16 Bit)
 
 `normalize()` schrieb die Ausgabe ohne festes `-sample_fmt` — der `loudnorm`-

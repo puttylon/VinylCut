@@ -2233,6 +2233,20 @@ Tests für `get_segments`, automatische Umbenennung der Ausgabedatei, ROADMAP ak
 ## ✓ v1.0 — Stabile Version
 README vollständig nachgezogen, Gesamtworkflow dokumentiert.
 
+## ✓ v1.1.3 — Bugfix: `_final.flac` doppelt so groß wie nötig (24 statt 16 Bit)
+
+`normalize()` schrieb die Ausgabe ohne festes `-sample_fmt` — der `loudnorm`-
+Filter rechnet intern in 32-Bit-Float, und ffmpegs FLAC-Encoder wählte ohne
+Vorgabe eigenständig 24 Bit statt die ursprüngliche 16-Bit-Tiefe der Quelle
+beizubehalten. Die zusätzlichen 8 Bit sind bei einer 16-Bit-Quelle praktisch
+Rauschen und kaum komprimierbar — die Datei wurde dadurch fast doppelt so
+groß wie `_prepared.flac` (kein Klangunterschied, nur Speicherplatz-
+Verschwendung). Fund: reale Datei (Kali Uchis – Orquideas Parte 2) über
+`ffprobe` geprüft, `bits_per_raw_sample` 16 → 24 zwischen `_prepared.flac`
+und `_final.flac` bestätigt. Fix: `-sample_fmt s16` zum finalen ffmpeg-Aufruf
+in `normalize()` ergänzt — verifiziert an derselben Datei, Ausgabe jetzt
+wieder 16 Bit, Größe entsprechend wieder im erwarteten Bereich.
+
 ## ✓ v1.1.2 — Normalisierung auf ffmpeg loudnorm (echtes dBTP)
 `normalize()` verwendet jetzt ffmpeg loudnorm im 2-Pass-Verfahren statt sox `norm`.
 Pass 1 misst Pegel, Pass 2 wendet linearen Gain mit TP=-1.0 dBTP an.

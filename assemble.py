@@ -17,7 +17,7 @@ from assemble_ui import (
 )
 from cut_ui import fmt_dur, live_input
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 console = Console()
 
@@ -395,6 +395,8 @@ def normalize(
             str(in_path),
             "-af",
             apply_af,
+            "-sample_fmt",
+            "s16",
             str(out_path),
         ],
         check=True,

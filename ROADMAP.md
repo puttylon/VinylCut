@@ -440,7 +440,8 @@ werden davon nicht beeinträchtigt, ein Song mit allen 4 Anbietern als
 Fehlschlag wird komplett ohne Live-Aufruf übersprungen, und als Kehrseite:
 `retry_missing()` fragt genau so einen gecachten Fehlschlag weiterhin ab.
 `pytest test_fetch_providers.py`: 21/21 grün. Volle Suite: 445/445 grün.
-`ruff check`/`ruff format` sauber.
+`ruff check`/`ruff format` sauber. `lyrics_core.__version__` auf `1.13.3`
+erhöht (Bugfix, siehe CLAUDE.md-Versionierungsregel).
 
 ## ✓ fetch_songtext.py v1.13.0 — lokaler LRCLib-Datenbank-Abzug vor der Live-Abfrage
 

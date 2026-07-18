@@ -1,5 +1,14 @@
 # VinylCut Roadmap
 
+## ✓ Bugfix: lrclib-Dump-Lookup fand Songs mit Akzent-Buchstaben nicht
+
+LRCLib transliteriert Akzent-Buchstaben zu ASCII (João -> joao, Coração ->
+coracao) -- `_strip_punctuation_for_lrclib_dump()` machte das nicht mit.
+Betraf u.a. "The Girl From Ipanema" und "Para Machucar Meu Coração" (Stan
+Getz & João Gilberto). Fix über neue zentrale Funktion `library.
+to_ascii_fold()` (Paket `anyascii`, ISC-Lizenz, deckt mehr Zeichen ab als
+das ältere GPL-lizenzierte `Unidecode`).
+
 ## ✓ Redundanz-Aufräumen Runde 3: JSON-Skip-Prädikat + whisper_analyse.py entfernt + ffprobe-Dauer
 
 **Auslöser:** Letzter noch offener Punkt aus Runde 2 ("wichtigster Fund,

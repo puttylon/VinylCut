@@ -34,6 +34,8 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import library
+
 DEFAULT_TTL_DAYS = 30
 
 _TRANSKRIPTE_SCHEMA = """
@@ -416,9 +418,10 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _strip_punctuation_for_lrclib_dump(text: str) -> str:
-    """Entfernt Satzzeichen und kollabiert Mehrfach-Leerzeichen -- NUR für den
-    Abgleich gegen den externen LRCLib-Datenbank-Abzug (siehe
-    lookup_lrclib_dump), NICHT Teil von normalize_key() selbst.
+    """Entfernt Satzzeichen, transliteriert Akzent-Buchstaben zu ASCII und
+    kollabiert Mehrfach-Leerzeichen -- NUR für den Abgleich gegen den
+    externen LRCLib-Datenbank-Abzug (siehe lookup_lrclib_dump), NICHT Teil
+    von normalize_key() selbst.
 
     Root Cause (gegen den echten lokalen Dump verifiziert, nicht geraten):
     LRCLib speichert `name_lower`/`artist_name_lower` bereits ohne
@@ -430,20 +433,20 @@ def _strip_punctuation_for_lrclib_dump(text: str) -> str:
     unangetastet -- ein Song mit Apostroph/Klammern/Komma/Bindestrich im
     Titel fand im Dump deshalb keinen Treffer, obwohl er dort vorhanden war.
 
-    Bekannter, NICHT behobener Rest-Fall: mindestens ein Beleg zeigte auch
-    eine Diakritika-Umschrift im Dump (z.B. "Eivør Pálsdóttir" ->
-    "eivor palsdottir", ø->o, á->a, ö->o). Das wird hier bewusst NICHT
-    nachgebildet -- ein einzelner Beleg reicht nicht, um den zugrunde
-    liegenden Algorithmus (z.B. vollständige Transliteration vs. nur
-    bestimmte Zeichen) sicher zu kennen. Songs mit akzentuierten Buchstaben
-    können deshalb weiterhin am Dump vorbeigehen und fallen dann auf die
-    normale Live-Abfrage zurück -- kein Datenverlust, nur ein verpasster
-    Beschleuniger.
+    LRCLib transliteriert außerdem Akzent-Buchstaben zu ASCII, z.B. "João
+    Gilberto" -> "joao gilberto", "Coração" -> "coracao", "Eivør Pálsdóttir"
+    -> "eivor palsdottir". Einfaches Unicode-NFD-Zerlegen+Filtern reicht
+    dafür NICHT (ø hat keine NFD-Zerlegung) -- LRCLib nutzt offenbar eine
+    echte Transliterations-Tabelle. Wir bilden das über `library.
+    to_ascii_fold()` (Paket `anyascii`) nach, das an allen drei Belegen
+    exakt passt.
 
-    Regel: alles außer Wortzeichen (\\w, Unicode-bewusst) und Leerraum
-    entfernen, dann Mehrfach-Leerzeichen zu einem kollabieren und trimmen.
+    Regel: erst ASCII-Fold, dann alles außer Wortzeichen (\\w, Unicode-
+    bewusst) und Leerraum entfernen, dann Mehrfach-Leerzeichen zu einem
+    kollabieren und trimmen.
     """
-    return _WHITESPACE_RE.sub(" ", _PUNCTUATION_RE.sub("", text)).strip()
+    folded = library.to_ascii_fold(text)
+    return _WHITESPACE_RE.sub(" ", _PUNCTUATION_RE.sub("", folded)).strip()
 
 
 def lookup_lrclib_dump(

@@ -15,6 +15,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import anyascii
+
 _MIN_PREVIEW_SEC = 2.0  # Untergrenze für "p<Sek>" (Bedienfehler-Schutz)
 _MAX_PREVIEW_SEC = 30.0  # Obergrenze für "p<Sek>"
 
@@ -96,6 +98,14 @@ def reject_reason_from_cache_entry(entry: dict) -> str:
     if words == 0 and score == 0.0:
         return "kein-vokal"
     return "unter-schwelle"
+
+
+def to_ascii_fold(text: str) -> str:
+    """Transliteriert Akzent-/Nicht-ASCII-Buchstaben zu ASCII (João -> Joao,
+    Coração -> Coracao, ø -> o) via `anyascii`. Wird u.a. von cache_store.
+    lookup_lrclib_dump() gebraucht, weil LRCLib genau so transliteriert
+    (belegt an mehreren Songs, siehe ROADMAP.md)."""
+    return anyascii.anyascii(text)
 
 
 def get_audio_duration(audio_path: Path) -> float:

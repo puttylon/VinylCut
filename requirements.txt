@@ -2,4 +2,5 @@ pytest
 rich
 mutagen
 langdetect
+anyascii
 # faster-whisper       # optional — verbessert LRC-Treffsicherheit via Whisper

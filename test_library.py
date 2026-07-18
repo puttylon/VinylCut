@@ -8,6 +8,7 @@ from library import (
     parse_offset,
     parse_preview_duration,
     reject_reason_from_cache_entry,
+    to_ascii_fold,
 )
 
 
@@ -145,6 +146,22 @@ class TestRejectReasonFromCacheEntry:
             reject_reason_from_cache_entry({"providers": 1, "score": 0.1, "words": 5})
             == "unter-schwelle"
         )
+
+
+class TestToAsciiFold:
+    """Gegen den echten LRCLib-Dump verifizierte Belege (siehe cache_store.
+    _strip_punctuation_for_lrclib_dump)."""
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("João Gilberto", "Joao Gilberto"),
+            ("Coração", "Coracao"),
+            ("Eivør Pálsdóttir", "Eivor Palsdottir"),
+        ],
+    )
+    def test_bekannte_belege_aus_dem_echten_dump(self, text, expected):
+        assert to_ascii_fold(text) == expected
 
 
 class TestGetAudioDuration:

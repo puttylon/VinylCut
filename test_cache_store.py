@@ -649,6 +649,29 @@ class TestLookupLrclibDump:
         conn = _make_dump_db(tmp_path)
         assert cs.lookup_lrclib_dump(conn, "bee gees", "stayin' alive") is None
 
+    # --- Diakritika-Transliteration (Regressionstest, siehe ROADMAP.md) ----
+    #
+    # Root Cause (gegen den echten lokalen Dump verifiziert): LRCLib
+    # transliteriert Akzent-Buchstaben zu ASCII, z.B. "João Gilberto" ->
+    # "joao gilberto", "Coração" -> "coracao". Songs wie "The Girl From
+    # Ipanema" oder "Para Machucar Meu Coração" (Stan Getz & João Gilberto)
+    # fanden im Dump deshalb keinen Treffer, obwohl sie dort vorhanden waren.
+
+    def test_diakritika_im_kuenstler_und_titel_finden_dump_ohne_diakritika(
+        self, tmp_path
+    ):
+        conn = _make_dump_db(tmp_path)
+        _insert_track(
+            conn,
+            "stan getz joao gilberto",
+            "para machucar meu coracao",
+            synced="[00:01.00]text",
+        )
+        ergebnis = cs.lookup_lrclib_dump(
+            conn, "stan getz & joão gilberto", "para machucar meu coração"
+        )
+        assert ergebnis == {"status": "treffer", "content": "[00:01.00]text"}
+
 
 class TestStripPunctuationForLrclibDump:
     """_strip_punctuation_for_lrclib_dump: die interne Zusatz-Normalisierung
@@ -672,13 +695,18 @@ class TestStripPunctuationForLrclibDump:
     def test_bekannte_belege_aus_dem_echten_dump(self, text, expected):
         assert cs._strip_punctuation_for_lrclib_dump(text) == expected
 
-    def test_diakritika_bleiben_unangetastet(self):
-        """Bewusst KEINE Diakritika-Transliteration (siehe Docstring: nur 1
-        Beleg gesehen, nicht genug um den Algorithmus sicher nachzubilden)."""
-        assert cs._strip_punctuation_for_lrclib_dump("café") == "café"
+    def test_diakritika_werden_zu_ascii_transliteriert(self):
+        """LRCLib transliteriert Akzent-Buchstaben zu ASCII (siehe Docstring:
+        João -> joao, Coração -> coracao, Eivør Pálsdóttir -> eivor
+        palsdottir -- gegen den echten Dump verifiziert)."""
+        assert cs._strip_punctuation_for_lrclib_dump("café") == "cafe"
         assert cs._strip_punctuation_for_lrclib_dump("Eivør Pálsdóttir") == (
-            "Eivør Pálsdóttir"
+            "Eivor Palsdottir"
         )
+        assert cs._strip_punctuation_for_lrclib_dump("João Gilberto") == (
+            "Joao Gilberto"
+        )
+        assert cs._strip_punctuation_for_lrclib_dump("Coração") == "Coracao"
 
     def test_bereits_sauberer_text_bleibt_unveraendert(self):
         assert cs._strip_punctuation_for_lrclib_dump("bohemian rhapsody") == (

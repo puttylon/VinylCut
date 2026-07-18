@@ -12,51 +12,14 @@ import argparse
 import json
 from pathlib import Path
 
+from library import method_from_cache_entry as _method
+from library import reject_reason_from_cache_entry as _reject_reason
+
 CACHE_FILENAME = ".fetch_songtext.json"
 
 
-# ── Legacy-Kompatibilität (identisch mit lrc_analyse.py) ─────────────────────
-
-def _method(entry: dict) -> str:
-    method = entry.get("method")
-    if method:
-        if method == "konsens" and entry.get("no_vocal"):
-            return "konsens-kein-vokal"
-        return method
-    # Legacy pre-v1.5.0
-    if entry.get("consensus") and entry.get("no_vocal"):
-        return "konsens-kein-vokal"
-    if entry.get("consensus"):
-        return "konsens"
-    if entry.get("fallback"):
-        return "konsens-kein-vokal"
-    model = entry.get("model")
-    if model == "small":
-        return "whisper-small"
-    if model == "base":
-        return "whisper-base"
-    if entry.get("score") is not None:
-        return "whisper-base"
-    return "heuristik"
-
-
-def _reject_reason(entry: dict) -> str:
-    reason = entry.get("reason")
-    if reason:
-        return reason
-    # Legacy pre-v1.5.0
-    if entry.get("providers", 0) == 0:
-        return "kein-provider"
-    words = entry.get("words") or 0
-    score = entry.get("score")
-    if score is None:
-        return "kein-whisper"
-    if words == 0 and score == 0.0:
-        return "kein-vokal"
-    return "unter-schwelle"
-
-
 # ── Kategorisierung ───────────────────────────────────────────────────────────
+
 
 def _categorise(entry: dict) -> str:
     """Gibt eine von 8 Kategorien zurück."""
@@ -73,13 +36,16 @@ def _categorise(entry: dict) -> str:
             return "whisper-small-ok"
         if m == "heuristik":
             return "heuristik"
-        return "whisper-base-ok"   # whisper-base oder unbekanntes ok
+        return "whisper-base-ok"  # whisper-base oder unbekanntes ok
     if r == "nf":
-        return _reject_reason(entry)  # kein-provider / kein-vokal / unter-schwelle / kein-whisper
+        return _reject_reason(
+            entry
+        )  # kein-provider / kein-vokal / unter-schwelle / kein-whisper
     return "unbekannt"
 
 
 # ── Auswertung ────────────────────────────────────────────────────────────────
+
 
 def analyse(root: Path) -> None:
     cache_files = sorted(root.rglob(CACHE_FILENAME))
@@ -118,7 +84,13 @@ def analyse(root: Path) -> None:
 
     whisper_ran = sum(
         counts.get(k, 0)
-        for k in ("whisper-base-ok", "whisper-small-ok", "kein-vokal", "unter-schwelle", "kein-whisper")
+        for k in (
+            "whisper-base-ok",
+            "whisper-small-ok",
+            "kein-vokal",
+            "unter-schwelle",
+            "kein-whisper",
+        )
     )
     no_whisper = total - whisper_ran
 
@@ -126,20 +98,20 @@ def analyse(root: Path) -> None:
     print(f"Alben: {len(albums)}   Einträge gesamt: {total}\n")
 
     print(f"{'OHNE WHISPER':<38}{no_whisper:>6}  {pct(no_whisper)}")
-    row("Provider-Konsens",             "konsens")
+    row("Provider-Konsens", "konsens")
     row("Konsens (kein Vokal erkannt)", "konsens-kein-vokal")
-    row("Genre übersprungen",           "genre-skip")
-    row("Kein Provider gefunden",       "kein-provider")
-    row("Heuristik (kein Whisper)",     "heuristik")
+    row("Genre übersprungen", "genre-skip")
+    row("Kein Provider gefunden", "kein-provider")
+    row("Heuristik (kein Whisper)", "heuristik")
     row("--no-whisper: Dauer passt nicht", "dauer-abweichung")
 
     print()
     print(f"{'MIT WHISPER':<38}{whisper_ran:>6}  {pct(whisper_ran)}")
-    row("Akzeptiert via Whisper base",  "whisper-base-ok")
+    row("Akzeptiert via Whisper base", "whisper-base-ok")
     row("Akzeptiert via Whisper small", "whisper-small-ok")
-    row("Abgelehnt: kein Vokal erkannt","kein-vokal")
-    row("Abgelehnt: unter Schwelle",    "unter-schwelle")
-    row("Abgelehnt: kein Whisper verf.","kein-whisper")
+    row("Abgelehnt: kein Vokal erkannt", "kein-vokal")
+    row("Abgelehnt: unter Schwelle", "unter-schwelle")
+    row("Abgelehnt: kein Whisper verf.", "kein-whisper")
 
     if counts.get("unbekannt"):
         print()
@@ -149,8 +121,12 @@ def analyse(root: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("path", nargs="?", default=".", help="Wurzelverzeichnis (Standard: .)")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "path", nargs="?", default=".", help="Wurzelverzeichnis (Standard: .)"
+    )
     args = parser.parse_args()
     analyse(Path(args.path).expanduser().resolve())
 

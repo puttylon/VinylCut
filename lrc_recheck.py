@@ -27,28 +27,15 @@ import argparse
 import json
 from pathlib import Path
 
+from library import reject_reason_from_cache_entry as _reject_reason
+
 CACHE_FILENAME = ".fetch_songtext.json"
 
 
-def _reject_reason(entry: dict) -> str:
-    """Bestimmt den Ablehnungsgrund — mit Legacy-Fallback für pre-v1.5.0-Einträge."""
-    reason = entry.get("reason")
-    if reason:
-        return reason
-    # Legacy: Cache-Einträge vor v1.5.0 hatten kein 'reason'-Feld
-    if entry.get("providers", 0) == 0:
-        return "kein-provider"
-    words = entry.get("words") or 0
-    score = entry.get("score")
-    if score is None:
-        return "kein-whisper"
-    if words == 0 and score == 0.0:
-        return "kein-vokal"
-    return "unter-schwelle"
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("path", help="Wurzelverzeichnis zum Durchsuchen")
     parser.add_argument(
         "--apply",
@@ -101,18 +88,24 @@ def main() -> None:
         print("Keine Kandidaten gefunden.")
         return
 
-    print(f"{'VORSCHAU' if not args.apply else 'LÖSCHE'} — {len(candidates)} Kandidaten:\n")
+    print(
+        f"{'VORSCHAU' if not args.apply else 'LÖSCHE'} — {len(candidates)} Kandidaten:\n"
+    )
     by_file: dict[Path, list[str]] = {}
     for cache_file, track, entry in candidates:
         rel = cache_file.parent.relative_to(root)
         score = entry.get("score")
         score_str = f"{score:.0%}" if score is not None else "?"
         reason_str = _reject_reason(entry)
-        print(f"  {rel}/{track}  providers={entry.get('providers')}  score={score_str}  reason={reason_str}")
+        print(
+            f"  {rel}/{track}  providers={entry.get('providers')}  score={score_str}  reason={reason_str}"
+        )
         by_file.setdefault(cache_file, []).append(track)
 
     if not args.apply:
-        print(f"\nMit --apply werden diese {len(candidates)} Einträge aus dem Cache entfernt.")
+        print(
+            f"\nMit --apply werden diese {len(candidates)} Einträge aus dem Cache entfernt."
+        )
         return
 
     removed = 0

@@ -1,5 +1,61 @@
 # VinylCut Roadmap
 
+## ✓ Redundanz-Aufräumen Runde 2: vollständiges Audit über alle 18 Module
+
+**Auslöser:** Nutzer-Vorgabe nach Runde 1: "ich will am Ende ALLE Module auf
+Redundanz geprüft wissen" -- vollständiges Audit über alle 18
+Produktionsmodule (nicht nur cut.py/assemble.py/Songtext-Cluster).
+Umsetzung bewusst in einem separaten Worktree (Nutzer nutzt die Programme
+parallel produktiv).
+
+**Behoben:**
+1. **`_method()`/`_reject_reason()`** waren zwei- bzw. dreifach wortgleich
+   in `lrc_analyse.py`, `lrc_recheck.py`, `whisper_analyse.py` dupliziert
+   (`whisper_analyse.py` kommentierte es sogar selbst: "identisch mit
+   lrc_analyse.py") -- UND hatten in keiner der drei Dateien eigene Tests.
+   Neue Funktionen `library.method_from_cache_entry()`/
+   `library.reject_reason_from_cache_entry()` (Nutzer-Entscheidung: in
+   `library.py`, nicht `lyrics_core.py` -- vertikale Schichtung ist erlaubt,
+   aber diese reine Klassifikationslogik über JSON-Cache-Einträge soll
+   zentral, nicht fachspezifisch verortet sein). 15 neue Tests
+   (`test_library.py`) decken jetzt beide Funktionen erstmals ab.
+2. **`_default_db_path()`** war wortgleich in `cut.py`, `db_analyse.py`,
+   `inspect_song.py`, `songtext_pipeline.py` dupliziert -- `compare_whisper_
+   models.py` zeigte dabei versehentlich auf eine ANDERE Datei
+   (`lyrics_core_cache.db` statt `fetch_songtext_cache.db`, laut Nutzer ein
+   Kopier-Fehler). Neue Funktion `cache_store.default_cache_path()`.
+   **Zusätzlich, auf Nutzerwunsch:** die Produktions-Datenbank selbst
+   umbenannt: `fetch_songtext_cache.db` → `cache.db` (kürzerer, neutraler
+   Name). Live am laufenden `songtext_pipeline.py --recursive`-Prozess
+   verifiziert: `mv` ist für offene Dateihandles unschädlich (`lsof` zeigt
+   die Handles danach unter dem neuen Namen, ohne Unterbrechung).
+   `cut.py`/`db_analyse.py` hatten dafür keine Tests, die die Funktion
+   monkeypatchen -- dort direkt inline durch `cache_store.
+   default_cache_path()` ersetzt. `inspect_song.py`/`songtext_pipeline.py`/
+   `compare_whisper_models.py` haben dagegen Tests, die `_default_db_path`
+   gezielt monkeypatchen -- dort blieb die Funktion als dünner Wrapper
+   erhalten (nur der Rückgabewert kommt jetzt aus `cache_store`).
+   README.md/CACHE_DESIGN.md auf den neuen Dateinamen aktualisiert.
+
+**Zurückgestellt (kein Handlungsbedarf jetzt):**
+- JSON-Cache-Durchlauf-Boilerplate (ähnlich, nicht wortgleich, in
+  `lrc_analyse.py`/`lrc_recheck.py`/`whisper_analyse.py` -- `lrc_analyse.py`
+  liest den Baum dabei sogar 4× neu ein) -- später, gebündelt mit einer
+  eigenen Änderung.
+- ffprobe-Dauer-Ermittlung ähnlich in `assemble.py`/`fetch_metadata.py` --
+  Trade-off (würde `library.py`s bisherige "kein subprocess"-Regel
+  aufweichen), noch nicht entschieden.
+- JSON-Skip-Prädikat weiterhin dreifach kopiert (`cut.py`/`write_lrc.py`/
+  `evaluate_lyrics.py`) -- eigener, separater Schritt (mehrere Aufrufer
+  betroffen, braucht mehr Sorgfalt).
+
+**Sauber bestätigt, keine Funde:** `cache_store.py` selbst, `cut_ui.py`,
+`assemble_ui.py`, `library.py`, `fetch_metadata.py`. Damit sind alle 18
+Produktionsmodule mindestens einmal auf Redundanz geprüft.
+
+506/506 Tests grün, `ruff` sauber. `lyrics_core.__version__` auf `1.13.23`
+erhöht.
+
 ## ✓ Redundanz-Aufräumen Runde 1: cut.py-Duplikate behoben, library.py angelegt
 
 **Auslöser:** Nutzer bemerkte beim Testen des Zeitstempel-Fixes (siehe unten),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analysiert die SQLite-Cache-DB (fetch_songtext_cache.db) und gibt
+"""Analysiert die SQLite-Cache-DB (cache.db) und gibt
 Aggregat-Statistiken aus -- Gegenstück zu lrc_analyse.py, das nur die
 .fetch_songtext.json-Ordner-Caches auswertet (siehe ROADMAP.md, Songtexte-
 Pipeline-Umbau, "Weiterhin offen": bislang gab es keine Statistik-Sicht auf
@@ -19,10 +19,6 @@ from pathlib import Path
 import cache_store
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
-
-
-def _default_db_path() -> Path:
-    return Path(__file__).parent / "fetch_songtext_cache.db"
 
 
 def collect_stats(conn: sqlite3.Connection) -> dict:
@@ -95,7 +91,7 @@ def collect_stats(conn: sqlite3.Connection) -> dict:
 
 def print_stats(stats: dict) -> None:
     songs = stats["songs_gesamt"]
-    print("=== DB-Analyse: fetch_songtext_cache.db ===\n")
+    print("=== DB-Analyse: cache.db ===\n")
     print(f"Songs gesamt: {songs}")
     print(f"Eindeutige Songtexte (dedupliziert): {stats['texte_gesamt']}\n")
 
@@ -155,11 +151,11 @@ def main() -> None:
         type=Path,
         default=None,
         metavar="PFAD",
-        help="Pfad zur Cache-DB (Standard: fetch_songtext_cache.db neben dem Skript)",
+        help="Pfad zur Cache-DB (Standard: cache.db neben dem Skript)",
     )
     args = parser.parse_args()
 
-    db_path = args.db or _default_db_path()
+    db_path = args.db or cache_store.default_cache_path()
     if not db_path.exists():
         print(f"Keine Cache-DB gefunden unter: {db_path}")
         return

@@ -21,7 +21,7 @@ Anbieter-Antworten **und** das von Whisper Gehörte werden gespeichert, damit di
 
 ## Speicherort
 
-Eine einzige **SQLite-Datei** neben dem Code: `fetch_songtext_cache.db` (gitignored, wie die IDF-Tabelle).
+Eine einzige **SQLite-Datei** neben dem Code: `cache.db` (gitignored, wie die IDF-Tabelle).
 SQLite statt JSON, weil die parallelen `--fast`-Läufe **gleichzeitig** schreiben — SQLite (WAL-Modus, `busy_timeout`) verträgt das sicher, JSON würde sich gegenseitig überschreiben. Nachschlagen bei 20.000 × 4 Anbietern ist so ebenfalls schnell.
 
 ## Aufbau: vier normalisierte Tabellen

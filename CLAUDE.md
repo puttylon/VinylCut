@@ -8,6 +8,7 @@ Dieses Dokument dient als Leitfaden für die KI-Unterstützung in diesem Reposit
 - **Direkte Lösungen:** Löse Probleme kompakt und effizient, nutze bevorzugt die Python-Standardbibliothek, es sei denn, externe Pakete bringen massiven Mehrwert.
 - **Evidenz vor Vermutung:** Bei technischer Unsicherheit (Bibliotheksverhalten, Bug-Ursache, Performance-Annahmen) nicht raten oder aus dem Gedächtnis behaupten — nachweisen: Quellcode der Bibliothek lesen, live testen/messen, recherchieren. Keine Zahlen oder Verhaltensweisen als Fakt hinstellen, die nicht durch einen Beleg gedeckt sind. Bei mehreren plausiblen Lösungsansätzen: Optionen mit Trade-offs vorlegen statt eine Wahl vorwegzunehmen.
 - **Token-Effizienz:** Tokens sind kein Fundgeld, das man einfach verbraucht — effizient einsetzen. Kein Wiederholen bereits bekannter Informationen, keine unnötig langen Recherchen/Dateilesungen, wenn ein gezielterer Weg reicht. Gilt für die KI-Arbeitsweise selbst, nicht für den produzierten Code.
+- **Schlanke Commits/Doku als Standard:** Kurze Commit-Nachrichten, knapper Doku-Text pro Änderung (keine langen Vorgeschichten-Absätze in ROADMAP.md für kleine Fixes), neue Tests nur dort schreiben, wo wirklich eine Lücke besteht — nicht routinemäßig pro geänderter Funktion. Ausführlichere Doku/Tests nur auf ausdrücklichen Wunsch.
 
 ## 2. Entwicklung & Testing
 - **Testpflicht vor Commit:** Bevor du (die KI) Code-Änderungen als abgeschlossen meldest oder committest, musst du selbstständig die Tests lokal ausführen.

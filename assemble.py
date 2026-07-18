@@ -16,7 +16,7 @@ from assemble_ui import (
     build_points_panel,
 )
 from cut_ui import fmt_dur, live_input
-from library import parse_offset, parse_preview_duration
+from library import get_audio_duration, parse_offset, parse_preview_duration
 
 __version__ = "1.1.7"
 
@@ -507,20 +507,7 @@ def main():
 
         status[-1] = "Bestimme Gesamtdauer..."
         refresh_analysis(status)
-        total_duration = float(
-            subprocess.check_output(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    str(flac_path),
-                ]
-            )
-        )
+        total_duration = get_audio_duration(flac_path)
         status[-1] = f"Gesamtdauer: {fmt_dur(total_duration)}"
 
         status.append("Erkenne Trim-Punkte...")

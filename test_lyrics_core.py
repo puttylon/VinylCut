@@ -39,6 +39,7 @@ from lyrics_core import (
     _VOCALS_MIN_WORDS,
     _WHISPER_MIN_OVERLAP,
     _build_contrastive_context,
+    _cache_entry_up_to_date,
     _clean_query_title,
     _contrastive_margin_and_decision,
     _extract_lrc_words,
@@ -408,6 +409,68 @@ def _fake_query_provider(contents: dict[str, str]):
         return provider, _make_lrc(contents[provider])
 
     return _fake
+
+
+class TestCacheEntryUpToDate:
+    """War als fast identisches Prädikat dreifach unabhängig implementiert:
+    inline in write_lrc.write_all(), inline in cut.py (ohne DB-Check), als
+    eigene Funktion evaluate_lyrics._skip_reevaluation() (siehe ROADMAP.md,
+    Redundanz-Aufräumen)."""
+
+    def test_kein_eintrag_ist_nicht_aktuell(self, tmp_path):
+        assert _cache_entry_up_to_date(None, tmp_path / "a.lrc") is False
+
+    def test_zu_alte_version_ist_nicht_aktuell(self, tmp_path):
+        entry = {"v": "0.1", "r": "nf"}
+        assert _cache_entry_up_to_date(entry, tmp_path / "a.lrc") is False
+
+    def test_r_ok_ohne_vorhandene_lrc_ist_nicht_aktuell(self, tmp_path):
+        entry = {"v": lyrics_core.__version__, "r": "ok"}
+        assert _cache_entry_up_to_date(entry, tmp_path / "fehlt.lrc") is False
+
+    def test_r_nf_ohne_conn_ist_aktuell(self, tmp_path):
+        # Ohne conn (cut.py-Variante): kein DB-Aktualitaets-Check.
+        entry = {"v": lyrics_core.__version__, "r": "nf"}
+        assert _cache_entry_up_to_date(entry, tmp_path / "fehlt.lrc") is True
+
+    def test_r_ok_mit_vorhandener_lrc_ohne_conn_ist_aktuell(self, tmp_path):
+        lrc_path = tmp_path / "a.lrc"
+        lrc_path.write_text("[00:01.00]x", encoding="utf-8")
+        entry = {"v": lyrics_core.__version__, "r": "ok"}
+        assert _cache_entry_up_to_date(entry, lrc_path) is True
+
+    def test_mit_conn_veraltet_wenn_db_neuer_als_json(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", None)
+        conn.commit()
+        cache_store.put_provider(conn, "lrclib", "artist", "title", "treffer", "x")
+        conn.commit()
+        entry = {"v": lyrics_core.__version__, "r": "nf", "ts": "2000-01-01T00:00:00"}
+        assert (
+            _cache_entry_up_to_date(
+                entry, tmp_path / "fehlt.lrc", conn, "artist", "title"
+            )
+            is False
+        )
+
+    def test_mit_conn_aktuell_wenn_json_neuer_als_db(self, tmp_path):
+        import datetime
+
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", None)
+        conn.commit()
+        cache_store.put_provider(conn, "lrclib", "artist", "title", "treffer", "x")
+        conn.commit()
+        future_ts = (
+            datetime.datetime.now().astimezone() + datetime.timedelta(days=1)
+        ).isoformat(timespec="seconds")
+        entry = {"v": lyrics_core.__version__, "r": "nf", "ts": future_ts}
+        assert (
+            _cache_entry_up_to_date(
+                entry, tmp_path / "fehlt.lrc", conn, "artist", "title"
+            )
+            is True
+        )
 
 
 class TestLoadCache:

@@ -1,5 +1,40 @@
 # VinylCut Roadmap
 
+## ✓ Redundanz-Aufräumen Runde 3: JSON-Skip-Prädikat + whisper_analyse.py entfernt + ffprobe-Dauer
+
+**Auslöser:** Letzter noch offener Punkt aus Runde 2 ("wichtigster Fund,
+braucht mehr Sorgfalt"), plus zwei neue Nutzer-Entscheidungen währenddessen.
+
+**Behoben:**
+1. **JSON-Ordner-Cache-Skip-Prädikat** ("ist dieser Track schon aktuell,
+   kann ich ihn überspringen?") war fast wortgleich dreifach unabhängig
+   implementiert: inline in `write_lrc.write_all()`, inline in `cut.py`
+   (bewusst OHNE den DB-Aktualitäts-Check), als eigene Funktion
+   `evaluate_lyrics._skip_reevaluation()`. Neue gemeinsame Funktion
+   `lyrics_core._cache_entry_up_to_date(entry, lrc_path, conn=None,
+   artist_key=None, titel_key=None)` -- `conn=None` (cut.py) überspringt
+   den DB-Check wie bisher, mit `conn` gesetzt (write_lrc.py,
+   evaluate_lyrics.py) läuft die volle Prüfung. 7 neue Tests
+   (`test_lyrics_core.py`) decken beide Modi ab.
+2. **`whisper_analyse.py` gelöscht** (Nutzer-Entscheidung: "wirf weg was nur
+   einfaches Werkzeug ist"): zeigte nur dieselben Zahlen wie `lrc_analyse.py`
+   (Methode/Ablehnungsgrund), nur anders gruppiert ("mit/ohne Whisper" statt
+   "akzeptiert/abgelehnt") -- keine echte Zusatzinfo. `lrc_analyse.py` und
+   `lrc_recheck.py` bleiben (eigenständiger Nutzen).
+3. **ffprobe-Dauer-Ermittlung** (Fund E aus Runde 2, war als Trade-off
+   offen) -- Nutzer-Entscheidung: "library.py darf externe Programme
+   benutzen und Abhängigkeiten dazu haben", die bisherige "kein
+   subprocess"-Regel dort galt nicht mehr. Neue Funktion `library.
+   get_audio_duration()`, wirft bei Fehlern durch (ehrliche Funktion, kein
+   stiller Fallback). `fetch_metadata.get_flac_duration()` bleibt als
+   dünner Wrapper, der bei Fehlern weiterhin `0.0` liefert (ihre
+   bestehenden Aufrufer in `cut.py` verlassen sich darauf); `assemble.py`
+   ruft die neue Funktion direkt auf, unverändertes Verhalten bei Fehlern
+   (kein stiller Fallback, wie vorher). 4 neue Tests.
+
+516/516 Tests grün, `ruff` sauber. `lyrics_core.__version__` auf `1.13.24`
+erhöht.
+
 ## ✓ Redundanz-Aufräumen Runde 2: vollständiges Audit über alle 18 Module
 
 **Auslöser:** Nutzer-Vorgabe nach Runde 1: "ich will am Ende ALLE Module auf

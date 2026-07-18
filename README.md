@@ -351,12 +351,6 @@ python3 db_analyse.py --db /pfad/zu/anderer.db
 
 Ausgabe: Treffer-/Nichts-/Fehlschlag-Quote je Anbieter inkl. Fehlschlag-Gründen, Songs ganz ohne Provider-Treffer, Songs mit allen 4 Providern fehlgeschlagen (Kandidaten für `--nachholen`), Whisper-Transkript-Abdeckung + Modell-Aufschlüsselung, Provider-Aktivität der letzten 24h/7 Tage.
 
-**`whisper_analyse.py`** — zeigt speziell, ob und warum Whisper pro Track gelaufen ist (unabhängig von der Skriptversion des Cache-Eintrags):
-
-```bash
-python3 whisper_analyse.py /Musik/
-```
-
 **`inspect_song.py`** — Diagnose für einen einzelnen Song: schreibt Provider-Texte (Genius, Netease, Lrclib, Musixmatch) und das Whisper-Transkript aus der Cache-Datenbank nebeneinander in eine TXT-Datei:
 
 ```bash

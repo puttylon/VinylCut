@@ -21,7 +21,7 @@ import fetch_providers
 import lyrics_core
 from cut_ui import build_cutting_panel, build_metadata_panel, live_input
 from library import parse_offset, parse_preview_duration
-from lyrics_core import _load_cache, _save_cache, _cache_entry_valid
+from lyrics_core import _load_cache, _save_cache
 
 __version__ = "1.9.18"
 
@@ -817,11 +817,7 @@ def main():
                     flac_path = track_out_dir / f"{idx + 1:02d} - {safe}.flac"
                     query = f"{artist} {track['title']}".strip()
                     entry = lrc_cache.get(audio_name)
-                    if (
-                        entry
-                        and _cache_entry_valid(entry)
-                        and (entry.get("r") != "ok" or lrc_path.exists())
-                    ):
+                    if lyrics_core._cache_entry_up_to_date(entry, lrc_path):
                         lrc_status[idx] = "✓" if lrc_path.exists() else "✗"
                         live.update(panel("songtext", export_status, lrc_status))
                         live.refresh()

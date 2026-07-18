@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.23"
+__version__ = "1.13.24"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1812,6 +1812,41 @@ def _db_newer_than_json_entry(
         return True
 
     return db_dt > entry_dt
+
+
+def _cache_entry_up_to_date(
+    entry: dict | None,
+    lrc_path: Path,
+    conn: sqlite3.Connection | None = None,
+    artist_key: str | None = None,
+    titel_key: str | None = None,
+) -> bool:
+    """True wenn ein JSON-Ordner-Cache-Eintrag noch gültig ist -- der Track
+    muss dann NICHT neu bewertet/geschrieben werden.
+
+    War als fast identisches Prädikat dreifach unabhängig implementiert:
+    inline in write_lrc.write_all(), inline in cut.py (OHNE den DB-
+    Aktualitäts-Check), als eigene Funktion evaluate_lyrics.
+    _skip_reevaluation() (siehe ROADMAP.md, Redundanz-Aufräumen -- genau die
+    Art Drift, die schon beim Zeitstempel-Bug zugeschlagen hat).
+
+    conn=None (Standard) überspringt den DB-Aktualitäts-Check
+    (_db_newer_than_json_entry) komplett -- cut.py verarbeitet frisch
+    geschnittene Tracks, bei denen dieser Check bisher bewusst fehlte (siehe
+    ROADMAP.md, Redundanz-Audit: "cut.py bewusst ohne
+    _db_newer_than_json_entry-Teil"). Mit conn+artist_key+titel_key gesetzt
+    (write_lrc.py, evaluate_lyrics.py) läuft die volle Prüfung inkl.
+    DB-Aktualität.
+    """
+    if not entry:
+        return False
+    if not _cache_entry_valid(entry):
+        return False
+    if entry.get("r") == "ok" and not lrc_path.exists():
+        return False
+    if conn is None:
+        return True
+    return not _db_newer_than_json_entry(conn, artist_key, titel_key, entry.get("ts"))
 
 
 def _clear_status() -> None:

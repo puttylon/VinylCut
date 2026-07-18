@@ -1,6 +1,9 @@
+import subprocess
+
 import pytest
 
 from library import (
+    get_audio_duration,
     method_from_cache_entry,
     parse_offset,
     parse_preview_duration,
@@ -142,3 +145,33 @@ class TestRejectReasonFromCacheEntry:
             reject_reason_from_cache_entry({"providers": 1, "score": 0.1, "words": 5})
             == "unter-schwelle"
         )
+
+
+class TestGetAudioDuration:
+    """War fast wortgleich in assemble.py (inline) UND fetch_metadata.
+    get_flac_duration() dupliziert (siehe ROADMAP.md, "library.py darf
+    externe Programme benutzen")."""
+
+    def test_echte_datei_liefert_plausible_dauer(self, tmp_path):
+        wav_path = tmp_path / "test.wav"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "quiet",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "1",
+                str(wav_path),
+            ],
+            check=True,
+        )
+        assert get_audio_duration(wav_path) == pytest.approx(1.0, abs=0.05)
+
+    def test_fehlende_datei_wirft(self, tmp_path):
+        with pytest.raises(subprocess.CalledProcessError):
+            get_audio_duration(tmp_path / "nicht_vorhanden.wav")

@@ -4,11 +4,16 @@ unverändert gebraucht werden -- Vorgabe: mehrfach genutzte Funktionen werden
 hier implementiert und von den Aufrufern importiert, statt redundant in
 jedem Skript neu geschrieben zu werden (siehe ROADMAP.md).
 
-Reine Funktionen ohne Seiteneffekte -- kein Rich/tty (das bleibt in
-cut_ui.py/assemble_ui.py), kein subprocess, kein Dateisystem.
+Kein Rich/tty (das bleibt in cut_ui.py/assemble_ui.py). Externe Programme
+(ffprobe, sox, ...) UND Abhängigkeiten dazu sind dagegen ausdrücklich
+erlaubt -- Nutzer-Feedback: "ohne ffprobe und sox etc geht es nicht, library
+darf externe Programme benutzen und Abhängigkeiten dazu haben".
 """
 
 from __future__ import annotations
+
+import subprocess
+from pathlib import Path
 
 _MIN_PREVIEW_SEC = 2.0  # Untergrenze für "p<Sek>" (Bedienfehler-Schutz)
 _MAX_PREVIEW_SEC = 30.0  # Obergrenze für "p<Sek>"
@@ -91,3 +96,30 @@ def reject_reason_from_cache_entry(entry: dict) -> str:
     if words == 0 and score == 0.0:
         return "kein-vokal"
     return "unter-schwelle"
+
+
+def get_audio_duration(audio_path: Path) -> float:
+    """Gesamtdauer einer Audiodatei in Sekunden via ffprobe -- war fast
+    wortgleich in assemble.py (inline) UND fetch_metadata.get_flac_duration()
+    dupliziert (siehe ROADMAP.md).
+
+    Wirft bei Fehlern (ffprobe fehlt, Datei kaputt) weiter -- reine,
+    ehrliche Funktion ohne Fehler-Schlucken. fetch_metadata.
+    get_flac_duration() bleibt als dünner Wrapper bestehen, der bei Fehlern
+    weiterhin 0.0 zurückgibt (ihre bisherigen Aufrufer in cut.py verlassen
+    sich darauf); assemble.py ruft diese Funktion direkt auf und lässt einen
+    Fehler wie bisher durchschlagen (dort war es nie ein stiller Fallback)."""
+    return float(
+        subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ]
+        )
+    )

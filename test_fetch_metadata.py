@@ -1,6 +1,15 @@
 import pytest
 import fetch_metadata
-from fetch_metadata import fill_missing_durations, score_release
+from fetch_metadata import fill_missing_durations, get_flac_duration, score_release
+
+
+class TestGetFlacDuration:
+    def test_ffprobe_fehler_liefert_0(self, monkeypatch, tmp_path):
+        def _raise(path):
+            raise RuntimeError("ffprobe kaputt")
+
+        monkeypatch.setattr(fetch_metadata.library, "get_audio_duration", _raise)
+        assert get_flac_duration(tmp_path / "irgendwas.flac") == 0.0
 
 
 class TestScoreRelease:
@@ -63,7 +72,9 @@ class TestFillMissingDurations:
 
     def test_title_mismatch_not_filled(self, monkeypatch):
         def fake_mb_json(url):
-            return {"recordings": [{"title": "Completely Different Song", "length": 123000}]}
+            return {
+                "recordings": [{"title": "Completely Different Song", "length": 123000}]
+            }
 
         monkeypatch.setattr(fetch_metadata, "_get_mb_json", fake_mb_json)
         cand = {"tracks": [{"title": "Song A"}]}
@@ -97,7 +108,10 @@ class TestFillMissingDurations:
         def fake_mb_json(url):
             return {
                 "recordings": [
-                    {"title": "Song A", "length": 157000},  # Ausreißer (z.B. Radio-Edit)
+                    {
+                        "title": "Song A",
+                        "length": 157000,
+                    },  # Ausreißer (z.B. Radio-Edit)
                     {"title": "Song A", "length": 355000},
                     {"title": "Song A", "length": 355000},
                     {"title": "Song A", "length": 356000},

@@ -355,12 +355,11 @@ def _resolve_expected_dur(flac_path: Path) -> float:
 def _skip_reevaluation(
     conn: sqlite3.Connection, audio_path: Path, artist_key: str, titel_key: str
 ) -> bool:
-    """True wenn dieser Track NICHT neu bewertet werden muss -- spiegelt
-    genau den Skip in write_lrc.write_all() (siehe ROADMAP.md, Songtexte-
-    Pipeline-Umbau, "'bewerten' hat keinen Skip für unveränderte Songs"):
-    ein gültiger JSON-Ordner-Cache-Eintrag existiert UND die Cache-DB hat
-    seitdem nichts Neueres für diesen Song (lyrics_core.
-    _db_newer_than_json_entry).
+    """True wenn dieser Track NICHT neu bewertet werden muss -- nutzt
+    dasselbe Prädikat wie write_lrc.write_all() (lyrics_core.
+    _cache_entry_up_to_date(), siehe dort -- war vorher als fast identischer
+    Code dreifach unabhängig implementiert, siehe ROADMAP.md,
+    Redundanz-Aufräumen).
 
     Rein lesend -- KEINE Ordner-Sperre wie in write_lrc.write_all (das dort
     zusätzlich schreibt). Ein Race mit einem gleichzeitig laufenden
@@ -375,15 +374,9 @@ def _skip_reevaluation(
     dir_cache = lyrics_core._load_cache(audio_path.parent)
     cache_key = unicodedata.normalize("NFC", audio_path.name)
     entry = dir_cache.get(cache_key)
-    if not entry:
-        return False
-    if not lyrics_core._cache_entry_valid(entry):
-        return False
     lrc_path = audio_path.with_suffix(".lrc")
-    if entry.get("r") == "ok" and not lrc_path.exists():
-        return False
-    return not lyrics_core._db_newer_than_json_entry(
-        conn, artist_key, titel_key, entry.get("ts")
+    return lyrics_core._cache_entry_up_to_date(
+        entry, lrc_path, conn, artist_key, titel_key
     )
 
 

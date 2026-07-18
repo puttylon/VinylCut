@@ -118,13 +118,8 @@ def write_all(
 
         if not force:
             entry = dir_cache.get(cache_key)
-            if (
-                entry
-                and lyrics_core._cache_entry_valid(entry)
-                and (entry.get("r") != "ok" or lrc_path.exists())
-                and not lyrics_core._db_newer_than_json_entry(
-                    conn, artist_key, titel_key, entry.get("ts")
-                )
+            if lyrics_core._cache_entry_up_to_date(
+                entry, lrc_path, conn, artist_key, titel_key
             ):
                 counts["skipped"] += 1
                 continue

@@ -9,7 +9,7 @@ genius_token
 backup_*/
 whisper_stichprobe*.json
 whisper_model_test*.json
-fetch_songtext_cache.db
-fetch_songtext_cache.db-shm
-fetch_songtext_cache.db-wal
+cache.db
+cache.db-shm
+cache.db-wal
 lrc_backup/

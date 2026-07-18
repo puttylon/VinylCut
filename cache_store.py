@@ -76,6 +76,20 @@ CREATE TABLE IF NOT EXISTS ergebnisse (
 """
 
 
+def default_cache_path() -> Path:
+    """Standard-Pfad der Cache-Datenbank (neben den Skripten, Repo-Wurzel).
+
+    War bisher als `_default_db_path()` wortgleich in cut.py, db_analyse.py,
+    inspect_song.py und songtext_pipeline.py dupliziert -- eine fünfte
+    Kopie in compare_whisper_models.py zeigte dabei versehentlich auf einen
+    ANDEREN Dateinamen ("lyrics_core_cache.db" statt "cache.db", laut Nutzer
+    ein Kopier-Fehler, siehe ROADMAP.md). Die Datenbank-Schicht kennt den
+    kanonischen Dateinamen ohnehin am besten -- eine Divergenz wie diese
+    kann hier nicht mehr unbemerkt entstehen.
+    """
+    return Path(__file__).parent / "cache.db"
+
+
 def open_cache(db_path: Path) -> sqlite3.Connection:
     """Öffnet (und legt bei Bedarf an) die Cache-Datenbank unter db_path.
 

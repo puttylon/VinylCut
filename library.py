@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Zentrale Bibliothek für Funktionen, die von mehreren Kern-Skripten
-(aktuell cut.py + assemble.py) unverändert gebraucht werden -- Vorgabe:
-mehrfach genutzte Funktionen werden hier implementiert und von den
-Aufrufern importiert, statt redundant in jedem Skript neu geschrieben zu
-werden (siehe ROADMAP.md).
+unverändert gebraucht werden -- Vorgabe: mehrfach genutzte Funktionen werden
+hier implementiert und von den Aufrufern importiert, statt redundant in
+jedem Skript neu geschrieben zu werden (siehe ROADMAP.md).
 
 Reine Funktionen ohne Seiteneffekte -- kein Rich/tty (das bleibt in
 cut_ui.py/assemble_ui.py), kein subprocess, kein Dateisystem.
@@ -45,3 +44,50 @@ def parse_preview_duration(action: str) -> float | None:
     if _MIN_PREVIEW_SEC <= new_dur <= _MAX_PREVIEW_SEC:
         return new_dur
     return None
+
+
+def method_from_cache_entry(entry: dict) -> str:
+    """Bestimmt die Methode, die zu einem JSON-Ordner-Cache-Eintrag geführt
+    hat -- inkl. Legacy-Fallback für Einträge von vor v1.5.0 (kein "method"-
+    Feld). War wortgleich in lrc_analyse.py UND whisper_analyse.py dupliziert
+    (siehe ROADMAP.md)."""
+    method = entry.get("method")
+    if method:
+        if method == "konsens" and entry.get("no_vocal"):
+            return "konsens-kein-vokal"
+        return method
+    # Legacy: Cache-Einträge vor v1.5.0
+    if entry.get("consensus") and entry.get("no_vocal"):
+        return "konsens-kein-vokal"
+    if entry.get("consensus"):
+        return "konsens"
+    if entry.get("fallback"):
+        return "konsens-kein-vokal"
+    model = entry.get("model")
+    if model == "small":
+        return "whisper-small"
+    if model == "base":
+        return "whisper-base"
+    if entry.get("score") is not None:
+        return "whisper-base"
+    return "heuristik"
+
+
+def reject_reason_from_cache_entry(entry: dict) -> str:
+    """Bestimmt den Ablehnungsgrund für einen "nf"-JSON-Ordner-Cache-
+    Eintrag -- inkl. Legacy-Fallback für Einträge von vor v1.5.0 (kein
+    "reason"-Feld). War wortgleich in lrc_analyse.py, lrc_recheck.py UND
+    whisper_analyse.py dupliziert (siehe ROADMAP.md)."""
+    reason = entry.get("reason")
+    if reason:
+        return reason
+    # Legacy: Cache-Einträge vor v1.5.0 hatten kein 'reason'-Feld
+    if entry.get("providers", 0) == 0:
+        return "kein-provider"
+    words = entry.get("words") or 0
+    score = entry.get("score")
+    if score is None:
+        return "kein-whisper"
+    if words == 0 and score == 0.0:
+        return "kein-vokal"
+    return "unter-schwelle"

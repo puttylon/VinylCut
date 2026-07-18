@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Manueller Qualitätsvergleich der Whisper-Modelle small/medium/turbo.
 
-Wählt --n Songs aus der Cache-Datenbank (lyrics_core_cache.db), die dort
+Wählt --n Songs aus der Cache-Datenbank (cache.db), die dort
 mindestens einen Provider-Treffer haben (songs JOIN ergebnisse, status=
 'treffer') — ob für den Song bereits einmal ein Whisper-Transkript existiert,
 ist für die Auswahl UNERHEBLICH, da ohnehin jeder gefundene Song frisch
@@ -105,7 +105,7 @@ _POOL_BUFFER_FACTOR = 3
 
 
 def _default_db_path() -> Path:
-    return Path(__file__).parent / "lyrics_core_cache.db"
+    return cache_store.default_cache_path()
 
 
 def _parse_include(value: str) -> tuple[str, str]:
@@ -434,7 +434,9 @@ def _existing_output_path(output_dir: Path, artist: str, title: str) -> Path | N
     Abschnitt an die bestehende Datei eines Songs anhängen statt eine neue
     Datei mit _2-Suffix anzulegen (siehe _unique_output_path).
     """
-    base_name = f"{sanitize_filename(artist)}_{sanitize_filename(title)}_modellvergleich"
+    base_name = (
+        f"{sanitize_filename(artist)}_{sanitize_filename(title)}_modellvergleich"
+    )
     path = output_dir / f"{base_name}.txt"
     return path if path.exists() else None
 

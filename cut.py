@@ -26,10 +26,6 @@ from lyrics_core import _load_cache, _save_cache, _cache_entry_valid
 __version__ = "1.9.18"
 
 
-def _default_db_path() -> Path:
-    return Path(__file__).parent / "fetch_songtext_cache.db"
-
-
 def _fetch_lyrics_for_track(
     conn: sqlite3.Connection,
     query: str,
@@ -792,7 +788,7 @@ def main():
             # dieselben Globals wie Phase 2/4 vorbereiten (öffnet u.a. den
             # lokalen LRCLib-Datenbank-Abzug), Whisper-Modell + kontrastiven
             # Kontext einmal laden, nicht pro Track (siehe evaluate_lyrics.py).
-            conn = cache_store.open_cache(_default_db_path())
+            conn = cache_store.open_cache(cache_store.default_cache_path())
             fetch_providers._prepare_lyrics_core_globals(conn)
             # _faster_whisper_available() statt _get_whisper_model(): reiner
             # Import-Check, laedt KEIN Modell in den Speicher (siehe

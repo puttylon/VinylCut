@@ -229,7 +229,7 @@ def write_lrc_normal(
 
 
 def _default_db_path() -> Path:
-    return Path(__file__).parent / "fetch_songtext_cache.db"
+    return cache_store.default_cache_path()
 
 
 def main() -> None:

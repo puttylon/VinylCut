@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Diagnose-Werkzeug: zeigt alle Cache-Daten eines einzelnen Songs nebeneinander.
 
-Fragt die Cache-Datenbank (fetch_songtext_cache.db) für einen Künstler/Titel
+Fragt die Cache-Datenbank (cache.db) für einen Künstler/Titel
 gezielt ab und schreibt Provider-Texte (Genius, Netease, Lrclib, Musixmatch)
 sowie das Whisper-Transkript in eine lesbare TXT-Datei — praktisch, um bei
 einem einzelnen Song nachzuvollziehen, was der Cache tatsächlich enthält,
@@ -91,7 +91,7 @@ def build_report(conn, artist: str, title: str) -> str | None:
 
 
 def _default_db_path() -> Path:
-    return Path(__file__).parent / "fetch_songtext_cache.db"
+    return cache_store.default_cache_path()
 
 
 def main() -> None:

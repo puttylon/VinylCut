@@ -5,46 +5,8 @@ import argparse
 import json
 from pathlib import Path
 
-
-def _method(entry: dict) -> str:
-    """Bestimmt die Methode die zu diesem Ergebnis geführt hat."""
-    method = entry.get("method")
-    if method:
-        if method == "konsens" and entry.get("no_vocal"):
-            return "konsens-kein-vokal"
-        return method
-    # Legacy: Cache-Einträge vor v1.5.0
-    if entry.get("consensus") and entry.get("no_vocal"):
-        return "konsens-kein-vokal"
-    if entry.get("consensus"):
-        return "konsens"
-    if entry.get("fallback"):
-        return "konsens-kein-vokal"
-    model = entry.get("model")
-    if model == "small":
-        return "whisper-small"
-    if model == "base":
-        return "whisper-base"
-    if entry.get("score") is not None:
-        return "whisper-base"
-    return "heuristik"
-
-
-def _reject_reason(entry: dict) -> str:
-    """Bestimmt den Ablehnungsgrund für nf-Einträge."""
-    reason = entry.get("reason")
-    if reason:
-        return reason
-    # Legacy: Cache-Einträge vor v1.5.0
-    if entry.get("providers", 0) == 0:
-        return "kein-provider"
-    words = entry.get("words") or 0
-    score = entry.get("score")
-    if score is None:
-        return "kein-whisper"
-    if words == 0 and score == 0.0:
-        return "kein-vokal"
-    return "unter-schwelle"
+from library import method_from_cache_entry as _method
+from library import reject_reason_from_cache_entry as _reject_reason
 
 
 def analyse(root: Path) -> None:
@@ -84,10 +46,16 @@ def analyse(root: Path) -> None:
 
     # ── Ergebnis ────────────────────────────────────────────────────────────
     print("ERGEBNIS")
-    print(f"  LRC gefunden    (ok):  {len(ok_entries):4d}  ({len(ok_entries)/total:.1%})")
-    print(f"  Nicht gefunden  (nf):  {len(nf_entries):4d}  ({len(nf_entries)/total:.1%})")
+    print(
+        f"  LRC gefunden    (ok):  {len(ok_entries):4d}  ({len(ok_entries) / total:.1%})"
+    )
+    print(
+        f"  Nicht gefunden  (nf):  {len(nf_entries):4d}  ({len(nf_entries) / total:.1%})"
+    )
     if skip_entries:
-        print(f"  Übersprungen  (skip): {len(skip_entries):4d}  ({len(skip_entries)/total:.1%})")
+        print(
+            f"  Übersprungen  (skip): {len(skip_entries):4d}  ({len(skip_entries) / total:.1%})"
+        )
 
     # ── Methode (ok) ─────────────────────────────────────────────────────────
     print("\nMETHODE (ok-Tracks)")
@@ -95,19 +63,26 @@ def analyse(root: Path) -> None:
     for e in ok_entries:
         m = _method(e)
         method_counts[m] = method_counts.get(m, 0) + 1
-    order = ["konsens", "konsens-kein-vokal", "whisper-base", "whisper-small", "fallback", "heuristik"]
+    order = [
+        "konsens",
+        "konsens-kein-vokal",
+        "whisper-base",
+        "whisper-small",
+        "fallback",
+        "heuristik",
+    ]
     labels = {
-        "konsens":            "Provider-Konsens         ",
+        "konsens": "Provider-Konsens         ",
         "konsens-kein-vokal": "Konsens (kein Vokal)     ",
-        "whisper-base":       "Whisper base ≥40%        ",
-        "whisper-small":      "Whisper small ≥40%       ",
-        "fallback":           "Fallback alt (kein Vokal)",
-        "heuristik":          "Heuristik (kein Whisper) ",
+        "whisper-base": "Whisper base ≥40%        ",
+        "whisper-small": "Whisper small ≥40%       ",
+        "fallback": "Fallback alt (kein Vokal)",
+        "heuristik": "Heuristik (kein Whisper) ",
     }
     for key in order:
         n = method_counts.get(key, 0)
         if n:
-            print(f"  {labels[key]}  {n:4d}  ({n/len(ok_entries):.1%})")
+            print(f"  {labels[key]}  {n:4d}  ({n / len(ok_entries):.1%})")
 
     # ── Ablehnungsgrund (nf) ─────────────────────────────────────────────────
     print("\nABLEHNUNGSGRUND (nf-Tracks)")
@@ -115,21 +90,29 @@ def analyse(root: Path) -> None:
     for e in nf_entries:
         r = _reject_reason(e)
         reject_counts[r] = reject_counts.get(r, 0) + 1
-    reject_order = ["kein-provider", "kein-vokal", "unter-schwelle", "kein-whisper", "dauer-abweichung"]
+    reject_order = [
+        "kein-provider",
+        "kein-vokal",
+        "unter-schwelle",
+        "kein-whisper",
+        "dauer-abweichung",
+    ]
     reject_labels = {
-        "kein-provider":    "Kein Provider gefunden",
-        "kein-vokal":       "Kein Vokal erkannt    ",
-        "unter-schwelle":   "Whisper unter Schwelle",
-        "kein-whisper":     "Kein Whisper/Score    ",
+        "kein-provider": "Kein Provider gefunden",
+        "kein-vokal": "Kein Vokal erkannt    ",
+        "unter-schwelle": "Whisper unter Schwelle",
+        "kein-whisper": "Kein Whisper/Score    ",
         "dauer-abweichung": "--no-whisper: Dauer passt nicht",
     }
     for key in reject_order:
         n = reject_counts.get(key, 0)
         if n:
-            print(f"  {reject_labels[key]}  {n:4d}  ({n/len(nf_entries):.1%})")
+            print(f"  {reject_labels[key]}  {n:4d}  ({n / len(nf_entries):.1%})")
 
     # ── Score-Verteilung (ok, Whisper) ───────────────────────────────────────
-    whisper_ok = [e for e in ok_entries if e.get("score") is not None and e.get("model")]
+    whisper_ok = [
+        e for e in ok_entries if e.get("score") is not None and e.get("model")
+    ]
     if whisper_ok:
         print(f"\nSCORE-VERTEILUNG (ok, {len(whisper_ok)} Whisper-Tracks)")
         buckets = [(i, i + 10) for i in range(40, 100, 10)]
@@ -140,7 +123,8 @@ def analyse(root: Path) -> None:
 
     # ── Risiko-Tracks ────────────────────────────────────────────────────────
     risky = [
-        e for e in ok_entries
+        e
+        for e in ok_entries
         if e.get("model")
         and not e.get("consensus")
         and not e.get("fallback")
@@ -148,7 +132,9 @@ def analyse(root: Path) -> None:
         and e.get("providers", 0) == 1
     ]
     if risky:
-        print(f"\nRISIKO-TRACKS (ok, Score 40–50%, nur 1 Provider) — {len(risky)} Stück")
+        print(
+            f"\nRISIKO-TRACKS (ok, Score 40–50%, nur 1 Provider) — {len(risky)} Stück"
+        )
         for cf in cache_files:
             try:
                 data = json.loads(cf.read_text(encoding="utf-8"))
@@ -165,7 +151,7 @@ def analyse(root: Path) -> None:
                     and (entry.get("score") or 0) < 0.50
                     and entry.get("providers", 0) == 1
                 ):
-                    score_pct = f'{entry["score"]:.0%}'
+                    score_pct = f"{entry['score']:.0%}"
                     print(f"  {score_pct}  {cf.parent.name} / {fname}")
     else:
         print("\nKeine Risiko-Tracks gefunden (ok, Score 40–50%, 1 Provider).")
@@ -187,7 +173,9 @@ def analyse(root: Path) -> None:
 
     if novocal_entries:
         novocal_entries.sort(key=lambda t: t[2].get("providers", 0))
-        print(f"\nKONSENS KEIN VOKAL (Provider einig, Whisper hat nichts gehört) — {len(novocal_entries)} Stück")
+        print(
+            f"\nKONSENS KEIN VOKAL (Provider einig, Whisper hat nichts gehört) — {len(novocal_entries)} Stück"
+        )
 
         def _print_novocal(rows: list[tuple]) -> None:
             for cf, fname, entry in rows:
@@ -199,7 +187,9 @@ def analyse(root: Path) -> None:
         risky = [t for t in novocal_entries if t[2].get("providers", 0) <= 2]
         solid = [t for t in novocal_entries if t[2].get("providers", 0) > 2]
         if risky:
-            print(f"  ⚠ 2 Provider — schwächste Stufe, Review empfohlen ({len(risky)}):")
+            print(
+                f"  ⚠ 2 Provider — schwächste Stufe, Review empfohlen ({len(risky)}):"
+            )
             _print_novocal(risky)
         if solid:
             print(f"  ≥3 Provider — solider ({len(solid)}):")
@@ -209,7 +199,8 @@ def analyse(root: Path) -> None:
 
     # ── nf-Tracks unter Schwelle mit mehreren Providern ──────────────────────
     near_miss = [
-        e for e in nf_entries
+        e
+        for e in nf_entries
         if _reject_reason(e) == "unter-schwelle"
         and e.get("providers", 0) >= 2
         and (e.get("score") or 0) >= 0.20
@@ -230,7 +221,7 @@ def analyse(root: Path) -> None:
                     and entry.get("providers", 0) >= 2
                     and (entry.get("score") or 0) >= 0.20
                 ):
-                    score_pct = f'{entry["score"]:.0%}'
+                    score_pct = f"{entry['score']:.0%}"
                     prov = entry.get("providers", "?")
                     print(f"  {score_pct}  {prov}P  {cf.parent.name} / {fname}")
 
@@ -239,7 +230,9 @@ def analyse(root: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LRC-Cache-Analyse")
-    parser.add_argument("path", nargs="?", default=".", help="Wurzelverzeichnis (Standard: .)")
+    parser.add_argument(
+        "path", nargs="?", default=".", help="Wurzelverzeichnis (Standard: .)"
+    )
     args = parser.parse_args()
     analyse(Path(args.path).expanduser().resolve())
 

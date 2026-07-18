@@ -82,7 +82,7 @@ def test_ttl_abgelaufener_eintrag_gibt_none(tmp_path):
     conn = cs.open_cache(tmp_path / "cache.db")
     cs.put_provider(conn, "lrclib", "artist", "title", "treffer", "text")
 
-    alt = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    alt = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
     conn.execute(
         "UPDATE ergebnisse SET datum=? WHERE quelle=? AND song_id=(SELECT id FROM songs WHERE artist_key=? AND titel_key=?)",
         (alt, "lrclib", "artist", "title"),

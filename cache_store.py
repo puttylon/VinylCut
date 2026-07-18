@@ -36,7 +36,7 @@ from pathlib import Path
 
 import library
 
-DEFAULT_TTL_DAYS = 30
+DEFAULT_TTL_DAYS = 90
 
 _TRANSKRIPTE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS transkripte (

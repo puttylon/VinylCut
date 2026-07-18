@@ -17,7 +17,7 @@ Diese Eigenschaft muss an jeder Stelle gelten: Fällt der Cache weg, verhält si
 
 ## Ziel
 
-Anbieter-Antworten **und** das von Whisper Gehörte werden gespeichert, damit die Bibliothek nach Code-Änderungen **mehrfach neu aufgebaut** werden kann, ohne jedes Mal die Anbieter zu befragen oder neu anzuhören. Die 30-Tage-Auffrischung dient zugleich als „Verbesser-Rhythmus" (neue Anbieter-Texte kommen automatisch nach).
+Anbieter-Antworten **und** das von Whisper Gehörte werden gespeichert, damit die Bibliothek nach Code-Änderungen **mehrfach neu aufgebaut** werden kann, ohne jedes Mal die Anbieter zu befragen oder neu anzuhören. Die 90-Tage-Auffrischung dient zugleich als „Verbesser-Rhythmus" (neue Anbieter-Texte kommen automatisch nach).
 
 ## Speicherort
 
@@ -81,11 +81,11 @@ In `_whisper_best` wird VOR der Fenster-Schleife geprüft, ob für den Song bere
 | **Wirklich nichts** (Anbieter antwortet, hat den Song nicht) | ja, `status="nichts"`, mit Datum |
 | **Timeout / Rate-Limit / Captcha / Netzfehler** | ja, `status="fehlschlag"` **mit Grund** — aber **nie als gültiger Cache-Treffer** |
 
-**Kein Ausgang bleibt unsichtbar.** Ein transienter Fehlschlag wird **festgehalten** (Grund: `rate_limit`/`captcha`/`timeout`), zählt aber beim Nachschlagen (`get_provider`) **nie** als brauchbares Ergebnis — der Aufrufer fragt beim nächsten Lauf automatisch wieder live. Damit ist sowohl sichtbar, *dass* und *warum* ein Versuch gescheitert ist, als auch sichergestellt, dass ein „geht gerade nicht" nie 30 Tage lang als „hat keinen Text" verwechselt wird.
+**Kein Ausgang bleibt unsichtbar.** Ein transienter Fehlschlag wird **festgehalten** (Grund: `rate_limit`/`captcha`/`timeout`), zählt aber beim Nachschlagen (`get_provider`) **nie** als brauchbares Ergebnis — der Aufrufer fragt beim nächsten Lauf automatisch wieder live. Damit ist sowohl sichtbar, *dass* und *warum* ein Versuch gescheitert ist, als auch sichergestellt, dass ein „geht gerade nicht" nie 90 Tage lang als „hat keinen Text" verwechselt wird.
 
 ## Auffrischung (TTL)
 
-- Cache-Eintrag **jünger als 30 Tage** UND `status` ≠ `fehlschlag` → wird genutzt.
+- Cache-Eintrag **jünger als 90 Tage** UND `status` ≠ `fehlschlag` → wird genutzt.
 - **Älter, oder Fehlschlag** → gilt als nicht vorhanden → live neu holen (= automatischer „Verbesser-Rhythmus").
 - Schalter: `--refresh-cache` UND `--force` erzwingen beide eine frische Live-Abfrage (umgehen den Provider-Cache vollständig — `--force` bedeutet „wirklich alles neu", nicht nur den alten Track-Speicher). `--cache-ttl <tage>` stellt die Gültigkeitsdauer ein. `--no-cache` ignoriert den Cache komplett (belegt zugleich das Grundprinzip). `--cache-only` ist das Gegenstück zu `--refresh-cache`/`--force`: statt eine frische Live-Abfrage zu erzwingen, verhindert es JEDE Live-Abfrage — auch für Provider, deren letzter Versuch als `status="fehlschlag"` im Cache steht (die sonst, s.o., nie als Treffer zählen und deshalb normalerweise sofort einen erneuten Live-Versuch auslösen).
 

@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.20"
+__version__ = "1.13.21"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -258,6 +258,7 @@ _contrastive_song_words_cache: dict = {}  # song_id -> tokenisierte Kandidatente
 # öfter als beabsichtigt (alle _IDF_REFRESH_INTERVAL Songs) neu aufgebaut.
 _contrastive_context_built_ever = False
 _contrastive_context_evaluations_since_refresh = 0
+_contrastive_context_last_data_signature: int | None = None
 
 
 def _ts() -> str:
@@ -1049,30 +1050,60 @@ def _build_contrastive_context() -> None:
     )
 
 
+def _contrastive_data_signature() -> int | None:
+    """Billiges Signal, ob sich die Datengrundlage des kontrastiven Kontexts
+    (`texte`/`transkripte`, siehe _build_contrastive_context) seit dem
+    letzten Aufbau überhaupt verändert hat -- zwei simple COUNT(*)-Abfragen
+    statt des vollen Aufbaus (Scan über alle Provider-Texte + Whisper-
+    Transkripte, Sprach-Erkennung je Song für die Hintergrund-Pools).
+    None ohne offene Cache-Verbindung (kein Signal möglich)."""
+    if _cache_conn is None:
+        return None
+    row = _cache_conn.execute(
+        "SELECT (SELECT COUNT(*) FROM texte) + (SELECT COUNT(*) FROM transkripte)"
+    ).fetchone()
+    return row[0] if row else None
+
+
 def _note_contrastive_evaluation(refresh_interval: int) -> None:
     """Von evaluate_lyrics.evaluate_all() vor JEDEM tatsächlich bewerteten
-    Song aufgerufen (nicht bei übersprungenen, siehe dortiger Skip) -- baut
-    den kontrastiven Kontext, falls in diesem Prozess noch nie gebaut, oder
-    aktualisiert ihn alle `refresh_interval` tatsächlich bewertete Songs.
+    Song aufgerufen (nicht bei übersprungenen, siehe dortiger Skip) --
+    prüft frühestens alle `refresh_interval` tatsächlich bewertete Songs, ob
+    der kontrastive Kontext neu gebaut werden muss.
 
-    Der Zustand (_contrastive_context_built_ever/_evaluations_since_refresh)
-    ist bewusst modulglobal, nicht lokal in evaluate_all() -- ruft
-    songtext_pipeline.py evaluate_all() mehrfach im selben Prozess auf (z.B.
-    einmal pro Ordner), bleibt der Fortschritt über diese Aufrufe hinweg
-    erhalten. "Built ever" wird dabei UNABHÄNGIG von _contrastive_idfs
-    tatsächlichem Wert verfolgt (nicht `_contrastive_idf is None` als
-    Signal) -- sonst würde ein in Tests gemocktes _build_contrastive_context
-    (das _contrastive_idf nicht setzt) bei jedem Song erneut als "nie
-    gebaut" gelten.
+    Der Zähler alleine reicht als Auslöser NICHT mehr (Nutzer-Feedback: bei
+    einem Lauf mit vielen übersprungenen/bereits gecachten Songs kamen keine
+    neuen Provider-Texte/Transkripte dazu -- ein Neuaufbau hätte exakt
+    dasselbe Ergebnis wie vorher geliefert, nur die teure Arbeit wiederholt).
+    Der Zähler bestimmt daher nur noch, wie oft überhaupt ein billiger
+    Veränderungs-Check (_contrastive_data_signature) läuft -- der eigentliche
+    Neuaufbau passiert NUR, wenn sich diese Signatur seit dem letzten Aufbau
+    tatsächlich geändert hat.
+
+    Der Zustand (_contrastive_context_built_ever/_evaluations_since_refresh/
+    _last_data_signature) ist bewusst modulglobal, nicht lokal in
+    evaluate_all() -- ruft songtext_pipeline.py evaluate_all() mehrfach im
+    selben Prozess auf (z.B. einmal pro Ordner), bleibt der Fortschritt über
+    diese Aufrufe hinweg erhalten. "Built ever" wird dabei UNABHÄNGIG von
+    _contrastive_idfs tatsächlichem Wert verfolgt (nicht
+    `_contrastive_idf is None` als Signal) -- sonst würde ein in Tests
+    gemocktes _build_contrastive_context (das _contrastive_idf nicht setzt)
+    bei jedem Song erneut als "nie gebaut" gelten.
     """
     global \
         _contrastive_context_built_ever, \
-        _contrastive_context_evaluations_since_refresh
+        _contrastive_context_evaluations_since_refresh, \
+        _contrastive_context_last_data_signature
     if (
         not _contrastive_context_built_ever
         or _contrastive_context_evaluations_since_refresh >= refresh_interval
     ):
-        _build_contrastive_context()
+        signature = _contrastive_data_signature()
+        if not _contrastive_context_built_ever or signature != (
+            _contrastive_context_last_data_signature
+        ):
+            _build_contrastive_context()
+            _contrastive_context_last_data_signature = signature
         _contrastive_context_built_ever = True
         _contrastive_context_evaluations_since_refresh = 0
     _contrastive_context_evaluations_since_refresh += 1

@@ -50,7 +50,7 @@ from pathlib import Path
 import fetch_providers
 import lyrics_core
 
-_IDF_REFRESH_INTERVAL = 50
+_IDF_REFRESH_INTERVAL = 100
 
 _WHISPER_MODEL_EN = "medium"
 _WHISPER_MODEL_OTHER = "large-v3"

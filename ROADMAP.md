@@ -1,5 +1,35 @@
 # VinylCut Roadmap
 
+## ✓ Optimierung: kontrastiver Kontext wird seltener und nur bei echten Änderungen neu gebaut
+
+**Auslöser:** Beim großen `--recursive`-Nachhollauf (siehe unten) wollte der
+Nutzer den Overhead des periodischen IDF-/Hintergrund-Pool-Neuaufbaus
+senken, ohne die eigentliche Whisper-Zeit zu berühren (dort liegt der
+Haupt-Flaschenhals, aber Optimierungen dort wurden geprüft und verworfen —
+mlx-whisper lieferte laut früherem eigenen Test schlechtere Erkennung,
+VAD-Filter zu wenig Gewinn für den Reifegrad-Aufwand, Whisper für den Lauf
+abschalten verschiebt die Arbeit nur, spart nichts in Summe).
+
+**Zwei Änderungen:**
+1. `evaluate_lyrics._IDF_REFRESH_INTERVAL` von `50` auf `100` erhöht — der
+   Kontext wird seltener überhaupt in Erwägung gezogen.
+2. **Wichtiger:** Der Zähler alleine löst den teuren Neuaufbau nicht mehr
+   aus. Neue Funktion `lyrics_core._contrastive_data_signature()` — billige
+   `COUNT(*)`-Summe über `texte` + `transkripte` — wird bei Erreichen des
+   Intervalls zuerst geprüft; der eigentliche Neuaufbau
+   (`_build_contrastive_context()`, scannt alle Provider-Texte + Whisper-
+   Transkripte, erkennt die Sprache jedes Songs neu) läuft nur noch, wenn
+   sich diese Signatur seit dem letzten Aufbau tatsächlich verändert hat.
+   Bei einem Lauf mit vielen bereits gecachten/übersprungenen Songs (wie
+   dem aktuellen Nachhollauf) kamen bisher trotzdem alle `_IDF_REFRESH_
+   INTERVAL` Songs neue, identische Neuaufbauten — jetzt nur noch, wenn
+   wirklich neue Daten dazukamen.
+
+2 neue Tests (`test_idf_wird_nicht_erneut_aufgefrischt_ohne_neue_daten`,
+`test_idf_wird_erneut_aufgefrischt_wenn_neue_daten_dazukamen`), 1
+bestehender Test ans neue Verhalten angepasst. 497/497 grün, `ruff` sauber.
+`lyrics_core.__version__` auf `1.13.21` erhöht.
+
 ## ✓ Bugfix: "Kontrastiver Hintergrund-Kontext gebaut..."-Zeile löschte Statuszeile nicht sauber
 
 **Auslöser:** Beim Live-Test des großen `--recursive`-Nachhollaufs (siehe unten)

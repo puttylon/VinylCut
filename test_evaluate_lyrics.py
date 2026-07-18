@@ -39,6 +39,7 @@ class _GlobalsResetMixin:
         lyrics_core._contrastive_song_words_cache = {}
         lyrics_core._contrastive_context_built_ever = False
         lyrics_core._contrastive_context_evaluations_since_refresh = 0
+        lyrics_core._contrastive_context_last_data_signature = None
 
     def teardown_method(self):
         self.setup_method()
@@ -413,10 +414,19 @@ class TestEvaluateAll(_GlobalsResetMixin):
         assert seen == [("in scope", "song a")]
         assert counts["kein-provider"] == 1
 
-    def test_idf_wird_alle_n_songs_aufgefrischt(self, tmp_path, monkeypatch):
+    def test_idf_wird_nicht_erneut_aufgefrischt_ohne_neue_daten(
+        self, tmp_path, monkeypatch
+    ):
+        """Regressionstest fuer Nutzer-Feedback (siehe ROADMAP.md): der
+        Refresh-Zaehler alleine darf keinen Neuaufbau mehr ausloesen, wenn
+        sich die Datengrundlage (texte/transkripte) seit dem letzten Aufbau
+        gar nicht veraendert hat -- sonst wiederholt ein langer Lauf mit
+        vielen bereits gecachten/uebersprungenen Songs immer wieder dieselbe
+        teure Arbeit fuer dasselbe Ergebnis."""
         conn = cs.open_cache(tmp_path / "cache.db")
         for i in range(3):
             cs._get_or_create_song(conn, f"artist {i}", "song")
+        lyrics_core._cache_conn = conn  # noetig fuer _contrastive_data_signature
         monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
@@ -429,6 +439,8 @@ class TestEvaluateAll(_GlobalsResetMixin):
             "_build_contrastive_context",
             lambda: refresh_calls.append(1),
         )
+        # evaluate_song fuegt NIE neue texte/transkripte-Zeilen hinzu --
+        # die Datensignatur bleibt ueber den ganzen Lauf konstant.
         monkeypatch.setattr(
             evaluate_lyrics,
             "evaluate_song",
@@ -441,7 +453,50 @@ class TestEvaluateAll(_GlobalsResetMixin):
 
         evaluate_lyrics.evaluate_all(conn)
 
-        # 1x initial + 1x nach Song 2 (Refresh-Intervall=2) = 2 Aufrufe fuer 3 Songs
+        # Nur der initiale Aufbau -- der zweite Check (nach Song 2, Intervall=2)
+        # findet keine neuen Daten und baut deshalb NICHT erneut auf.
+        assert len(refresh_calls) == 1
+
+    def test_idf_wird_erneut_aufgefrischt_wenn_neue_daten_dazukamen(
+        self, tmp_path, monkeypatch
+    ):
+        """Gegenstueck zum Test oben: kommen zwischen zwei Checks tatsaechlich
+        neue Provider-Texte dazu, muss der Neuaufbau trotzdem laufen."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        for i in range(3):
+            cs._get_or_create_song(conn, f"artist {i}", "song")
+        lyrics_core._cache_conn = conn
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(evaluate_lyrics, "_IDF_REFRESH_INTERVAL", 2)
+
+        refresh_calls = []
+        monkeypatch.setattr(
+            lyrics_core,
+            "_build_contrastive_context",
+            lambda: refresh_calls.append(1),
+        )
+
+        call_count = {"n": 0}
+
+        def _fake_evaluate_song(conn, a, t, *ar, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                # Simuliert einen neuen Provider-Treffer waehrend des Laufs.
+                conn.execute(
+                    "INSERT INTO texte (fingerabdruck, inhalt) VALUES (?, ?)",
+                    (f"fp-{call_count['n']}", "neuer Songtext"),
+                )
+                conn.commit()
+            return (False, "x", {"reason": "kein-provider", "content": None})
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _fake_evaluate_song)
+
+        evaluate_lyrics.evaluate_all(conn)
+
+        # 1x initial + 1x nach Song 2, weil dort echte neue Daten dazukamen.
         assert len(refresh_calls) == 2
 
     def test_idf_refresh_zaehler_bleibt_ueber_mehrere_evaluate_all_aufrufe_erhalten(

@@ -16,9 +16,10 @@ gefunden=True den rohen Songtext.
 
 Whisper-Modell und der kontrastive Hintergrund-Kontext (siehe
 lyrics_core._build_contrastive_context) werden HOECHSTENS EINMAL pro Lauf
-geladen, nicht pro Song -- IDF wird alle _IDF_REFRESH_INTERVAL TATSAECHLICH
-bewerteter Songs aufgefrischt, damit neu hinzugekommene Texte/Transkripte
-einfliessen (siehe Design-Dokument, Abschnitt 3, Antwort A3). "Hoechstens"
+geladen, nicht pro Song -- IDF wird alle lyrics_core._idf_refresh_interval(N)
+TATSAECHLICH bewerteter Songs aufgefrischt (N proportional zur Datenmenge,
+nicht fest, siehe dortiger Docstring), damit neu hinzugekommene Texte/
+Transkripte einfliessen (siehe Design-Dokument, Abschnitt 3, Antwort A3). "Hoechstens"
 bewusst: mit zugeordneter Audiodatei prueft evaluate_all() vorher
 _skip_reevaluation() (JSON-Ordner-Cache-Eintrag noch gueltig UND DB seitdem
 nicht neuer, siehe dortiger Docstring) -- wird JEDER Song im Scope
@@ -49,8 +50,6 @@ from pathlib import Path
 
 import fetch_providers
 import lyrics_core
-
-_IDF_REFRESH_INTERVAL = 100
 
 _WHISPER_MODEL_EN = "medium"
 _WHISPER_MODEL_OTHER = "large-v3"
@@ -461,8 +460,8 @@ def evaluate_all(
     }
 
     # Kontrastiver Kontext (siehe lyrics_core._build_contrastive_context) UND
-    # der IDF-Refresh alle _IDF_REFRESH_INTERVAL Songs laufen bewusst NICHT
-    # mehr vor der Schleife/nach Zeilen-Index, sondern lazy anhand
+    # der IDF-Refresh alle lyrics_core._idf_refresh_interval(N) Songs laufen
+    # bewusst NICHT mehr vor der Schleife/nach Zeilen-Index, sondern lazy anhand
     # tatsaechlich bewerteter Songs (siehe lyrics_core._note_contrastive_
     # evaluation) -- ein Lauf, in dem JEDER Song wegen _skip_reevaluation
     # uebersprungen wird, baut den Kontext dann gar nicht erst auf (realer
@@ -492,7 +491,7 @@ def evaluate_all(
             counts["uebersprungen"] += 1
             continue
 
-        lyrics_core._note_contrastive_evaluation(_IDF_REFRESH_INTERVAL)
+        lyrics_core._note_contrastive_evaluation()
 
         # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
         # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).

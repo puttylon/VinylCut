@@ -255,10 +255,31 @@ _contrastive_song_words_cache: dict = {}  # song_id -> tokenisierte Kandidatente
 # (z.B. einmal pro Ordner bei einer Ordner-für-Ordner-Schleife), müssen
 # beide Zähler ÜBER diese Aufrufe hinweg erhalten bleiben, sonst würde der
 # Kontext bei jedem Aufruf erneut als "noch nie gebaut" gelten und viel
-# öfter als beabsichtigt (alle _IDF_REFRESH_INTERVAL Songs) neu aufgebaut.
+# öfter als beabsichtigt (alle _idf_refresh_interval() Songs) neu aufgebaut.
 _contrastive_context_built_ever = False
 _contrastive_context_evaluations_since_refresh = 0
 _contrastive_context_last_data_signature: int | None = None
+
+# Anteil von N (zuletzt bekannte texte+transkripte-Anzahl), nicht ein fester
+# Wert (siehe ROADMAP.md, Nutzer-Feedback: "wenig Dokumente im Cache, öfter
+# aktualisieren, wenn mehr drin sind, später"). Herleitung: IDF ist bereits
+# eine log(N/df)-Größe, ihre Ableitung nach N fällt mit 1/N -- der Effekt
+# neuer Dokumente auf die IDF-Werte schrumpft also automatisch mit
+# wachsendem N. Ein fester PROZENTSATZ (statt fester Song-Anzahl) hält die
+# RELATIVE Veralterung zwischen zwei Aufbauten konstant, egal wie groß der
+# Cache ist. Gegen echte Cache-Zahlen nachgerechnet (10426 Songs): selbst 10-
+# 20 % Wachstum verändert die IDF-Werte nicht-häufiger Wörter nur um ~1-2 %
+# -- 5 % ist damit großzügig bemessen, nicht knapp.
+_IDF_REFRESH_FRACTION = 0.05
+_IDF_REFRESH_MIN = 5  # Mindestwert, damit ein winziger Cache nicht nach JEDEM Song prüft
+
+
+def _idf_refresh_interval(n: int) -> int:
+    """Wie viele tatsächlich bewertete Songs zwischen zwei billigen Signatur-
+    Checks (_contrastive_data_signature) liegen sollen, proportional zur
+    zuletzt bekannten Datenmenge `n` (texte+transkripte-Anzahl beim letzten
+    Aufbau) -- siehe Modulkommentar bei _IDF_REFRESH_FRACTION."""
+    return max(_IDF_REFRESH_MIN, round(_IDF_REFRESH_FRACTION * n))
 
 
 def _ts() -> str:
@@ -543,7 +564,7 @@ def _query_provider(
     Captcha) — Fehlschläge mit Grund (status="fehlschlag", fehlergrund), damit
     kein Versuch stillschweigend spurlos bleibt. Ein Fehlschlag zählt aber nie
     als gültiger Cache-Treffer (get_provider gibt dafür immer None zurück) —
-    sonst würden gedrosselte Läufe Songs fälschlich 30 Tage lang als "hat
+    sonst würden gedrosselte Läufe Songs fälschlich 90 Tage lang als "hat
     keinen Text" abstempeln.
 
     Steckt der Provider in der langen Ruhephase (siehe _rate_limit_wait),
@@ -1081,11 +1102,13 @@ def _contrastive_data_signature() -> int | None:
     return row[0] if row else None
 
 
-def _note_contrastive_evaluation(refresh_interval: int) -> None:
+def _note_contrastive_evaluation() -> None:
     """Von evaluate_lyrics.evaluate_all() vor JEDEM tatsächlich bewerteten
     Song aufgerufen (nicht bei übersprungenen, siehe dortiger Skip) --
-    prüft frühestens alle `refresh_interval` tatsächlich bewertete Songs, ob
-    der kontrastive Kontext neu gebaut werden muss.
+    prüft frühestens alle `_idf_refresh_interval(N)` tatsächlich bewertete
+    Songs, ob der kontrastive Kontext neu gebaut werden muss (N = zuletzt
+    bekannte Datenmenge, siehe _idf_refresh_interval -- proportional statt
+    fest, damit ein kleiner Cache öfter, ein großer seltener prüft).
 
     Der Zähler alleine reicht als Auslöser NICHT mehr (Nutzer-Feedback: bei
     einem Lauf mit vielen übersprungenen/bereits gecachten Songs kamen keine
@@ -1110,9 +1133,10 @@ def _note_contrastive_evaluation(refresh_interval: int) -> None:
         _contrastive_context_built_ever, \
         _contrastive_context_evaluations_since_refresh, \
         _contrastive_context_last_data_signature
+    interval = _idf_refresh_interval(_contrastive_context_last_data_signature or 0)
     if (
         not _contrastive_context_built_ever
-        or _contrastive_context_evaluations_since_refresh >= refresh_interval
+        or _contrastive_context_evaluations_since_refresh >= interval
     ):
         signature = _contrastive_data_signature()
         if not _contrastive_context_built_ever or signature != (

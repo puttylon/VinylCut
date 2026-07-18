@@ -1,5 +1,17 @@
 # VinylCut Roadmap
 
+## ✓ IDF-Refresh-Intervall proportional statt fest (100 -> N × 5 %)
+
+`evaluate_lyrics._IDF_REFRESH_INTERVAL` (fest 100) ersetzt durch
+`lyrics_core._idf_refresh_interval(n) = max(5, round(0,05 × n))` -- n =
+zuletzt bekannte texte+transkripte-Anzahl. Herleitung: IDF ist bereits eine
+log(N/df)-Größe, ihr Effekt neuer Dokumente schrumpft mit 1/N -- ein fester
+Prozentsatz hält die relative Veralterung konstant, statt bei kleinem Cache
+zu träge und bei großem Cache unnötig oft zu prüfen. Bei aktueller
+Datenmenge (~26667) macht das ~1333 statt 100 -- deutlich weniger
+Neuaufbauten während eines langen Laufs, bei kleinen Caches (z.B. 100)
+weiterhin engmaschig (~5).
+
 ## ✓ Bugfix: lrclib-Dump-Lookup fand Songs mit Akzent-Buchstaben nicht
 
 LRCLib transliteriert Akzent-Buchstaben zu ASCII (João -> joao, Coração ->
@@ -783,7 +795,7 @@ To-do-Liste gesetzt statt sofort mitgelöst (parallel lief noch die
 `_query_provider` vor jeder Live-Abfrage macht) wertet `status="fehlschlag"`
 absichtlich NIE als gültigen Cache-Treffer (siehe `CACHE_DESIGN.md` — ein
 Fehlschlag soll ja beim nächsten Lauf grundsätzlich erneut versucht werden
-dürfen, sonst würde ein gedrosselter Lauf einen Song fälschlich 30 Tage lang
+dürfen, sonst würde ein gedrosselter Lauf einen Song fälschlich 90 Tage lang
 als „hat keinen Text" abstempeln). `fetch_providers.fetch_all()` (Phase 2)
 rief für JEDEN Song ausnahmslos alle 4 Anbieter live über `_query_provider`
 auf — ein Anbieter mit gecachtem Fehlschlag wurde dadurch bei jedem

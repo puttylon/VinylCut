@@ -431,7 +431,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        monkeypatch.setattr(evaluate_lyrics, "_IDF_REFRESH_INTERVAL", 2)
+        monkeypatch.setattr(lyrics_core, "_idf_refresh_interval", lambda n: 2)
 
         refresh_calls = []
         monkeypatch.setattr(
@@ -470,7 +470,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        monkeypatch.setattr(evaluate_lyrics, "_IDF_REFRESH_INTERVAL", 2)
+        monkeypatch.setattr(lyrics_core, "_idf_refresh_interval", lambda n: 2)
 
         refresh_calls = []
         monkeypatch.setattr(
@@ -508,7 +508,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
         viele Songs seit dem letzten Aufbau"-Fortschritt muss dabei ÜBER
         mehrere Aufrufe hinweg erhalten bleiben -- sonst würde der Kontext
         bei jedem Aufruf (jedem Ordner) erneut als "noch nie gebaut" gelten
-        und viel öfter als die beabsichtigten _IDF_REFRESH_INTERVAL Songs neu
+        und viel öfter als die beabsichtigte lyrics_core._idf_refresh_interval() Songs neu
         aufgebaut werden."""
         conn = cs.open_cache(tmp_path / "cache.db")
         cs._get_or_create_song(conn, "artist a", "song a")
@@ -517,7 +517,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
         )
-        monkeypatch.setattr(evaluate_lyrics, "_IDF_REFRESH_INTERVAL", 2)
+        monkeypatch.setattr(lyrics_core, "_idf_refresh_interval", lambda n: 2)
 
         refresh_calls = []
         monkeypatch.setattr(

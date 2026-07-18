@@ -42,6 +42,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+import cache_store
 import evaluate_lyrics
 import fetch_providers
 import lyrics_core
@@ -169,10 +170,26 @@ def write_all(
                 counts["updated"] += 1
             cache_result = "ok"
 
+        # "ts" ist bewusst NICHT die Wanduhr-Zeit (siehe ROADMAP.md,
+        # "JSON-Zeitstempel vs. DB-Zeitstempel"): zwei unabhängige Uhren
+        # (Wanduhr beim JSON-Schreiben, DB-Zeitstempel beim Anbieter-/
+        # Whisper-Schreiben) können bei einem schnellen Durchlauf in
+        # dieselbe Sekunde fallen -- die sekundengenaue Wanduhr-Zeit wäre
+        # dann fälschlich "früher" als der mikrosekundengenaue DB-Wert,
+        # obwohl das JSON nachweislich NACH dem DB-Schreiben entsteht.
+        # Fix: derselbe Wert, den `_db_newer_than_json_entry()` beim
+        # nächsten Lauf als Vergleichsbasis abfragt (`latest_result_
+        # timestamp`), wird HIER direkt übernommen -- Vergleich künftig
+        # DB-Zeitstempel gegen DB-Zeitstempel, nicht mehr Wanduhr gegen
+        # DB-Zeitstempel. Ohne DB-Zeile (z.B. Skip-Genre-Track ganz ohne
+        # Anbieter-Versuch) fällt es auf die Wanduhr zurück -- für diese
+        # Tracks fällt ohnehin nie Live-Arbeit an, ein falsches "veraltet"
+        # kostet dort nichts.
+        db_ts = cache_store.latest_result_timestamp(conn, artist_key, titel_key)
         dir_cache[cache_key] = {
             "v": lyrics_core.__version__,
             "r": cache_result,
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            "ts": db_ts or datetime.now().isoformat(timespec="seconds"),
             **extras,
         }
         lyrics_core._save_cache(audio_path.parent, dir_cache, lockfile=folder_lock)

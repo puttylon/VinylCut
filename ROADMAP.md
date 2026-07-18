@@ -1,5 +1,79 @@
 # VinylCut Roadmap
 
+## ✓ Bugfix: "Kontrastiver Hintergrund-Kontext gebaut..."-Zeile löschte Statuszeile nicht sauber
+
+**Auslöser:** Beim Live-Test des großen `--recursive`-Nachhollaufs (siehe unten)
+bemerkte der Nutzer, dass die Zeile „Kontrastiver Hintergrund-Kontext
+gebaut: ..." weiterhin mitten in einer anderen Zeile stehenblieb — dieselbe
+Bug-Klasse wie die bereits behobene Ordner-Kopfzeile und die
+Whisper-Modell-Ladung, hier an einer DRITTEN Stelle: `lyrics_core.
+_build_contrastive_context()` druckte diese Zeile über einen blossen
+`print()`, ohne vorher `_clear_status()` aufzurufen — landet direkt nach
+einer transienten Statuszeile (z.B. `fetch_providers.py`s "i/N: ..."), blieb
+deren Text stehen. Fix: `_clear_status()` davor eingefügt, exakt wie bei den
+beiden anderen Fundstellen. `lyrics_core.__version__` auf `1.13.20` erhöht.
+
+## ✓ Bugfix: JSON-Ordner-Cache hielt bereits fertige Tracks fälschlich für veraltet — bei JEDEM Lauf neu
+
+**Auslöser:** Nutzer meldete beim Live-Test von `songtext_pipeline.py --recursive`
+über die ganze Bibliothek: bereits vollständig bearbeitete Ordner (z.B.
+„2 Unlimited/No Limits", die komplette ABBA-Diskografie) wurden bei JEDEM
+erneuten Lauf komplett neu bewertet — auch reine Konsens-Tracks ohne
+Whisper, und das wiederholte sich sogar nach dem ersten Reparaturversuch
+unten weiterhin bei jedem Lauf ("das wiederholt sich bei jedem Lauf").
+
+**Ursache, Teil 1 (bereits vermutet und geprüft):**
+`lyrics_core._db_newer_than_json_entry()` vergleicht den JSON-Cache-
+Zeitstempel (`ts`, per `datetime.now().isoformat(timespec="seconds")` —
+Sekunden-genau, lokale Wanduhr) gegen den jüngsten Datenbank-Zeitstempel
+für den Song (`cache_store.latest_result_timestamp()` — Mikrosekunden-
+genau, UTC). Landet der JSON-Schreibvorgang in derselben Sekunde wie der
+letzte DB-Eintrag (bei einem zügigen Durchlauf keine Seltenheit), wirkt die
+sekundengenaue Wanduhr-Zeit fälschlich "früher" als der mikrosekunden-
+genaue DB-Wert — der Track gilt fortan für immer als potenziell veraltet.
+
+**Erster Fix (Teil 1):** `write_lrc.py` schreibt jetzt statt
+`datetime.now()` direkt den Wert von `cache_store.latest_result_timestamp()`
+als `ts` in den JSON-Eintrag — Vergleich künftig Datenbank-Zeitstempel
+gegen Datenbank-Zeitstempel (dieselbe Uhr), nicht mehr Wanduhr gegen
+Datenbank-Uhr.
+
+**Ursache, Teil 2 (live entdeckt, NICHT vorher erkannt — Fix aus Teil 1
+griff dadurch zunächst gar nicht):** `lyrics_core._save_cache()` und
+`_load_cache()` entscheiden beim Zusammenführen zweier Cache-Einträge
+für denselben Track "welcher ist neuer" ebenfalls über `entry.get("ts", "")
+>= disk_cache[key].get("ts", "")` — ein reiner STRING-Vergleich. Der neue,
+UTC-formatierte Zeitstempel aus Fix 1 (z.B. `"...T18:02:03.719825+00:00"`)
+ist als TEXT kleiner als ein alter, lokal-formatierter Zeitstempel (z.B.
+`"...T20:02:03"`), weil `'1'` < `'2'` an der Stundenstelle — unabhängig
+davon, welcher Zeitpunkt real später liegt. `_save_cache()` verwarf dadurch
+den frisch korrekt berechneten neuen Eintrag beim Schreiben STILLSCHWEIGEND
+wieder zugunsten des alten, weiterhin fehlerhaften Eintrags auf der Platte
+— Fix 1 wurde dadurch bei jedem Lauf sofort wieder rückgängig gemacht, ohne
+jede Fehlermeldung.
+
+**Fix, Teil 2:** Neue Funktion `lyrics_core._parse_cache_ts()` — parst
+`ts` zu einem echten, timezone-aware `datetime` (naive/lokale Werte werden
+via `astimezone()` als Ortszeit interpretiert, bereits-aware Werte bleiben
+unverändert), fehlende/kaputte Werte gelten als minimal alt. `_load_cache()`
+(NFC-Dubletten-Merge) und `_save_cache()` (Merge gegen Festplattenstand)
+nutzen diesen Parser jetzt statt des rohen Stringvergleichs.
+
+**Live verifiziert (nicht nur Unit-Test):** Realer Fall aus der
+Produktions-Bibliothek nachgestellt (ABBA – „Dancing Queen", exakter
+Zeitstempel-Konflikt `"...T20:02:03"` vs. `"...T18:02:03.719825+00:00"`) —
+`_parse_cache_ts` erkennt den neuen Wert jetzt korrekt als später. Danach
+zweimal echt gegen die Produktions-DB + die reale `.fetch_songtext.json`
+laufen lassen: erster Lauf heilt den Eintrag (schreibt den korrekten
+DB-Zeitstempel), zweiter Lauf überspringt den Track korrekt (kein erneuter
+`evaluate_song()`-Aufruf, per Spy bestätigt). 490/490 Tests grün, `ruff`
+sauber. `lyrics_core.__version__` auf `1.13.19` erhöht.
+
+**Für bestehende Bibliotheken:** Kein Migrationsskript nötig — jeder Track
+mit einem durch diesen Bug "verseuchten" Eintrag wird beim nächsten
+Antreffen ein letztes Mal neu bewertet (heilt sich dabei selbst), danach
+dauerhaft korrekt übersprungen.
+
 ## ⧗ Offen — Aufräumen: welche Skripte werden noch gebraucht, welche können weg
 
 **Ziel:** Projekt schlank halten — alles, was nicht mehr gebraucht wird, weg.

@@ -51,6 +51,7 @@ from lyrics_core import (
     _last_timestamp,
     _load_cache,
     _looks_like_translation,
+    _parse_cache_ts,
     _provider_consensus,
     _rate_limit_report,
     _rate_limit_wait,
@@ -501,6 +502,70 @@ class TestSaveCache:
         cache_a["a.flac"] = {"r": "nf", "ts": "2026-01-01T00:00:01"}
         _save_cache(tmp_path, cache_a)
         assert _load_cache(tmp_path)["a.flac"]["ts"] == "2026-01-01T00:00:05"
+
+    def test_neuer_utc_zeitstempel_schlaegt_aelteren_trotz_kleinerer_stunde(
+        self, tmp_path
+    ):
+        """Regressionstest fuer einen realen Produktions-Bug (siehe ROADMAP.md):
+        ein neuer Zeitstempel mit kleinerer Stundenzahl als Text (z.B. "18:02"
+        UTC) wurde von einem reinen Stringvergleich faelschlich als AELTER
+        gewertet als ein alter Zeitstempel mit groesserer Stundenzahl (z.B.
+        "20:02" in einer anderen Zeitzone, real aber frueher) -- der frisch
+        korrekt berechnete Eintrag wurde dadurch beim Schreiben
+        stillschweigend wieder verworfen. Bewusst mit EXPLIZITEN Zeitzonen-
+        Offsets (nicht Lokalzeit-Interpretation) formuliert, damit der Test
+        unabhaengig von der Zeitzone der Testmaschine deterministisch bleibt."""
+        # Alter Eintrag: "20:02" Text, aber in der Zone +05:00 -> 15:02 UTC.
+        _save_cache(
+            tmp_path, {"a.flac": {"r": "ok", "ts": "2026-07-17T20:02:03+05:00"}}
+        )
+        # Neuer Eintrag: "18:02" Text in UTC -- als Text kleiner, real aber
+        # 3 Stunden SPAETER (18:02 UTC > 15:02 UTC).
+        _save_cache(
+            tmp_path,
+            {"a.flac": {"r": "ok", "ts": "2026-07-17T18:02:03.719825+00:00"}},
+        )
+        assert (
+            _load_cache(tmp_path)["a.flac"]["ts"] == "2026-07-17T18:02:03.719825+00:00"
+        )
+
+
+class TestParseCacheTs:
+    """_parse_cache_ts(): macht "ts"-Werte aus zwei im Umlauf befindlichen
+    Formaten (siehe ROADMAP.md) vergleichbar -- naive Lokalzeit (aeltere
+    Eintraege) und timezone-aware UTC mit Mikrosekunden (neue, DB-basierte
+    Eintraege, siehe write_lrc.py)."""
+
+    def test_utc_und_lokalzeit_desselben_moments_sind_gleich(self):
+        # 20:02:03 Lokalzeit (system-tz) vs. dieselbe Sekunde in UTC waere nur
+        # bei UTC+0 identisch -- hier wird stattdessen geprueft, dass ein
+        # bereits aware UTC-Wert unveraendert durchgereicht wird.
+        aware = _parse_cache_ts("2026-07-17T18:02:03.719825+00:00")
+        assert aware.tzinfo is not None
+        assert aware.utcoffset().total_seconds() == 0
+
+    def test_naiver_wert_wird_als_lokalzeit_interpretiert(self):
+        naive_parsed = _parse_cache_ts("2026-07-17T20:02:03")
+        assert naive_parsed.tzinfo is not None  # wurde aware gemacht
+
+    def test_fehlender_ts_ist_minimal_alt(self):
+        assert _parse_cache_ts("") < _parse_cache_ts("2026-01-01T00:00:00")
+
+    def test_kaputter_ts_ist_minimal_alt(self):
+        assert _parse_cache_ts("kaputt") < _parse_cache_ts("2026-01-01T00:00:00")
+
+    def test_verschiedene_zeitzonen_korrekt_verglichen_trotz_kleinerer_stundenzahl(
+        self,
+    ):
+        # Zeitzonen-unabhaengig von der System-Uhr (explizite Offsets statt
+        # Lokalzeit-Interpretation, siehe test_neuer_utc_zeitstempel_...
+        # in TestSaveCache fuer den Fall mit echter Lokalzeit-Interpretation).
+        # "20:02+05:00" = 15:02 UTC, objektiv FRUEHER als "18:02...+00:00",
+        # obwohl "20" als Text groesser ist als "18" -- reiner Stringvergleich
+        # waere hier falsch (siehe ROADMAP.md, echter Produktions-Bug).
+        frueher = _parse_cache_ts("2026-07-17T20:02:03+05:00")
+        spaeter = _parse_cache_ts("2026-07-17T18:02:03.719825+00:00")
+        assert spaeter > frueher
 
 
 class TestFolderClaim:

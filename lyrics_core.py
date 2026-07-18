@@ -31,7 +31,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
 
@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.18"
+__version__ = "1.13.20"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1038,6 +1038,11 @@ def _build_contrastive_context() -> None:
     _contrastive_lang_pools = pools
 
     n_docs = _contrastive_idf[0]
+    # _clear_status() vor dem print(): loescht eine noch stehende transiente
+    # Statuszeile (z.B. "i/N: ..." aus fetch_providers.py), sonst "beisst"
+    # sich die Ausgabe auf derselben Terminalzeile -- gleiche Ursache wie bei
+    # der Ordner-Kopfzeile und der Whisper-Modell-Ladung (siehe ROADMAP.md).
+    _clear_status()
     print(
         f"Kontrastiver Hintergrund-Kontext gebaut: {n_docs} IDF-Dokumente, "
         f"{len(song_texts)} Cache-Songs, {len(pools)} Sprachen mit Hintergrund-Pool."
@@ -1532,6 +1537,34 @@ def _parse_version(v: str) -> tuple[int, ...]:
         return (0,)
 
 
+def _parse_cache_ts(ts: str) -> datetime:
+    """Vergleichbarer Zeitpunkt für einen Cache-Eintrag-"ts"-Wert -- NIE als
+    reinen String vergleichen (siehe _load_cache/_save_cache, beide mergen
+    per "neuerer ts gewinnt"). Zwei Formate sind im Umlauf: das ältere,
+    naive Lokalzeit-Format ohne Zeitzone/Mikrosekunden
+    (`datetime.now().isoformat(timespec="seconds")`, z.B. "...T20:02:03")
+    und das neuere, UTC-aware DB-Format mit Mikrosekunden (siehe
+    write_lrc.py, "ts" = `cache_store.latest_result_timestamp()`, z.B.
+    "...T18:02:03.719825+00:00"). Ein reiner Stringvergleich zwischen beiden
+    ist FALSCH: "18:02" (UTC) < "20:02" (Lokalzeit) lexikographisch, obwohl
+    beides praktisch derselbe Moment sein kann (Real-Bug, live gegen die
+    Produktions-DB gefunden -- siehe ROADMAP.md: ein frisch korrekt
+    berechneter DB-Zeitstempel wurde dadurch beim Schreiben in _save_cache
+    STILLSCHWEIGEND wieder verworfen, der alte, fehlerhafte Eintrag blieb
+    liegen. Fix: beide Formen auf denselben timezone-aware Vergleichspunkt
+    normalisieren -- ein naiver Wert wird als Lokalzeit interpretiert
+    (`astimezone()`), ein bereits aware Wert (endet auf "+00:00" o.ä.)
+    bleibt unverändert. Fehlt "ts" oder ist er nicht parsbar, gilt er als
+    minimal alt (verliert jeden Vergleich)."""
+    if not ts:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return dt.astimezone() if dt.tzinfo is None else dt
+
+
 def _load_cache(folder: Path) -> dict:
     try:
         raw = json.loads((folder / _CACHE_FILENAME).read_text(encoding="utf-8"))
@@ -1541,11 +1574,14 @@ def _load_cache(folder: Path) -> dict:
     # Unicode-normalisiert sein (NFC vs. NFD) — z.B. lokal geschrieben, dann
     # über SMB gelesen. Ohne Normalisierung verpasst der Cache-Lookup
     # vorhandene Einträge und legt Duplikate an. Beim Laden auf NFC
-    # vereinheitlichen, bei Kollision den neueren Eintrag (per "ts") behalten.
+    # vereinheitlichen, bei Kollision den neueren Eintrag (per "ts",
+    # siehe _parse_cache_ts) behalten.
     cache: dict = {}
     for key, entry in raw.items():
         norm_key = unicodedata.normalize("NFC", key)
-        if norm_key not in cache or entry.get("ts", "") > cache[norm_key].get("ts", ""):
+        if norm_key not in cache or _parse_cache_ts(
+            entry.get("ts", "")
+        ) > _parse_cache_ts(cache[norm_key].get("ts", "")):
             cache[norm_key] = entry
     return cache
 
@@ -1637,9 +1673,9 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
             fcntl.flock(lockfile, fcntl.LOCK_EX)
         disk_cache = _load_cache(folder)
         for key, entry in cache.items():
-            if key not in disk_cache or entry.get("ts", "") >= disk_cache[key].get(
-                "ts", ""
-            ):
+            if key not in disk_cache or _parse_cache_ts(
+                entry.get("ts", "")
+            ) >= _parse_cache_ts(disk_cache[key].get("ts", "")):
                 disk_cache[key] = entry
         (folder / _CACHE_FILENAME).write_text(
             json.dumps(disk_cache, ensure_ascii=False, indent=2), encoding="utf-8"

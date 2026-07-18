@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.21"
+__version__ = "1.13.22"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -296,6 +296,22 @@ def _clean_query_title(title: str) -> str:
 def _is_skip_genre(genre: str) -> bool:
     g = genre.lower()
     return any(kw in g for kw in _SKIP_GENRE_KEYWORDS)
+
+
+def _song_keys(artist: str, title: str) -> tuple[str, str]:
+    """Die EINE gemeinsame Stelle für (artist_key, titel_key) -- Vorgabe:
+    mehrfach genutzte Funktionen gehören in ein zentrales Modul, nicht
+    redundant in jeden Aufrufer kopiert (siehe ROADMAP.md). scan_songs.py
+    und songtext_pipeline.build_file_song_map() bauten diese drei Zeilen
+    (_clean_query_title + zweimal cache_store.normalize_key) bisher
+    unabhängig voneinander -- laufen sie auseinander, findet die
+    Datei-zu-Song-Zuordnung den passenden Eintrag in "songs" nicht mehr.
+
+    Titel wird VOR der Normalisierung über _clean_query_title bereinigt --
+    exakt dieselbe Reihenfolge, die beim Anlegen der songs-Zeile gilt (siehe
+    CACHE_DESIGN.md, "Normalisierung")."""
+    clean_title = _clean_query_title(title) if title else title
+    return cache_store.normalize_key(artist), cache_store.normalize_key(clean_title)
 
 
 def _load_env() -> dict:
@@ -1717,6 +1733,43 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
         if lockfile is not None and own_lock:
             fcntl.flock(lockfile, fcntl.LOCK_UN)
             lockfile.close()
+
+
+def _build_cache_entry(
+    conn: sqlite3.Connection,
+    artist_key: str,
+    titel_key: str,
+    result: str,
+    extras: dict,
+) -> dict:
+    """Baut einen JSON-Ordner-Cache-Eintrag ("v"/"r"/"ts" + extras) -- die
+    EINE gemeinsame Stelle für write_lrc.py UND cut.py, statt zwei getrennter
+    Kopien derselben Logik (siehe ROADMAP.md, "JSON-Zeitstempel vs.
+    DB-Zeitstempel": genau diese Redundanz sorgte dafür, dass cut.py den
+    Zeitstempel-Fix nicht automatisch mitbekam, als er nur in write_lrc.py
+    gemacht wurde -- Nutzer-Feedback: "ich erwarte, dass solche Dinge in
+    einem Modul zentral liegen").
+
+    "ts" ist bewusst NICHT die Wanduhr-Zeit: zwei unabhängige Uhren (Wanduhr
+    beim JSON-Schreiben, DB-Zeitstempel beim Anbieter-/Whisper-Schreiben)
+    können bei einem schnellen Durchlauf in dieselbe Sekunde fallen -- die
+    sekundengenaue Wanduhr-Zeit wäre dann fälschlich "früher" als der
+    mikrosekundengenaue DB-Wert. Übernimmt stattdessen
+    `cache_store.latest_result_timestamp()` direkt; ohne DB-Zeile (z.B.
+    Skip-Genre-Track ganz ohne Anbieter-Versuch) fällt es auf die Wanduhr
+    zurück -- für diese Tracks fällt ohnehin nie Live-Arbeit an, ein
+    falsches "veraltet" kostet dort nichts."""
+    db_ts = (
+        cache_store.latest_result_timestamp(conn, artist_key, titel_key)
+        if cache_store is not None
+        else None
+    )
+    return {
+        "v": __version__,
+        "r": result,
+        "ts": db_ts or datetime.now().isoformat(timespec="seconds"),
+        **extras,
+    }
 
 
 def _cache_entry_valid(entry: dict) -> bool:

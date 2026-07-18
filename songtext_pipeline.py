@@ -73,9 +73,7 @@ def build_file_song_map(
     for audio_path, artist, title, _genre in entries:
         if not artist and not title:
             continue
-        clean_title = lyrics_core._clean_query_title(title) if title else title
-        artist_key = cache_store.normalize_key(artist)
-        titel_key = cache_store.normalize_key(clean_title)
+        artist_key, titel_key = lyrics_core._song_keys(artist, title)
         row = conn.execute(
             "SELECT 1 FROM songs WHERE artist_key=? AND titel_key=?",
             (artist_key, titel_key),

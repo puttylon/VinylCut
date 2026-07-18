@@ -1,5 +1,64 @@
 # VinylCut Roadmap
 
+## ✓ Redundanz-Aufräumen Runde 1: cut.py-Duplikate behoben, library.py angelegt
+
+**Auslöser:** Nutzer bemerkte beim Testen des Zeitstempel-Fixes (siehe unten),
+dass `cut.py` mehrere Gigabyte RAM braucht -- Ursache war eine weitere,
+bisher unentdeckte Redundanz. Daraufhin explizite Vorgabe: "wenn Funktionen
+in mehreren Modulen (.py) benutzt werden, sind diese in einem zentralen
+Bibliotheksmodul zu implementieren und von anderen Stellen zu nutzen,
+statt redundant programmiert zu werden" -- vertikale Schichtung (mehrere
+fachspezifische Bibliotheken statt einer einzigen Datei) ist dabei
+ausdrücklich erlaubt.
+
+**Behoben:**
+1. **`cut.py` hatte eine eigene Kopie der JSON-Cache-Eintrag-Bau-Logik**
+   (Version/Ergebnis/Zeitstempel), unabhängig von `write_lrc.py` gepflegt --
+   der Zeitstempel-Fix (siehe unten) wäre sonst nur in `write_lrc.py`
+   gelandet. Neue gemeinsame Funktion `lyrics_core._build_cache_entry()`,
+   beide Aufrufer nutzen sie jetzt.
+2. **`cut.py` lud eager das Whisper-Modell "medium"** (`lyrics_core.
+   _get_whisper_model(...)`) nur um zu prüfen, ob faster-whisper überhaupt
+   installiert ist -- kostete real ~1 GB RAM, auch wenn der Track gar kein
+   Whisper brauchte oder das Album nicht-englisch war und nur `large-v3`
+   gebraucht hätte (dann sogar BEIDE Modelle gleichzeitig geladen).
+   `evaluate_lyrics.py` hatte dafür längst `lyrics_core.
+   _faster_whisper_available()` (reiner Import-Check, ~200 MB) --
+   `cut.py` nutzte ihn nur nicht. Live gemessen: 1021 MB (alt) vs. 202 MB
+   (neu).
+3. **Neue Datei `library.py`** -- zentrale, UI-unabhängige Bibliothek für
+   Funktionen, die mehrere Kern-Skripte brauchen. Erster Inhalt:
+   `parse_offset()`/`parse_preview_duration()`, vorher wortgleich in
+   `cut.py` UND `assemble.py` dupliziert.
+4. **`assemble.py`s `fmt_time()` gelöscht** -- toter Code (nirgends in
+   Produktion aufgerufen), Duplikat von `cut_ui.fmt_dur()`. Tests auf
+   `fmt_dur` umgestellt (dort bereits mit Vorzeichen-Fall abgedeckt).
+5. **Titel-Normalisierung** (`_clean_query_title` + 2× `cache_store.
+   normalize_key`) war wortgleich in `scan_songs.py` UND
+   `songtext_pipeline.build_file_song_map()` -- neue gemeinsame Funktion
+   `lyrics_core._song_keys(artist, title)`.
+
+491/491 Tests grün, `ruff` sauber. `cut.py` auf `1.9.18`, `assemble.py` auf
+`1.1.7`, `lyrics_core.__version__` auf `1.13.22` erhöht.
+
+**Vollständiges Audit über alle 18 Produktionsmodule** (Nutzer-Vorgabe:
+"ich will am Ende ALLE Module auf Redundanz geprüft wissen") ergab weitere
+Funde, Umsetzung folgt in einem separaten Worktree:
+- `_reject_reason()`/`_method()` dreifach/zweifach wortgleich in
+  `lrc_analyse.py`, `lrc_recheck.py`, `whisper_analyse.py` -- Ziel laut
+  Nutzer: `library.py`.
+- `_default_db_path()` identisch in 4 Skripten, `compare_whisper_models.py`
+  zeigte abweichend auf eine andere Datenbankdatei (Kopier-Fehler laut
+  Nutzer) -- Produktions-Datenbank bereits umbenannt: `fetch_songtext_
+  cache.db` → `cache.db` (unschädlich bei laufendem Prozess, per `lsof`
+  bestätigt: offene Dateihandles überleben die Umbenennung unverändert).
+- JSON-Cache-Durchlauf-Boilerplate in denselben drei Analyse-Tools
+  (`lrc_analyse.py` liest den Baum dabei sogar 4× neu ein) -- zurückgestellt.
+- ffprobe-Dauer-Ermittlung ähnlich in `assemble.py`/`fetch_metadata.py` --
+  Trade-off, noch nicht entschieden.
+- Sauber bestätigt, keine Funde: `cache_store.py`, `cut_ui.py`,
+  `assemble_ui.py`, `library.py`, `fetch_metadata.py`.
+
 ## ✓ Optimierung: kontrastiver Kontext wird seltener und nur bei echten Änderungen neu gebaut
 
 **Auslöser:** Beim großen `--recursive`-Nachhollauf (siehe unten) wollte der

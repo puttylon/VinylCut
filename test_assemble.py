@@ -1,28 +1,8 @@
-from assemble import fmt_time, get_segments, suggest_clean_name
+from assemble import get_segments, suggest_clean_name
 
 
 def h(label, pos):
     return {"label": label, "pos": pos}
-
-
-class TestFmtTime:
-    def test_zero(self):
-        assert fmt_time(0) == "0:00.00"
-
-    def test_one_minute(self):
-        assert fmt_time(60) == "1:00.00"
-
-    def test_mixed(self):
-        assert fmt_time(154) == "2:34.00"
-
-    def test_centiseconds(self):
-        assert fmt_time(154.37) == "2:34.37"
-
-    def test_sub_second(self):
-        assert fmt_time(0.8) == "0:00.80"
-
-    def test_large(self):
-        assert fmt_time(3661) == "61:01.00"
 
 
 class TestGetSegments:
@@ -82,7 +62,10 @@ class TestGetSegments:
 
 class TestSuggestCleanName:
     def test_removes_dash_raw(self):
-        assert suggest_clean_name("The Subways - When I'm With You-raw") == "The Subways - When I'm With You"
+        assert (
+            suggest_clean_name("The Subways - When I'm With You-raw")
+            == "The Subways - When I'm With You"
+        )
 
     def test_removes_underscore_raw(self):
         assert suggest_clean_name("Artist - Album_raw") == "Artist - Album"

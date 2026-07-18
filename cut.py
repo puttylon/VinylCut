@@ -9,7 +9,6 @@ import tempfile
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 
 import fetch_metadata as mf
@@ -21,9 +20,10 @@ import evaluate_lyrics
 import fetch_providers
 import lyrics_core
 from cut_ui import build_cutting_panel, build_metadata_panel, live_input
+from library import parse_offset, parse_preview_duration
 from lyrics_core import _load_cache, _save_cache, _cache_entry_valid
 
-__version__ = "1.9.17"
+__version__ = "1.9.18"
 
 
 def _default_db_path() -> Path:
@@ -95,23 +95,8 @@ DEFAULT_PLAY_DURATION_SEC = 3.0
 _MAX_PLAUSIBLE_GAP = (
     10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
 )
-_MIN_PREVIEW_SEC = 2.0  # Untergrenze für "p<Sek>" (Bedienfehler-Schutz)
-_MAX_PREVIEW_SEC = 30.0  # Obergrenze für "p<Sek>"
 
 console = Console()
-
-
-def parse_offset(s: str) -> float:
-    s = s.strip()
-    sign = 1.0
-    if s.startswith("+"):
-        s, sign = s[1:], 1.0
-    elif s.startswith("-"):
-        s, sign = s[1:], -1.0
-    if ":" in s:
-        m, sec = s.split(":", 1)
-        return sign * (int(m) * 60 + float(sec))
-    return sign * float(s)
 
 
 def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float:
@@ -120,24 +105,6 @@ def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float
     if "dur_s" in tracks[i - 1]:
         return starts[i - 1] + tracks[i - 1]["dur_s"] + last_gap
     return starts[i - 1]
-
-
-def parse_preview_duration(action: str) -> float | None:
-    """Parst 'p<Sek>' (z.B. 'p18') zur Änderung der Preview-Dauer.
-
-    Gibt None zurück wenn kein p<Zahl>-Muster vorliegt oder der Wert
-    außerhalb [_MIN_PREVIEW_SEC, _MAX_PREVIEW_SEC] liegt — die Eingabe wird
-    dann komplett ignoriert (Bedienfehler-Schutz), nicht auf die Grenze geklemmt.
-    """
-    if not (action.startswith("p") and action[1:]):
-        return None
-    try:
-        new_dur = float(action[1:])
-    except ValueError:
-        return None
-    if _MIN_PREVIEW_SEC <= new_dur <= _MAX_PREVIEW_SEC:
-        return new_dur
-    return None
 
 
 def compute_last_gap(
@@ -827,10 +794,18 @@ def main():
             # Kontext einmal laden, nicht pro Track (siehe evaluate_lyrics.py).
             conn = cache_store.open_cache(_default_db_path())
             fetch_providers._prepare_lyrics_core_globals(conn)
-            if (
-                lyrics_core._get_whisper_model(evaluate_lyrics._WHISPER_MODEL_EN)
-                is None
-            ):
+            # _faster_whisper_available() statt _get_whisper_model(): reiner
+            # Import-Check, laedt KEIN Modell in den Speicher (siehe
+            # lyrics_core._faster_whisper_available-Docstring, ROADMAP.md --
+            # derselbe Speicher-Befund, den evaluate_all() schon fixte, war
+            # in cut.py bisher nicht mitgezogen: jedes Album lud eager
+            # "medium", auch wenn gar kein Track Whisper brauchte oder das
+            # Album rein nicht-englisch war und nur "large-v3" gebraucht
+            # hätte -- dann sogar BEIDE Modelle gleichzeitig im Speicher).
+            # Das tatsächlich benötigte Modell wird weiterhin verzögert erst
+            # in lyrics_core._whisper_best() geladen, wenn ein Track es
+            # wirklich braucht.
+            if not lyrics_core._faster_whisper_available():
                 print(
                     "Warnung: faster-whisper nicht verfügbar -- Songtexte ohne "
                     "3-Provider-Konsens werden nicht verifiziert."
@@ -877,12 +852,21 @@ def main():
                         break
                     found = lrc_path.exists()
                     lrc_status[idx] = "✓" if found else "✗"
-                    lrc_cache[audio_name] = {
-                        "v": lyrics_core.__version__,
-                        "r": "ok" if found else "nf",
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        **_extras,
-                    }
+                    # Gemeinsame Stelle mit write_lrc.py fuer den
+                    # Cache-Eintrag (siehe lyrics_core._build_cache_entry-
+                    # Docstring, ROADMAP.md) -- baut u.a. "ts" aus dem
+                    # DB-Zeitstempel statt der Wanduhr-Zeit. Dieselben
+                    # normalisierten Schluessel, die _fetch_lyrics_for_track()
+                    # intern schon verwendet.
+                    artist_key = cache_store.normalize_key(artist)
+                    titel_key = cache_store.normalize_key(track["title"])
+                    lrc_cache[audio_name] = lyrics_core._build_cache_entry(
+                        conn,
+                        artist_key,
+                        titel_key,
+                        "ok" if found else "nf",
+                        _extras,
+                    )
                     _save_cache(track_out_dir, lrc_cache)
                     live.update(panel("songtext", export_status, lrc_status))
                     live.refresh()

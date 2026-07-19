@@ -33,8 +33,8 @@ hier erstmals umgesetzt): Englischsprachige Songs nutzen `medium`
 (Qualitätsunterschied zu `large-v3` laut Testlauf zu gering für dessen ~40 %
 Mehrkosten pro Song). Nicht-englische Songs (Sprach-Hint != "en",
 insbesondere Deutsch und gemischtsprachige Songs) nutzen `large-v3` -- dort
-ist der Qualitätsgewinn laut Testlauf real und deutlich (siehe
-whisper_modellvergleich_ergebnis.md). lyrics_core._whisper_best() selbst
+ist der Qualitätsgewinn laut Testlauf real und deutlich.
+lyrics_core._whisper_best() selbst
 kennt kein Modell-Argument -- es liest _WHISPER_MODEL immer als Modul-Global.
 _select_whisper_model() wird deshalb VOR jedem _whisper_best()-Aufruf
 verwendet, um dieses Global kurzzeitig auf das passende Modell zu setzen

@@ -215,14 +215,11 @@ _lrclib_dump_conn = None
 # Tabelle aus der Cache-DB (siehe _build_contrastive_context) — keine Datei-
 # basierte, sprachspezifische Tabelle mehr — ein DB-Test hat validiert, dass
 # eine sprachunabhängige globale IDF für die kontrastive Entscheidung
-# ausreicht (AUC-Differenz global vs. sprachrichtig DE: −0,0007). Siehe
-# scratch_contrastive_test_ergebnis.md (Nachbar-Worktree) für die volle
-# Analyse.
+# ausreicht (AUC-Differenz global vs. sprachrichtig DE: −0,0007).
 # Marge-Schwelle: an 8200 Cache-Texten / 680 Eval-Songs (EN+DE gemeinsam)
 # optimiert — 95,0% Genauigkeit ggü. 90,6% der heutigen zwei sprachspezifischen
-# absoluten Schwellen (siehe scratch_contrastive_test_ergebnis.md Abschnitt 3).
-# PROVISORISCH aus synthetischer Kalibrierung, nicht an einem echten
-# Produktionslauf verifiziert.
+# absoluten Schwellen. PROVISORISCH aus synthetischer Kalibrierung, nicht an
+# einem echten Produktionslauf verifiziert.
 _CONTRASTIVE_MARGIN = 0.0115
 # Hybrid-Boden (v1.9.14): ein hoher absoluter Score allein reicht schon zur
 # Akzeptanz, unabhängig vom Hintergrund-Vergleich -- faengt Faelle ab, in denen

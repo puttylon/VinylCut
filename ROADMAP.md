@@ -1,5 +1,29 @@
 # VinylCut Roadmap
 
+## ✓ Aufräumen: WER/Modellvergleich-Rohdaten + -Doku entfernt
+
+Alle Rohdaten und Zwischen-Dokus der längst abgeschlossenen WER- und
+Modellvergleichs-Experimente entfernt (Entscheidungen stehen bereits
+zusammengefasst in diesem Dokument bzw. als Codekommentar, siehe
+"Kontrastive Marge statt absoluter Schwelle" oben und "Nachtrag: large-v3
+ergänzt"): `CHECKPOINT_kontrastiv.md`, `bigram_jaccard_test_ergebnis.md`,
+`contrastive_reselection_check.md`, `contrastive_run_vergleich.md` (getrackt),
+sowie untracked liegen gebliebene `wer_whisper_uneinigkeit.md`,
+`scratch_contrastive_test_ergebnis.md`, `whisper_modellvergleich_ergebnis.md`,
+`whisper_modellvergleich/`, `contrastive_experiment_log.csv`,
+`large_v3_run.log`, `speed_test.log`. Tote Dateiverweise in `lyrics_core.py`-
+Kommentaren, `evaluate_lyrics.py`-Docstring und `README.md` entsprechend
+entfernt (Zahlen/Schlussfolgerung blieben dort ohnehin schon inline stehen).
+`compare_whisper_models.py` bleibt als wiederverwendbares Werkzeug erhalten,
+nur seine alte Beispiel-Ausgabe ist weg.
+
+**Einzige echte Datenlücke:** `contrastive_experiment_log.csv` war die
+einzige verbliebene Quelle für 784 rohe Whisper-Einzelentscheidungen aus dem
+alten Kalibrierungslauf — die Schlussfolgerung daraus (kontrastive Marge statt
+absoluter Schwelle) bleibt erhalten, die Rohdaten selbst nicht mehr.
+
+528/528 Tests grün, `ruff` sauber.
+
 ## ✓ assemble.py: Normton-Fix, Default-Kennzeichnung, Umbenennen-Vorschlag
 
 **Normton-Bug (analog zum `cut.py`-Fix in v1.9.6):** In der Crossfade-Vorschau

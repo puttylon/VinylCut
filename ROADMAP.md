@@ -1,5 +1,64 @@
 # VinylCut Roadmap
 
+## ✓ Terminal-Farbschema fest verdrahtet, UI-Styles zentralisiert
+
+**Auslöser:** Nutzer-Screenshot zeigte `cut.py`s Rich-Panel auf grünem
+Terminal-Hintergrund praktisch unlesbar (blaue Rahmen, roter/grauer Text) --
+weder `cut_ui.py` noch `assemble_ui.py` setzten je einen Hintergrund, die
+Darstellung hing komplett vom Terminal.app-Profil des Nutzers ab und war bei
+mehreren Profilen betroffen.
+
+`Console(style="bright_white on black")` in `cut.py`/`assemble.py` erzwingt
+jetzt Vordergrund UND Hintergrund für die komplette Live-Session, unabhängig
+vom Terminal-Profil.
+
+Zusätzlich auf Nutzerwunsch die bisher an 15+ Stellen wortgleich wiederholten
+Style-Strings (`"grey35"`, `"blue dim"`, Status-Symbole ✓/→/○, Delta-Ampel
+grün/gelb/rot) in `cut_ui.py` zentralisiert (`MUTED`, `BORDER`,
+`status_symbol()`, `row_style()`, `severity_style()`, `normton_text()`) und
+`assemble_ui.py` importiert sie, statt sie erneut zu duplizieren.
+
+528/528 Tests grün, `ruff` sauber. `cut.py` auf `1.9.19`, `assemble.py` auf
+`1.1.8` erhöht.
+
+## ✓ Whisper-Early-Stop: Live-Transkription bricht bei sicherer Erkennung ab
+
+`lyrics_core._transcribe_with_early_stop()` ersetzt `_transcribe()` im
+Cache-Miss-Pfad von `_whisper_best()`: konsumiert faster-whisper's
+Segment-Generator inkrementell statt per `list(...)` alles auf einmal zu
+materialisieren, und bricht ab, sobald ein Kandidat über
+`_EARLY_STOP_N_CONFIRM=3` aufeinanderfolgende 15s-Checkpoints stabil die
+kontrastive Marge (+`_EARLY_STOP_MARGIN_BUFFER=0,10` Sicherheitspuffer) UND
+einen Mindestabstand zum zweitbesten ECHTEN Kandidaten (`_EARLY_STOP_SEP_MIN`,
+nach Dedupe wortidentischer Mehrfach-Provider-Texte via
+`_dedupe_word_sets`/`_EARLY_STOP_DEDUPE_JACCARD=0,80`) erreicht, plus ein
+hartes Mindest-Gate (`_EARLY_STOP_MIN_WORDS=20`/`_EARLY_STOP_MIN_SEC=30`).
+NUR früh AKZEPTIEREN, nie früh ablehnen -- has_vocals/Ablehnung laufen
+unverändert am vollen Transkript. Ein früh gestopptes (unvollständiges)
+Transkript wird NICHT im Song-Cache persistiert.
+
+An 53 echten, verifizierten Songs validiert (45 en/`medium`, 8 de/`large-v3`,
+Musikbibliothek A/B): 0 Falsch-Akzeptanzen, ~61-63% Zeitersparnis im
+Accept-Pfad (Details/Methodik siehe project-fetch-songtext-Memory). Realer
+Bug unterwegs gefunden und gefixt: ohne Dedupe sind wortidentische
+Mehrfach-Provider-Texte `best_score == second_score`, der Separations-Check
+schlägt dann IMMER fehl und es wird nie früh gestoppt.
+
+Sichtbarkeit: Pro-Song-Zeile zeigt `früh-gestoppt` wenn zutreffend
+(`evaluate_lyrics.py`); am Ende jedes `--bewerten`-Laufs zusätzlich eine
+Aggregat-Zeile (`songtext_pipeline.py`, aus `lyrics_core._early_stop_stats`):
+Anzahl Läufe, davon früh gestoppt, geschätzte eingesparte Audiosekunden.
+
+**v1.13.26 — dauerhaftes Log statt nur Terminal/RAM:** Neue Tabelle
+`early_stop_log` (`cache_store.py`, `song_id`/`early_stopped`/`modell`/
+`datum`) protokolliert JEDEN echten Whisper-Versuch (nicht nur Cache-
+Treffer) per `log_early_stop_attempt()`, aufgerufen aus `_whisper_best()`.
+Bewusst getrennt von `transkripte` (bleibt reiner Reuse-Cache für
+vollständige Transkripte) — dieses Log ist nur Telemetrie, wird von keiner
+Vergleichs-/Matching-Logik gelesen. Damit per SQL auswertbar (z.B. "wie
+viele der letzten N Stunden früh gestoppt"), auch über Prozess-Neustarts
+und Sessions hinweg, statt nur aus der flüchtigen Konsolenausgabe.
+
 ## ✓ IDF-Refresh-Intervall proportional statt fest (100 -> N × 5 %)
 
 `evaluate_lyrics._IDF_REFRESH_INTERVAL` (fest 100) ersetzt durch

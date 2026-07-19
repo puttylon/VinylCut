@@ -23,7 +23,7 @@ from cut_ui import build_cutting_panel, build_metadata_panel, live_input
 from library import parse_offset, parse_preview_duration
 from lyrics_core import _load_cache, _save_cache
 
-__version__ = "1.9.18"
+__version__ = "1.9.19"
 
 
 def _fetch_lyrics_for_track(
@@ -92,7 +92,7 @@ _MAX_PLAUSIBLE_GAP = (
     10.0  # Sekunden — darüber gilt es als falsche Metadaten-Länge, nicht als Pause
 )
 
-console = Console()
+console = Console(style="bright_white on black")
 
 
 def estimate_start(i: int, tracks: list, starts: list, last_gap: float) -> float:

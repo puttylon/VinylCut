@@ -16,6 +16,39 @@ from rich.text import Text
 from rich.rule import Rule
 from rich import box
 
+# --- Zentrales Farbschema (an einer Stelle definiert statt an jeder Panel-
+# Funktion einzeln wiederholt, damit z.B. der Hintergrund-Bugfix nicht durch
+# vergessene Einzelstellen wieder inkonsistent wird) ---
+MUTED = "grey35"
+BORDER = "blue dim"
+STATUS_ICON = {"done": "✓", "current": "→", "pending": "○"}
+STATUS_STYLE = {"done": "green", "current": "bold cyan", "pending": "dim yellow"}
+ROW_STYLE = {"done": MUTED, "current": "bold", "pending": MUTED}
+
+
+def status_symbol(state: str) -> Text:
+    """state: 'done' | 'current' | 'pending' -- liefert Symbol + Farbe."""
+    return Text(STATUS_ICON[state], style=STATUS_STYLE[state])
+
+
+def row_style(state: str) -> str:
+    return ROW_STYLE[state]
+
+
+def severity_style(value: float, warn: float, bad: float) -> str:
+    """green/yellow/red je nach abs(value) gegen die Schwellen warn/bad."""
+    magnitude = abs(value)
+    if magnitude <= warn:
+        return "green"
+    if magnitude <= bad:
+        return "yellow"
+    return "red"
+
+
+def normton_text(normton: bool) -> tuple:
+    """Label + Style für den Normton-EIN/aus-Status."""
+    return ("EIN\n\n", "green") if normton else ("aus\n\n", MUTED)
+
 
 def fmt_dur(seconds: float) -> str:
     sign = "-" if seconds < 0 else ""
@@ -36,13 +69,13 @@ def build_metadata_panel(
 
     status_text = Text()
     for line in status_lines[-8:]:
-        status_text.append(line + "\n", style="grey35")
+        status_text.append(line + "\n", style=MUTED)
     parts.append(status_text)
 
     if error:
         parts.append(Text(f"\n✗ {error}", style="bold red"))
     elif candidate:
-        parts.append(Rule(style="grey35"))
+        parts.append(Rule(style=MUTED))
 
         cid = candidate["id"]
         source = (
@@ -52,7 +85,7 @@ def build_metadata_panel(
         )
         info = Text()
         info.append(f"{candidate['title']}\n", style="bold")
-        info.append(f"Format: {candidate['format']}   Quelle: {source}\n", style="grey35")
+        info.append(f"Format: {candidate['format']}   Quelle: {source}\n", style=MUTED)
         parts.append(info)
 
         table = Table(
@@ -62,9 +95,9 @@ def build_metadata_panel(
             padding=(0, 1),
             show_edge=False,
         )
-        table.add_column("#", width=3, justify="right", style="grey35")
+        table.add_column("#", width=3, justify="right", style=MUTED)
         table.add_column("Titel", no_wrap=True, overflow="ellipsis", ratio=1)
-        table.add_column("Länge", width=8, justify="right", style="grey35")
+        table.add_column("Länge", width=8, justify="right", style=MUTED)
         for idx, t in enumerate(candidate["tracks"], 1):
             dur = fmt_dur(t["dur_s"]) if t.get("dur_s") else "?:??"
             table.add_row(f"{idx:02d}", t["title"], dur)
@@ -73,9 +106,9 @@ def build_metadata_panel(
     return Panel(
         Group(*parts),
         title=f"[bold]{artist} · {album}[/bold]",
-        subtitle="[grey35]Metadatensuche[/grey35]",
+        subtitle=f"[{MUTED}]Metadatensuche[/{MUTED}]",
         expand=True,
-        border_style="blue dim",
+        border_style=BORDER,
     )
 
 
@@ -145,53 +178,47 @@ def build_cutting_panel(
         start_val = display_starts[i] if i < len(display_starts) else 0.0
 
         if phase != "cutting" or i < current_i:
+            state = "done"
             start_text = Text(fmt_dur(start_val))
-            status_sym = Text("✓", style="green")
-            row_style = "grey35"
         elif i == current_i:
+            state = "current"
             start_text = Text(fmt_dur(start_val), style="bold")
-            status_sym = Text("→", style="bold cyan")
-            row_style = "bold"
         else:
+            state = "pending"
             start_text = Text("~" + fmt_dur(start_val))
-            status_sym = Text("○", style="dim yellow")
-            row_style = "grey35"
+        status_sym = status_symbol(state)
 
         row = [f"{i + 1:02d}", track["title"], dur_str, start_text, status_sym]
         if show_export:
             exp = export_status[i] if i < len(export_status) else ""
-            row.append(Text(exp, style="green" if exp == "✓" else "grey35"))
+            row.append(Text(exp, style="green" if exp == "✓" else MUTED))
         if show_lrc:
             lrc = lrc_status[i] if i < len(lrc_status) else ""
             row.append(
                 Text(
                     lrc,
-                    style="green" if lrc == "✓" else ("red" if lrc == "✗" else "grey35"),
+                    style="green" if lrc == "✓" else ("red" if lrc == "✗" else MUTED),
                 )
             )
-        table.add_row(*row, style=row_style)
+        table.add_row(*row, style=row_style(state))
 
     if phase == "cutting":
         delta = current_pos - est
-        delta_style = (
-            "green" if abs(delta) <= 1.0 else ("yellow" if abs(delta) <= 5.0 else "red")
-        )
         info = Text()
         info.append(
             f"Track {current_i + 1:02d} · {tracks[current_i]['title']}\n",
             style="bold cyan",
         )
         info.append(f"Position: {fmt_dur(current_pos)}   Schätzung: {fmt_dur(est)}   ")
-        info.append(f"Δ {delta:+.2f}s\n", style=delta_style)
-        info.append("Normton: ", style="grey35")
-        info.append(
-            "EIN\n\n" if normton else "aus\n\n", style="green" if normton else "grey35"
-        )
+        info.append(f"Δ {delta:+.2f}s\n", style=severity_style(delta, 1.0, 5.0))
+        info.append("Normton: ", style=MUTED)
+        normton_label, normton_style = normton_text(normton)
+        info.append(normton_label, style=normton_style)
         info.append(
             f"[p] {preview_duration:g}s abspielen  [p<Sek>] Dauer ändern (2-30s)  "
             "[+/-] ±0.5s  [++/--] ±2s  [ok] bestätigen  "
             "[u] rückgängig  [n] Normton  Offset: ±m:ss",
-            style="grey35",
+            style=MUTED,
         )
     elif phase == "export":
         done = sum(1 for s in (export_status or []) if s == "✓")
@@ -199,7 +226,7 @@ def build_cutting_panel(
         info.append(f"Exportiere Tracks: {done}/{n}\n", style="bold")
         info.append(
             "✓ Abgeschlossen." if done == n else "Bitte warten...",
-            style="green" if done == n else "grey35",
+            style="green" if done == n else MUTED,
         )
     elif phase == "songtext":
         found = sum(1 for s in (lrc_status or []) if s == "✓")
@@ -208,7 +235,7 @@ def build_cutting_panel(
         info = Text()
         info.append(f"Suche Songtexte: {checked}/{n}\n", style="bold")
         if checked == 0:
-            info.append("Bitte warten...", style="grey35")
+            info.append("Bitte warten...", style=MUTED)
         else:
             info.append(
                 f"✓ {found} gefunden, {missing} nicht gefunden.",
@@ -219,11 +246,11 @@ def build_cutting_panel(
 
     total_str = fmt_dur(total_dur) if total_dur else "?:??"
     return Panel(
-        Group(table, Rule(style="grey35"), info),
+        Group(table, Rule(style=MUTED), info),
         title=f"[bold]{artist} · {album}[/bold]",
-        subtitle=f"[grey35]{n} Tracks · {total_str}[/grey35]",
+        subtitle=f"[{MUTED}]{n} Tracks · {total_str}[/{MUTED}]",
         expand=True,
-        border_style="blue dim",
+        border_style=BORDER,
     )
 
 
@@ -239,10 +266,10 @@ def live_input(live: Live, renderable, prompt: str = "") -> str:
 
     def _render():
         inp = Text()
-        inp.append(f"  {prompt}", style="grey35")
+        inp.append(f"  {prompt}", style=MUTED)
         inp.append("".join(chars), style="bold")
-        inp.append("▌", style="grey35")
-        return Group(renderable, Rule(style="grey35"), inp, Text(""))
+        inp.append("▌", style=MUTED)
+        return Group(renderable, Rule(style=MUTED), inp, Text(""))
 
     try:
         tty.setcbreak(fd)

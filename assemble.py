@@ -18,9 +18,9 @@ from assemble_ui import (
 from cut_ui import fmt_dur, live_input
 from library import get_audio_duration, parse_offset, parse_preview_duration
 
-__version__ = "1.1.7"
+__version__ = "1.1.8"
 
-console = Console()
+console = Console(style="bright_white on black")
 
 
 def suggest_clean_name(stem: str) -> str:

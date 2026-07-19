@@ -254,15 +254,18 @@ def build_cutting_panel(
     )
 
 
-def live_input(live: Live, renderable, prompt: str = "") -> str:
+def live_input(live: Live, renderable, prompt: str = "", initial: str = "") -> str:
     """Zeichenweise lesen; Prompt + aktuelle Eingabe erscheinen im Panel.
+
+    `initial` füllt die Eingabe vorab (z.B. Namensvorschlag), Cursor steht ans
+    Ende — mit Backspace kürzbar, weitertippen hängt an statt alles neu zu tippen.
 
     Kein Cursor ausserhalb des Panels: tty.setcbreak + Group(renderable, Rule,
     input_line). setcbreak lässt OPOST aktiv → Rich rendert korrekt.
     """
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
-    chars: list[str] = []
+    chars: list[str] = list(initial)
 
     def _render():
         inp = Text()

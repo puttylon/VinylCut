@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import atexit
 import sys
 import re
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 from rich.console import Console
@@ -18,7 +20,7 @@ from assemble_ui import (
 from cut_ui import fmt_dur, live_input
 from library import get_audio_duration, parse_offset, parse_preview_duration
 
-__version__ = "1.1.8"
+__version__ = "1.1.12"
 
 console = Console(style="bright_white on black")
 
@@ -105,43 +107,81 @@ def play_snippet(
     )
 
 
+_preview_cache: dict = {"path": None, "key": None}
+
+
+def _cleanup_preview_wav() -> None:
+    p = _preview_cache.get("path")
+    if p and p.exists():
+        p.unlink(missing_ok=True)
+
+
+atexit.register(_cleanup_preview_wav)
+
+
 def play_snippet_with_tone(
     flac_path: Path, start_time: float, duration: float = DEFAULT_PLAY_DURATION
 ) -> None:
-    filter_complex = (
-        "[0:a]aformat=channel_layouts=stereo[tone];"
-        "[1:a]aformat=channel_layouts=stereo[audio];"
-        "[tone][audio]concat=n=2:v=0:a=1[out]"
-    )
-    cmd = [
-        "ffmpeg",
-        "-v",
-        "quiet",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=220:duration=0.25",
-        "-ss",
-        f"{start_time:.3f}",
-        "-t",
-        str(duration),
-        "-i",
-        str(flac_path),
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[out]",
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
-    ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    """Ton + Ausschnitt über eine temp-WAV abspielen (nicht per Pipe an ffplay).
+
+    ffmpeg kann beim Schreiben in eine Pipe (nicht seekbar) die WAV-Chunk-Größen
+    nicht nachträglich patchen -> ffplay kennt die Länge nicht und schneidet den
+    Normton ab. Fix wie in cut.py: erst in eine echte Datei rendern, dann abspielen.
+    """
+    cache_key = (str(flac_path), round(start_time, 3), duration)
+    if _preview_cache["key"] != cache_key:
+        _cleanup_preview_wav()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        filter_complex = (
+            "[0:a]aformat=channel_layouts=stereo[tone];"
+            "[1:a]aformat=channel_layouts=stereo[audio];"
+            "[tone][audio]concat=n=2:v=0:a=1[out]"
+        )
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "quiet",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:duration=0.25",
+                "-ss",
+                f"{start_time:.3f}",
+                "-t",
+                str(duration),
+                "-i",
+                str(flac_path),
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[out]",
+                str(tmp_path),
+            ],
+            capture_output=True,
+        )
+        _preview_cache["path"] = tmp_path
+        _preview_cache["key"] = cache_key
+
     subprocess.run(
-        ["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
-        stdin=ffmpeg.stdout,
+        ["ffplay", "-nodisp", "-autoexit", "-v", "quiet", str(_preview_cache["path"])],
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    ffmpeg.wait()
+
+
+_cf_preview_cache: dict = {"path": None, "key": None}
+
+
+def _cleanup_cf_preview_wav() -> None:
+    p = _cf_preview_cache.get("path")
+    if p and p.exists():
+        p.unlink(missing_ok=True)
+
+
+atexit.register(_cleanup_cf_preview_wav)
 
 
 def play_crossfade_preview(
@@ -152,80 +192,105 @@ def play_crossfade_preview(
     crossfade_sec: float = CROSSFADE_DURATION,
     normton: bool = False,
 ) -> None:
-    """Spielt [Ton +] Ende Seite N + Crossfade + [Ton +] Anfang Seite N+1."""
-    if normton:
-        filter_complex = (
-            "[0:a]aformat=channel_layouts=stereo[t1];"
-            "[1:a]aformat=channel_layouts=stereo[end];"
-            "[2:a]aformat=channel_layouts=stereo[start];"
-            "[3:a]aformat=channel_layouts=stereo[t2];"
-            f"[end][start]acrossfade=d={crossfade_sec}[cf];"
-            "[t1][cf][t2]concat=n=3:v=0:a=1[out]"
-        )
-        cmd = [
-            "ffmpeg",
-            "-v",
-            "quiet",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=220:duration=0.25",
-            "-ss",
-            f"{max(0.0, a_pos - preview_sec):.3f}",
-            "-t",
-            f"{preview_sec:.3f}",
-            "-i",
-            str(flac_path),
-            "-ss",
-            f"{b_pos:.3f}",
-            "-t",
-            f"{preview_sec:.3f}",
-            "-i",
-            str(flac_path),
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=220:duration=0.25",
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[out]",
-            "-f",
-            "wav",
-            "pipe:1",
-        ]
-    else:
-        cmd = [
-            "ffmpeg",
-            "-v",
-            "quiet",
-            "-ss",
-            f"{max(0.0, a_pos - preview_sec):.3f}",
-            "-t",
-            f"{preview_sec:.3f}",
-            "-i",
-            str(flac_path),
-            "-ss",
-            f"{b_pos:.3f}",
-            "-t",
-            f"{preview_sec:.3f}",
-            "-i",
-            str(flac_path),
-            "-filter_complex",
-            f"[0:a][1:a]acrossfade=d={crossfade_sec}[out]",
-            "-map",
-            "[out]",
-            "-f",
-            "wav",
-            "pipe:1",
-        ]
-    ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    """Spielt [Ton +] Ende Seite N + Crossfade + [Ton +] Anfang Seite N+1.
+
+    Wie play_snippet_with_tone: erst in eine temp-WAV rendern, dann abspielen
+    statt per Pipe an ffplay zu streamen (sonst fehlt die WAV-Länge im Header
+    und der Normton am Ausklang wird abgeschnitten).
+    """
+    cache_key = (
+        str(flac_path),
+        round(a_pos, 3),
+        round(b_pos, 3),
+        preview_sec,
+        crossfade_sec,
+        normton,
+    )
+    if _cf_preview_cache["key"] != cache_key:
+        _cleanup_cf_preview_wav()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        if normton:
+            filter_complex = (
+                "[0:a]aformat=channel_layouts=stereo[t1];"
+                "[1:a]aformat=channel_layouts=stereo[end];"
+                "[2:a]aformat=channel_layouts=stereo[start];"
+                "[3:a]aformat=channel_layouts=stereo[t2];"
+                f"[end][start]acrossfade=d={crossfade_sec}[cf];"
+                "[t1][cf][t2]concat=n=3:v=0:a=1[out]"
+            )
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "quiet",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:duration=0.25",
+                "-ss",
+                f"{max(0.0, a_pos - preview_sec):.3f}",
+                "-t",
+                f"{preview_sec:.3f}",
+                "-i",
+                str(flac_path),
+                "-ss",
+                f"{b_pos:.3f}",
+                "-t",
+                f"{preview_sec:.3f}",
+                "-i",
+                str(flac_path),
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:duration=0.25",
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[out]",
+                str(tmp_path),
+            ]
+        else:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "quiet",
+                "-ss",
+                f"{max(0.0, a_pos - preview_sec):.3f}",
+                "-t",
+                f"{preview_sec:.3f}",
+                "-i",
+                str(flac_path),
+                "-ss",
+                f"{b_pos:.3f}",
+                "-t",
+                f"{preview_sec:.3f}",
+                "-i",
+                str(flac_path),
+                "-filter_complex",
+                f"[0:a][1:a]acrossfade=d={crossfade_sec}[out]",
+                "-map",
+                "[out]",
+                str(tmp_path),
+            ]
+        subprocess.run(cmd, capture_output=True)
+        _cf_preview_cache["path"] = tmp_path
+        _cf_preview_cache["key"] = cache_key
+
     subprocess.run(
-        ["ffplay", "-nodisp", "-autoexit", "-v", "quiet", "-"],
-        stdin=ffmpeg.stdout,
+        [
+            "ffplay",
+            "-nodisp",
+            "-autoexit",
+            "-v",
+            "quiet",
+            str(_cf_preview_cache["path"]),
+        ],
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    ffmpeg.wait()
 
 
 def save_progress(
@@ -580,7 +645,7 @@ def main():
                     ans = live_input(
                         live,
                         build_analysis_panel(stem, status),
-                        "Neu beginnen? [j/n]: ",
+                        "Neu beginnen? [j/N]: ",
                     )
                     if ans.lower() == "j":
                         history, cf_done = [], []
@@ -593,7 +658,7 @@ def main():
                     )
                     status.append(f"Fortschritt gefunden ({p_info}).")
                     ans = live_input(
-                        live, build_analysis_panel(stem, status), "Fortsetzen? [j/n]: "
+                        live, build_analysis_panel(stem, status), "Fortsetzen? [j/N]: "
                     )
                     if ans.lower() != "j":
                         history, cf_done = [], []
@@ -811,7 +876,7 @@ def main():
             ans = live_input(
                 live,
                 build_normalize_panel(stem, left_db, right_db, norm_status),
-                "Kanalausgleich anwenden? [j/n]: ",
+                "Kanalausgleich anwenden? [j/N]: ",
             )
             if ans.lower() == "j":
                 if diff < 0:
@@ -828,15 +893,16 @@ def main():
         live.update(build_normalize_panel(stem, left_db, right_db, norm_status))
         live.refresh()
         normalize(out_flac, final_flac, left_gain, right_gain)
+        out_flac.unlink(missing_ok=True)
         norm_status[-1] = "✓ Normalisierung abgeschlossen."
 
         # Umbenennen
-        suggested = suggest_clean_name(flac_path.stem)
-        norm_status.append(f"Vorschlag: {suggested}.flac")
+        suggested = suggest_clean_name(flac_path.stem) + "-assembled"
         ans = live_input(
             live,
             build_normalize_panel(stem, left_db, right_db, norm_status),
-            "[Enter] übernehmen oder neuen Namen eingeben: ",
+            "Dateiname [Enter] übernehmen: ",
+            initial=suggested,
         )
         clean_name = ans if ans else suggested
         clean_flac = flac_path.parent / f"{clean_name}.flac"
@@ -845,7 +911,7 @@ def main():
             ans = live_input(
                 live,
                 build_normalize_panel(stem, left_db, right_db, norm_status),
-                f"{clean_flac.name} existiert. Überschreiben? [j/n]: ",
+                f"{clean_flac.name} existiert. Überschreiben? [j/N]: ",
             )
             if ans.lower() != "j":
                 clean_flac = final_flac
@@ -858,7 +924,6 @@ def main():
             norm_status.append(f"✓ {final_flac.name} → {clean_flac.name}")
 
         norm_status.append("")
-        norm_status.append(f"Vorbereitet: {out_flac.name}")
         norm_status.append(f"Ausgabe:     {clean_flac.name}")
         norm_status.append(f"Original:    {flac_path.name}  (unverändert)")
         live_input(

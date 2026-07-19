@@ -1,5 +1,27 @@
 # VinylCut Roadmap
 
+## ✓ assemble.py: Normton-Fix, Default-Kennzeichnung, Umbenennen-Vorschlag
+
+**Normton-Bug (analog zum `cut.py`-Fix in v1.9.6):** In der Crossfade-Vorschau
+war der Normton am Ausklang viel kürzer zu hören als am Anfang. Ursache:
+`ffmpeg` schrieb WAV direkt in eine Pipe an `ffplay` -- bei nicht-seekbaren
+Pipes kann `ffmpeg` die WAV-Chunk-Größen nicht nachträglich patchen (Header
+zeigt `0xFFFFFFFF`/unbekannt), `ffplay` kennt die reale Länge nicht und
+schneidet ab. Fix wie in `cut.py`: `ffmpeg` rendert erst in eine temp-WAV,
+`ffplay` spielt die Datei. Betraf `play_snippet_with_tone` und
+`play_crossfade_preview`, beide jetzt mit Preview-Cache (kein Neu-Rendern bei
+wiederholtem `[p]` auf gleicher Position).
+
+Zusätzlich auf Nutzerwunsch: alle vier `[j/n]`-Prompts in `assemble.py` zeigen
+jetzt wie in `cut.py` den Default groß (`[j/N]` -- alle vier defaulten auf
+"nein"). Der Umbenennen-Vorschlag am Ende hängt jetzt automatisch
+`-assembled` an den Dateinamen an und steht bereits vorausgefüllt im
+Eingabefeld (`live_input()` in `cut_ui.py` hat dafür einen neuen optionalen
+`initial`-Parameter) -- man muss den Namen nicht mehr komplett neu tippen,
+nur noch anpassen.
+
+528/528 Tests grün, `ruff` sauber. `assemble.py` auf `1.1.11` erhöht.
+
 ## ✓ Terminal-Farbschema fest verdrahtet, UI-Styles zentralisiert
 
 **Auslöser:** Nutzer-Screenshot zeigte `cut.py`s Rich-Panel auf grünem

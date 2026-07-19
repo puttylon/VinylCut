@@ -197,6 +197,12 @@ def evaluate_lyrics_normal(
         f"{counts['abgelehnt']} abgelehnt, {counts['kein-provider']} ohne Provider, "
         f"{counts['uebersprungen']} übersprungen (unverändert)."
     )
+    stats = lyrics_core._early_stop_stats
+    if stats["versuche"]:
+        print(
+            f"  Whisper-Early-Stop: {stats['frueh_gestoppt']}/{stats['versuche']} "
+            f"Läufe früh gestoppt, ~{stats['audio_sek_gespart']:.0f}s Audio gespart."
+        )
 
 
 def write_lrc_normal(

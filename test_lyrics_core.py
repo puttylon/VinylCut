@@ -42,6 +42,7 @@ from lyrics_core import (
     _cache_entry_up_to_date,
     _clean_query_title,
     _contrastive_margin_and_decision,
+    _dedupe_word_sets,
     _extract_lrc_words,
     _first_timestamp,
     _global_cache_idf,
@@ -1696,15 +1697,17 @@ class TestTranscriptCache:
         )
 
         def _fail_if_called(*a, **k):
-            pytest.fail("_transcribe darf bei Song-Cache-Treffer nicht laufen")
+            pytest.fail(
+                "_transcribe_with_early_stop darf bei Song-Cache-Treffer nicht laufen"
+            )
 
-        monkeypatch.setattr(lyrics_core, "_transcribe", _fail_if_called)
+        monkeypatch.setattr(lyrics_core, "_transcribe_with_early_stop", _fail_if_called)
 
         flac = tmp_path / "song.flac"
         flac.write_bytes(b"x")
         lrc = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]hello world foo bar\n")
 
-        best_path, score, has_vocals, words, model, lang, margin = (
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
             lyrics_core._whisper_best(
                 flac, [lrc], artist="The Artist", title="The Title"
             )
@@ -1748,16 +1751,18 @@ class TestTranscriptCache:
     def test_miss_transcribes_and_writes_cache(self, tmp_path, monkeypatch):
         self._prep(monkeypatch, tmp_path)
 
-        def _fake_transcribe(path, start, ctx, model, language=None):
-            return ["hello", "world", "foo", "bar"], 0.05, -0.3
+        def _fake_transcribe(*a, **k):
+            return ["hello", "world", "foo", "bar"], 0.05, -0.3, False
 
-        monkeypatch.setattr(lyrics_core, "_transcribe", _fake_transcribe)
+        monkeypatch.setattr(
+            lyrics_core, "_transcribe_with_early_stop", _fake_transcribe
+        )
 
         flac = tmp_path / "song2.flac"
         flac.write_bytes(b"y")
         lrc = self._make_lrc(tmp_path, "b.lrc", "[00:01.00]hello world foo bar\n")
 
-        best_path, score, has_vocals, words, model, lang, margin = (
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
             lyrics_core._whisper_best(
                 flac, [lrc], artist="Another Artist", title="Another Title"
             )
@@ -1780,11 +1785,13 @@ class TestTranscriptCache:
 
         calls = []
 
-        def _counting_transcribe(path, start, ctx, model, language=None):
+        def _counting_transcribe(path, start, ctx, model, *a, **k):
             calls.append(path)
-            return ["hello", "world", "foo", "bar"], 0.05, -0.3
+            return ["hello", "world", "foo", "bar"], 0.05, -0.3, False
 
-        monkeypatch.setattr(lyrics_core, "_transcribe", _counting_transcribe)
+        monkeypatch.setattr(
+            lyrics_core, "_transcribe_with_early_stop", _counting_transcribe
+        )
 
         flac1 = tmp_path / "song_v1.flac"
         flac1.write_bytes(b"y1")
@@ -1815,11 +1822,13 @@ class TestTranscriptCache:
 
         calls = []
 
-        def _counting_transcribe(path, start, ctx, model, language=None):
+        def _counting_transcribe(path, start, ctx, model, *a, **k):
             calls.append(start)
-            return ["hello", "world", "foo", "bar"], 0.05, -0.3
+            return ["hello", "world", "foo", "bar"], 0.05, -0.3, False
 
-        monkeypatch.setattr(lyrics_core, "_transcribe", _counting_transcribe)
+        monkeypatch.setattr(
+            lyrics_core, "_transcribe_with_early_stop", _counting_transcribe
+        )
 
         flac = tmp_path / "song.flac"
         flac.write_bytes(b"z")
@@ -1991,6 +2000,190 @@ class TestContrastiveMarginAndDecision:
         assert r1 == r2
 
 
+class TestDedupeWordSets:
+    """_dedupe_word_sets(): gruppiert wortidentische Kandidaten (Jaccard >=
+    _EARLY_STOP_DEDUPE_JACCARD) -- Regressionstest für den realen Bug aus
+    der Early-Stop-Validierung: ohne Dedupe zählen mehrere Provider-Texte
+    desselben Songs (nur andere Formatierung) als "eigene" Kandidaten, der
+    Separations-Check schlägt dann IMMER fehl (best_score == second_score)."""
+
+    def test_fast_identische_kandidaten_werden_zusammengefasst(self):
+        a = {"hello", "world", "foo", "bar", "baz"}
+        b = {
+            "hello",
+            "world",
+            "foo",
+            "bar",
+        }  # Jaccard 4/5 = 0.8 -- Grenzfall, gilt als gleich
+        groups = _dedupe_word_sets([a, b])
+        assert len(groups) == 1
+
+    def test_verschiedene_songs_bleiben_getrennt(self):
+        a = {"hello", "world", "foo", "bar"}
+        b = {"zzz", "yyy", "xxx", "www"}  # kein Overlap
+        groups = _dedupe_word_sets([a, b])
+        assert len(groups) == 2
+
+    def test_leere_wortmengen_werden_ignoriert(self):
+        groups = _dedupe_word_sets([set(), {"a", "b"}, set()])
+        assert len(groups) == 1
+
+
+class TestTranscribeWithEarlyStop:
+    """_transcribe_with_early_stop(): inkrementeller Segment-Konsum mit
+    frühem Abbruch, sobald ein Kandidat über mehrere Checkpoints stabil
+    sicher erkannt ist. Fake-Modell statt echtem Whisper/ffmpeg -- prüft
+    nur die Abbruchlogik (Gate/Konfirmation/Marge/Separation), nicht die
+    Audio-Verarbeitung selbst (dafür gibt es keinen Unit-Test, siehe
+    _transcribe())."""
+
+    MODEL_NAME = "fake-model"
+
+    class _FakeSegment:
+        def __init__(self, text, end, no_speech_prob=0.05, avg_logprob=-0.2):
+            self.text = text
+            self.end = end
+            self.no_speech_prob = no_speech_prob
+            self.avg_logprob = avg_logprob
+
+    class _FakeModel:
+        def __init__(self, segments):
+            self._segments = segments
+
+        def transcribe(self, path, **kwargs):
+            return iter(self._segments), None
+
+    def _run(self, monkeypatch, segments, candidate_word_sets):
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setitem(
+            lyrics_core._whisper_models, self.MODEL_NAME, self._FakeModel(segments)
+        )
+        # Hintergrund-Pool fuer die kontrastive Marge: 5 Songs, alle disjunkt
+        # zu den Kandidatenwoertern unten (siehe TestContrastiveMarginAndDecision).
+        # Rein alphabetische Woerter -- die Tokenisierung (_extract_lrc_words/
+        # re.findall "[^\\W\\d_]+") trennt an Ziffern, Zahlen im Wort wuerden
+        # das Wort in Fragmente zerreissen und den Test verfaelschen.
+        lyrics_core._contrastive_song_texts = {
+            i: [w]
+            for i, w in enumerate(
+                ["bgwordone", "bgwordtwo", "bgwordthree", "bgwordfour", "bgwordfive"],
+                start=1,
+            )
+        }
+        lyrics_core._contrastive_lang_pools = {"en": list(range(1, 6))}
+        return lyrics_core._transcribe_with_early_stop(
+            Path("nonexistent.flac"),
+            0.0,
+            480.0,
+            self.MODEL_NAME,
+            "en",
+            candidate_word_sets,
+            None,
+            None,
+            n_docs=5,
+            df={},
+        )
+
+    def teardown_method(self):
+        lyrics_core._contrastive_lang_pools = None
+        lyrics_core._contrastive_song_texts = None
+        lyrics_core._whisper_models.pop(self.MODEL_NAME, None)
+
+    @staticmethod
+    def _alpha_words(prefix: str, n: int) -> set:
+        """n eindeutige, rein alphabetische Testwoerter -- Ziffern wuerden
+        von der Tokenisierung (re.findall "[^\\W\\d_]+") mitten im Wort
+        getrennt und wuerden Transkript- und Kandidatenwoerter inkonsistent
+        machen."""
+        import itertools
+        import string
+
+        combos = itertools.islice(
+            itertools.product(string.ascii_lowercase, repeat=3), n
+        )
+        return {prefix + "".join(c) for c in combos}
+
+    def test_stoppt_frueh_wenn_kandidat_stabil_erkannt_wird(self, monkeypatch):
+        a_words = self._alpha_words("aw", 25)
+        b_words = self._alpha_words("bw", 25)
+        a_sorted = sorted(a_words)
+
+        segments = [
+            self._FakeSegment(
+                " ".join(a_sorted[:3]), end=10.0
+            ),  # zu wenig Woerter/Zeit -> Gate blockiert
+            self._FakeSegment(
+                " ".join(a_sorted[3:15]), end=20.0
+            ),  # 15 Woerter, Gate noch zu
+            self._FakeSegment(
+                " ".join(a_sorted[15:]), end=35.0
+            ),  # jetzt alle 25 -> 1. Bestaetigung
+            self._FakeSegment("", end=50.0),  # 2. Bestaetigung
+            self._FakeSegment("", end=65.0),  # 3. Bestaetigung -> frueher Stop
+            self._FakeSegment(
+                " ".join(sorted(b_words)), end=80.0
+            ),  # darf NIE verarbeitet werden
+        ]
+        words, no_speech, logprob, early_stopped = self._run(
+            monkeypatch, segments, [a_words, b_words]
+        )
+        assert early_stopped is True
+        assert (
+            set(words) == a_words
+        )  # das "Gift"-Segment (b_words) wurde nie konsumiert
+
+    def test_kein_stop_ohne_hintergrund_pool(self, monkeypatch):
+        """Zu kleiner Hintergrund-Pool -> fallback=True -> darf NIE frueh stoppen
+        (Sicherheitsregel: keine fruehe Akzeptanz ohne Vergleichsbasis)."""
+        a_words = self._alpha_words("aw", 25)
+        a_text = " ".join(sorted(a_words))
+        segments = [self._FakeSegment(a_text, end=t) for t in (35.0, 50.0, 65.0, 80.0)]
+
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setitem(
+            lyrics_core._whisper_models, self.MODEL_NAME, self._FakeModel(segments)
+        )
+        lyrics_core._contrastive_song_texts = {}
+        lyrics_core._contrastive_lang_pools = {}  # kein Pool -> fallback
+
+        words, no_speech, logprob, early_stopped = (
+            lyrics_core._transcribe_with_early_stop(
+                Path("nonexistent.flac"),
+                0.0,
+                480.0,
+                self.MODEL_NAME,
+                "en",
+                [a_words],
+                None,
+                None,
+                n_docs=5,
+                df={},
+            )
+        )
+        assert early_stopped is False
+
+    def test_dedupe_verhindert_ewigen_separations_fehlschlag(self, monkeypatch):
+        """Regressionstest fuer den realen Bug: zwei Kandidaten desselben Songs
+        (nur andere Formatierung, Jaccard 0.9) duerfen den Separations-Check
+        NICHT permanent blockieren -- ohne _dedupe_word_sets waere
+        best_score == second_score und consecutive_ok bliebe fuer immer 0."""
+        a_words = self._alpha_words("aw", 20)
+        a_list = sorted(a_words)
+        a_words_variant = set(a_list[:18]) | {
+            "variantone",
+            "varianttwo",
+        }  # Jaccard 18/22 ≈ 0.82
+        a_text = " ".join(a_list)
+        segments = [self._FakeSegment(a_text, end=t) for t in (35.0, 50.0, 65.0, 80.0)]
+
+        words, no_speech, logprob, early_stopped = self._run(
+            monkeypatch, segments, [a_words, a_words_variant]
+        )
+        assert early_stopped is True
+
+
 class TestSongCandidateWords:
     """_song_candidate_words() tokenisiert die Kandidatentexte eines
     Cache-Songs und memoisiert das Ergebnis (siehe _build_contrastive_context)."""
@@ -2114,7 +2307,7 @@ class TestWhisperBestContrastiveExperiment:
         lrc = tmp_path / "a.lrc"
         lrc.write_text("[00:01.00]hello world foo bar\n", encoding="utf-8")
 
-        best_path, score, has_vocals, words, model, lang, margin = (
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
             lyrics_core._whisper_best(
                 flac, [lrc], artist="The Artist", title="The Title"
             )
@@ -2147,7 +2340,7 @@ class TestWhisperBestContrastiveExperiment:
         lrc = tmp_path / "a.lrc"
         lrc.write_text("[00:01.00]hello world foo bar\n", encoding="utf-8")
 
-        best_path, score, has_vocals, words, model, lang, margin = (
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
             lyrics_core._whisper_best(
                 flac, [lrc], artist="The Artist", title="The Title"
             )
@@ -2182,17 +2375,19 @@ class TestContrastiveExperimentWhisperSafetyNet:
             lyrics_core, "_detect_lrc_language", lambda candidates: None
         )
 
-        def _fake_transcribe(path, start, ctx, model, language=None):
-            return ["hello", "world"], 0.05, -0.3
+        def _fake_transcribe(*a, **k):
+            return ["hello", "world"], 0.05, -0.3, False
 
-        monkeypatch.setattr(lyrics_core, "_transcribe", _fake_transcribe)
+        monkeypatch.setattr(
+            lyrics_core, "_transcribe_with_early_stop", _fake_transcribe
+        )
 
         flac = tmp_path / "song.flac"
         flac.write_bytes(b"x")
         lrc = tmp_path / "a.lrc"
         lrc.write_text("[00:01.00]hello world\n", encoding="utf-8")
 
-        best_path, score, has_vocals, words, model, lang, margin = (
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
             lyrics_core._whisper_best(flac, [lrc], artist="X", title="Y")
         )
         assert best_path == lrc
@@ -2214,17 +2409,19 @@ class TestContrastiveExperimentWhisperSafetyNet:
             lyrics_core, "_detect_lrc_language", lambda candidates: None
         )
 
-        def _fake_transcribe(path, start, ctx, model, language=None):
-            return ["hello", "world"], 0.05, -0.3
+        def _fake_transcribe(*a, **k):
+            return ["hello", "world"], 0.05, -0.3, False
 
-        monkeypatch.setattr(lyrics_core, "_transcribe", _fake_transcribe)
+        monkeypatch.setattr(
+            lyrics_core, "_transcribe_with_early_stop", _fake_transcribe
+        )
 
         flac = tmp_path / "song.flac"
         flac.write_bytes(b"x")
         lrc = tmp_path / "a.lrc"
         lrc.write_text("[00:01.00]hello world\n", encoding="utf-8")
 
-        best_path, score, has_vocals, words, model, lang, margin = (
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
             lyrics_core._whisper_best(flac, [lrc], artist="X", title="Y")
         )
         assert best_path == lrc

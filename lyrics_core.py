@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.24"
+__version__ = "1.13.26"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -237,6 +237,42 @@ _CONTRASTIVE_BACKGROUND_K = (
 _CONTRASTIVE_MIN_BACKGROUND = 5  # darunter: Hintergrund zu klein für eine sinnvolle Marge -> Fallback auf alte absolute Schwelle
 _CONTRASTIVE_SEED = 20260714  # fester Seed (identisch zum Validierungsskript) für reproduzierbare Hintergrund-Ziehung
 
+# Early-Stop der Whisper-Transkription (v1.13.25): bricht die Live-Transkription
+# ab, sobald ein Kandidat sicher erkannt ist, statt immer den vollen Kontext zu
+# transkribieren. NUR früh AKZEPTIEREN, nie früh ablehnen -- has_vocals/Ablehnung
+# laufen weiterhin am vollen Transkript (die betroffenen Songs erreichen die
+# Bestätigung nie und transkribieren daher ohnehin bis zum Ende). An 53 echten,
+# verifizierten Songs validiert (45 en/medium, 8 de/large-v3, siehe
+# project-fetch-songtext-Memory bzw. ROADMAP.md): 0 Falsch-Akzeptanzen,
+# ~61-63% Zeitersparnis im Accept-Pfad.
+_EARLY_STOP_CHECKPOINT_SEC = (
+    15.0  # Prüfintervall (aggregiert, nicht pro Whisper-Segment)
+)
+_EARLY_STOP_MIN_WORDS = (
+    20  # hartes Mindest-Gate -- verhindert Akzeptanz auf zu duenner Beweislage
+)
+_EARLY_STOP_MIN_SEC = 30.0
+_EARLY_STOP_N_CONFIRM = (
+    3  # so viele aufeinanderfolgende Checkpoints noetig (gegen transientes Flackern)
+)
+_EARLY_STOP_MARGIN_BUFFER = 0.10  # zusaetzlich zu _CONTRASTIVE_MARGIN, mehr Sicherheitsabstand als im Normalfall
+_EARLY_STOP_SEP_MIN = (
+    0.02  # Mindestabstand zum zweitbesten ECHTEN Kandidaten (nach Dedupe)
+)
+_EARLY_STOP_DEDUPE_JACCARD = (
+    0.80  # Kandidaten ab dieser Wort-Jaccard-Aehnlichkeit gelten als
+)
+# derselbe Songtext (nur andere Formatierung/Provider) -- ohne Dedupe ist
+# best_score bei wortidentischen Mehrfach-Provider-Texten == second_score,
+# der Separations-Check schlaegt dann IMMER fehl und es wird nie frueh gestoppt.
+
+# Leichtgewichtige Lauf-Statistik (kein Rueckgabewert-Umbau von _whisper_best
+# noetig, siehe songtext_pipeline.py-Abschlusszeile): wie oft frueh gestoppt
+# wurde und wie viele Audiosekunden dadurch eingespart wurden (Proxy fuer
+# Zeitersparnis -- Whisper-Laufzeit ist ungefaehr proportional zur
+# transkribierten Audiodauer, siehe Early-Stop-Validierung).
+_early_stop_stats = {"versuche": 0, "frueh_gestoppt": 0, "audio_sek_gespart": 0.0}
+
 # In-memory-Kontext für die kontrastive Marge, einmal pro Lauf gebaut (siehe
 # _build_contrastive_context, in main() aufgerufen). None solange nicht gebaut.
 _contrastive_idf: "tuple[int, dict] | None" = None  # (n_docs, df) -- globale Cache-IDF
@@ -271,7 +307,9 @@ _contrastive_context_last_data_signature: int | None = None
 # 20 % Wachstum verändert die IDF-Werte nicht-häufiger Wörter nur um ~1-2 %
 # -- 5 % ist damit großzügig bemessen, nicht knapp.
 _IDF_REFRESH_FRACTION = 0.05
-_IDF_REFRESH_MIN = 5  # Mindestwert, damit ein winziger Cache nicht nach JEDEM Song prüft
+_IDF_REFRESH_MIN = (
+    5  # Mindestwert, damit ein winziger Cache nicht nach JEDEM Song prüft
+)
 
 
 def _idf_refresh_interval(n: int) -> int:
@@ -1305,6 +1343,138 @@ def _transcribe(
         tmp_wav.unlink(missing_ok=True)
 
 
+def _dedupe_word_sets(word_sets: list[set]) -> list[set]:
+    """Gruppiert Kandidaten mit sehr aehnlicher Wortmenge (Jaccard >=
+    _EARLY_STOP_DEDUPE_JACCARD) zu einem einzigen Eintrag -- siehe
+    _EARLY_STOP_DEDUPE_JACCARD-Kommentar. Nur inhaltlich verschiedene Texte
+    sollen im Separations-Check als Konkurrenz zaehlen."""
+    groups: list[set] = []
+    for ws in word_sets:
+        if not ws:
+            continue
+        merged = False
+        for g in groups:
+            union = ws | g
+            if union and len(ws & g) / len(union) >= _EARLY_STOP_DEDUPE_JACCARD:
+                merged = True
+                break
+        if not merged:
+            groups.append(ws)
+    return groups
+
+
+def _transcribe_with_early_stop(
+    flac_path: Path,
+    start: float,
+    context_sec: float,
+    model_name: str,
+    lrc_lang: str | None,
+    candidate_word_sets: list[set],
+    artist_key: str | None,
+    titel_key: str | None,
+    n_docs: int,
+    df: dict,
+) -> tuple[list[str], float, float, bool]:
+    """Wie _transcribe(), bricht aber frueh ab sobald ein Kandidat sicher
+    erkannt ist (siehe _EARLY_STOP_*-Konstanten oben). Nur frueh AKZEPTIEREN,
+    nie frueh ablehnen -- ohne fruehe Bestaetigung laeuft die Transkription
+    unveraendert bis zum Ende durch (dann identisch zu _transcribe()).
+
+    Gibt zusaetzlich zurueck, ob frueh abgebrochen wurde -- _whisper_best
+    cached ein frueh gestopptes (unvollstaendiges) Transkript NICHT, um
+    spaetere Vergleiche mit neuen Kandidaten nicht auf unvollstaendigem
+    Material laufen zu lassen."""
+    if _get_whisper_model(model_name) is None:
+        return [], 1.0, 0.0, False
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_wav = Path(tmp.name)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(flac_path),
+                "-ss",
+                str(start),
+                "-t",
+                str(context_sec),
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(tmp_wav),
+            ],
+            capture_output=True,
+        )
+        model = _whisper_models[model_name]
+        kwargs: dict = {"beam_size": 1, "condition_on_previous_text": False}
+        if lrc_lang:
+            kwargs["language"] = lrc_lang
+
+        groups = _dedupe_word_sets(candidate_word_sets)
+        words: list[str] = []
+        no_speech_sum = 0.0
+        logprob_sum = 0.0
+        n_segs = 0
+        consecutive_ok = 0
+        last_best_idx: int | None = None
+        next_checkpoint = _EARLY_STOP_CHECKPOINT_SEC
+        early_stopped = False
+
+        segs_iter, _info = model.transcribe(str(tmp_wav), **kwargs)
+        for seg in segs_iter:
+            words.extend(re.findall(r"[^\W\d_]+", seg.text.lower()))
+            no_speech_sum += seg.no_speech_prob
+            logprob_sum += seg.avg_logprob
+            n_segs += 1
+
+            if not groups or seg.end < next_checkpoint:
+                continue
+            next_checkpoint += _EARLY_STOP_CHECKPOINT_SEC
+            if len(words) < _EARLY_STOP_MIN_WORDS or seg.end < _EARLY_STOP_MIN_SEC:
+                continue
+
+            words_set = set(words)
+            scores = [_idf_jaccard(words_set, g, n_docs, df) for g in groups]
+            order = sorted(range(len(scores)), key=lambda i: -scores[i])
+            best_idx = order[0]
+            best_score = scores[best_idx]
+            second_score = scores[order[1]] if len(order) > 1 else 0.0
+
+            _, margin, fallback = _contrastive_result_for(
+                best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
+            )
+            margin_ok = (
+                not fallback
+                and margin is not None
+                and margin >= (_CONTRASTIVE_MARGIN + _EARLY_STOP_MARGIN_BUFFER)
+            )
+            sep_ok = (
+                len(groups) == 1 or (best_score - second_score) >= _EARLY_STOP_SEP_MIN
+            )
+            same_winner = last_best_idx is None or best_idx == last_best_idx
+            ok = margin_ok and sep_ok and same_winner
+
+            consecutive_ok = consecutive_ok + 1 if ok else 0
+            last_best_idx = best_idx
+            if consecutive_ok >= _EARLY_STOP_N_CONFIRM:
+                early_stopped = True
+                break
+
+        if n_segs == 0:
+            return [], 1.0, 0.0, False
+        _early_stop_stats["versuche"] += 1
+        if early_stopped:
+            _early_stop_stats["frueh_gestoppt"] += 1
+            _early_stop_stats["audio_sek_gespart"] += context_sec - seg.end
+        return words, no_speech_sum / n_segs, logprob_sum / n_segs, early_stopped
+    except Exception:
+        return [], 1.0, 0.0, False
+    finally:
+        tmp_wav.unlink(missing_ok=True)
+
+
 def _provider_consensus(
     candidates: list[Path],
     min_providers: int = _CONSENSUS_MIN_PROVIDERS,
@@ -1385,9 +1555,9 @@ def _whisper_best(
     """Verifikation via small: bester Kandidat nach IDF-Jaccard-Score (_idf_jaccard).
 
     Gibt (bester Kandidat, score, has_vocals, words, model_used, language,
-    contrastive_margin) zurück. contrastive_margin ist die kontrastive Marge
-    (siehe _contrastive_margin_and_decision) -- None falls der gleichsprachige
-    Hintergrund-Pool fehlt oder zu klein ist (siehe
+    contrastive_margin, early_stopped) zurück. contrastive_margin ist die
+    kontrastive Marge (siehe _contrastive_margin_and_decision) -- None falls
+    der gleichsprachige Hintergrund-Pool fehlt oder zu klein ist (siehe
     _CONTRASTIVE_MIN_BACKGROUND). Die eigentliche Akzeptanz-Entscheidung
     trifft weiterhin der Aufrufer (fetch_lrc) über
     _whisper_accept(score, lang, margin=contrastive_margin).
@@ -1514,6 +1684,7 @@ def _whisper_best(
             _WHISPER_MODEL,
             lrc_lang,
             margin,
+            False,  # early_stopped: Cache-Treffer nutzt ein vollstaendiges Transkript
         )
 
     # BUGFIX (war in v1.10.0 faelschlich an _cache_only gekoppelt):
@@ -1526,17 +1697,47 @@ def _whisper_best(
     # Aufruf (siehe Docstring oben) -- ein Cache-Treffer weiter oben hat
     # diese Zeile nie erreicht, also auch nie ein Modell geladen.
     if _get_whisper_model(_WHISPER_MODEL) is None:
-        return (None, 0.0, False, 0, "", None, None)
+        return (None, 0.0, False, 0, "", None, None, False)
 
     # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
     # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
     # ein Transkript genuegt fuer den Vergleich mit allen.
     reason_suffix = f" ({reason})" if reason else ""
     _print_status(f"  {flac_path.name}  Whisper transkribiert...{reason_suffix}")
-    raw_words, no_speech, logprob = _transcribe(
-        flac_path, start, ctx, _WHISPER_MODEL, language=lrc_lang
+    candidate_word_sets = []
+    for p in candidates:
+        try:
+            candidate_word_sets.append(
+                set(_extract_lrc_words(p.read_text(encoding="utf-8")))
+            )
+        except Exception:
+            candidate_word_sets.append(set())
+
+    raw_words, no_speech, logprob, early_stopped = _transcribe_with_early_stop(
+        flac_path,
+        start,
+        ctx,
+        _WHISPER_MODEL,
+        lrc_lang,
+        candidate_word_sets,
+        artist_key,
+        titel_key,
+        n_docs,
+        df,
     )
     words = [] if _is_hallucination(raw_words) else raw_words
+
+    # Early-Stop-Log: JEDER echte Whisper-Versuch (fruh gestoppt oder nicht),
+    # unabhaengig vom Transkript-Cache unten -- reine Telemetrie fuer die
+    # Auswertung der Early-Stop-Wirksamkeit (siehe cache_store.log_early_stop_attempt).
+    if use_cache:
+        try:
+            with _cache_lock:
+                cache_store.log_early_stop_attempt(
+                    _cache_conn, artist_key, titel_key, early_stopped, _WHISPER_MODEL
+                )
+        except Exception:
+            pass
 
     # has_vocals: primär no_speech_prob, sekundär Wortzahl
     total_words = len(words)
@@ -1554,8 +1755,11 @@ def _whisper_best(
         best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
     )
 
-    # GENAU EINMAL persistent cachen (das eine Transkript dieses Laufs).
-    if use_cache:
+    # GENAU EINMAL persistent cachen (das eine Transkript dieses Laufs) --
+    # NICHT bei fruehem Abbruch, das Transkript ist dann unvollstaendig und
+    # wuerde spaetere Vergleiche mit neuen Kandidaten verfaelschen (siehe
+    # _transcribe_with_early_stop-Docstring).
+    if use_cache and not early_stopped:
         try:
             with _cache_lock:
                 cache_store.put_transcript(
@@ -1578,6 +1782,7 @@ def _whisper_best(
         _WHISPER_MODEL,
         lrc_lang,
         margin,
+        early_stopped,
     )
 
 

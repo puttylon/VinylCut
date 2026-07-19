@@ -225,6 +225,7 @@ def evaluate_song(
                 model_used,
                 lrc_lang,
                 contrastive_margin,
+                early_stopped,
             ) = lyrics_core._whisper_best(
                 flac_path,
                 all_candidates,
@@ -239,8 +240,9 @@ def evaluate_song(
         model_str = f"[{model_used}]" if model_used else ""
         lang_str = lrc_lang or ""
         words_str = f"{whisper_words}W"
+        early_stop_str = "früh-gestoppt" if early_stopped else ""
         whisper_head = " ".join(
-            p for p in [model_str, lang_str, "Whisper", words_str] if p
+            p for p in [model_str, lang_str, "Whisper", words_str, early_stop_str] if p
         )
 
         if not has_vocals:
@@ -285,6 +287,7 @@ def evaluate_song(
                 "score": round(best_score, 3),
                 "words": whisper_words,
                 "language": lrc_lang,
+                "early_stopped": early_stopped,
             }
         else:
             best_content = None

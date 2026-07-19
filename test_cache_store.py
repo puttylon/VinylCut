@@ -237,6 +237,27 @@ def test_transcript_teilt_sich_song_mit_provider_cache(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0] == 1
 
 
+def test_log_early_stop_attempt_schreibt_zeile_mit_zeitstempel(tmp_path):
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs.log_early_stop_attempt(conn, "artist a", "title a", True, "medium")
+    row = conn.execute(
+        "SELECT early_stopped, modell, datum FROM early_stop_log"
+    ).fetchone()
+    assert row[0] == 1
+    assert row[1] == "medium"
+    assert row[2]  # Zeitstempel ist gesetzt, nicht leer
+
+
+def test_log_early_stop_attempt_mehrere_versuche_bleiben_getrennt(tmp_path):
+    """Anders als transkripte (ein Upsert je Song): jeder Versuch ist eine
+    eigene Zeile, auch fuer denselben Song -- reines Anhaenge-Log."""
+    conn = cs.open_cache(tmp_path / "cache.db")
+    cs.log_early_stop_attempt(conn, "artist a", "title a", False, "medium")
+    cs.log_early_stop_attempt(conn, "artist a", "title a", True, "medium")
+    count = conn.execute("SELECT COUNT(*) FROM early_stop_log").fetchone()[0]
+    assert count == 2
+
+
 def test_transcript_modell_ist_reine_info_spalte(tmp_path):
     conn = cs.open_cache(tmp_path / "cache.db")
     cs.put_transcript(conn, "artist a", "title a", "text", 0.1, -0.5, modell="small")

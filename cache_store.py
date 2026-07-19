@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS ergebnisse (
 );
 
 {_TRANSKRIPTE_SCHEMA}
+
+CREATE TABLE IF NOT EXISTS early_stop_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    song_id INTEGER NOT NULL REFERENCES songs(id),
+    early_stopped INTEGER NOT NULL,
+    modell TEXT,
+    datum TEXT NOT NULL
+);
 """
 
 
@@ -543,5 +551,26 @@ def put_transcript(
         "transkript=excluded.transkript, no_speech_prob=excluded.no_speech_prob, "
         "avg_logprob=excluded.avg_logprob, modell=excluded.modell, datum=excluded.datum",
         (song_id, transcript, no_speech_prob, avg_logprob, modell, _now_iso()),
+    )
+    conn.commit()
+
+
+def log_early_stop_attempt(
+    conn: sqlite3.Connection,
+    artist_key: str,
+    titel_key: str,
+    early_stopped: bool,
+    modell: str | None = None,
+) -> None:
+    """Protokolliert JEDEN echten Whisper-Transkriptions-Versuch (früh
+    gestoppt oder nicht) mit Zeitstempel -- reines Anhänge-Log für die
+    Auswertung der Early-Stop-Wirksamkeit (siehe ROADMAP.md), unabhängig
+    von `transkripte` (das nur vollständige Transkripte cacht). Kein
+    Cache-Treffer wird hier geloggt, nur echte Live-Läufe."""
+    song_id = _get_or_create_song(conn, artist_key, titel_key)
+    conn.execute(
+        "INSERT INTO early_stop_log (song_id, early_stopped, modell, datum) "
+        "VALUES (?, ?, ?, ?)",
+        (song_id, int(early_stopped), modell, _now_iso()),
     )
     conn.commit()

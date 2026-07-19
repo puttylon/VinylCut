@@ -158,7 +158,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         ):
             # bevorzugt den Kandidaten mit LRC_A-Inhalt
             best = next(p for p in candidates if "true I love you" in p.read_text())
-            return (best, 0.9, True, 42, "medium", "en", 0.5)
+            return (best, 0.9, True, 42, "medium", "en", 0.5, False)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
@@ -180,7 +180,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fake_whisper_best(
             flac, candidates, expected_dur, artist="", title="", reason=""
         ):
-            return (candidates[0], 0.01, True, 5, "medium", "en", -0.5)
+            return (candidates[0], 0.01, True, 5, "medium", "en", -0.5, False)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
@@ -201,7 +201,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fake_whisper_best(
             flac, candidates, expected_dur, artist="", title="", reason=""
         ):
-            return (None, 0.0, False, 0, "medium", "en", None)
+            return (None, 0.0, False, 0, "medium", "en", None, False)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
@@ -223,7 +223,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         def _fake_whisper_best(
             flac, candidates, expected_dur, artist="", title="", reason=""
         ):
-            return (None, 0.0, False, 0, "medium", "en", None)
+            return (None, 0.0, False, 0, "medium", "en", None, False)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
@@ -266,7 +266,7 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
             flac, candidates, expected_dur, artist="", title="", reason=""
         ):
             assert existing in candidates
-            return (existing, 0.9, True, 10, "medium", "en", 0.5)
+            return (existing, 0.9, True, 10, "medium", "en", 0.5, False)
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
         flac_path = tmp_path / "song.flac"

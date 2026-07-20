@@ -30,6 +30,7 @@ from lyrics_core import (
     _CONTRASTIVE_MIN_BACKGROUND,
     _FOLDER_BUSY,
     _HALLUCINATION_MAX_UNIQUE_RATIO,
+    _HALLUCINATION_MAX_UNIQUE_WORDS,
     _HALLUCINATION_MIN_WORDS,
     _RATE_LIMIT_BASE_SEC,
     _RATE_LIMIT_FLOOR_SEC,
@@ -141,6 +142,62 @@ class TestIsHallucination:
         text = "Ot i mean i mean i mean lets go lets go i mean i mean lets go lets go lets go lets go"
         words = text.split()
         assert _is_hallucination(words) is True
+
+    def test_langes_echtes_outro_kein_alarm_trotz_niedriger_ratio(self):
+        # Realer Bugfall: Bronski Beat/Communards "Never Can Say Goodbye" hat
+        # ein langes echtes "no no no..."-Outro. Reales Whisper-Rohtranskript
+        # (Modell medium, aus der Produktionsbibliothek): 405 Wörter, 94
+        # einzigartig (23,2 % < 25 %-Ratio), häufigstes Wort "no" x149
+        # (36,8 % >= 25 %) -- beide alten Kriterien schlagen an, obwohl der
+        # Song echten Gesang hat. Die neue absolute Vokabelgrenze muss das
+        # jetzt verhindern.
+        text = (
+            "no no no no no no no i never cared to say goodbye no no no i i "
+            "never cared to say goodbye every time i think i ve had enough "
+            "instead of heading for the door massive strange vibrations "
+            "fierce in need i tear the code it says turn around to a fool "
+            "and know you ll love him more and more tell me why tell me why "
+            "is it so don t wanna let you go no i never can say goodbye boy "
+            "ooh no no i never can say goodbye "
+            + "no "
+            * 100
+            + "i can t say goodbye i keep thinking that our problems soon "
+            "are all over the world but there s a same unhappy feeling "
+            "there s an anguish there s a doubt it s a shame oh dizzy i "
+            "know i can t get by without you tell me why is it sound i "
+            "don t ever let you go no no no no no no no no no no hey you "
+            "never can take my heart and never say goodbye and never say "
+            "goodbye oh no no no no no no no no goodbye goodbye and say "
+            "goodbye and say goodbye every time i think i ve had enough "
+            "now we start heading for the door there s no single dizzy "
+            "feeling piercing me right to the core it s just turning "
+            "around to fool you know you ll love him more and more tell "
+            "me why is it so i wanna let you go let you go let you go i "
+            "wanna let you go hey i never can say goodbye ooh don t "
+            "believe me i never can say goodbye no no no oh no no oh no "
+            "no no hey i never can say goodbye boy say goodbye boy"
+        )
+        words = text.split()
+        assert len(set(words)) / len(words) < _HALLUCINATION_MAX_UNIQUE_RATIO
+        assert len(set(words)) > _HALLUCINATION_MAX_UNIQUE_WORDS
+        assert _is_hallucination(words) is False
+
+    def test_grenzwert_absolute_vokabelgroesse(self):
+        # Genau _HALLUCINATION_MAX_UNIQUE_WORDS einzigartige Wörter insgesamt
+        # (Fuellwoerter + das dominante Wort) -> beide alten Kriterien greifen
+        # weiterhin, Loop-Verdacht bleibt bestehen.
+        filler = [f"w{i}" for i in range(_HALLUCINATION_MAX_UNIQUE_WORDS - 1)]
+        words = filler + ["dominant"] * 60
+        assert len(set(words)) == _HALLUCINATION_MAX_UNIQUE_WORDS
+        assert _is_hallucination(words) is True
+
+    def test_ein_wort_ueber_grenzwert_kein_alarm(self):
+        # Ein einzigartiges Wort mehr als die Grenze -> nicht mehr als
+        # Halluzination behandelt, selbst bei identischem Wiederholungsmuster.
+        filler = [f"w{i}" for i in range(_HALLUCINATION_MAX_UNIQUE_WORDS)]
+        words = filler + ["dominant"] * 60
+        assert len(set(words)) == _HALLUCINATION_MAX_UNIQUE_WORDS + 1
+        assert _is_hallucination(words) is False
 
 
 class TestVocalsMinWords:
@@ -1716,6 +1773,37 @@ class TestTranscriptCache:
         assert has_vocals is True
         assert words == 4
 
+    def test_score_nicht_genullt_bei_erkannter_halluzination(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix: _score_against_idf nutzt jetzt IMMER raw_words, nicht die
+        halluzinations-gefilterte Wortliste -- set-basiertes IDF-Jaccard ist
+        gegen Wiederholungshäufigkeit ohnehin immun, das frühere Nullsetzen
+        bot dort keinen Schutz, konnte aber einen echten Treffer zerstören.
+        "lets go" x20 ist eine echte Halluzinationsschleife (2 einzigartige
+        Wörter, siehe TestIsHallucination) -- has_vocals muss weiterhin False
+        bleiben, der Score gegen eine exakt passende LRC darf aber nicht mehr
+        auf 0.0 gezwungen werden."""
+        conn = self._prep(monkeypatch, tmp_path)
+        transcript = " ".join(["lets", "go"] * 20)
+        cache_store.put_transcript(
+            conn, "the artist", "the title", transcript, 0.9, -0.2
+        )
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]lets go\n")
+
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
+            lyrics_core._whisper_best(
+                flac, [lrc], artist="The Artist", title="The Title"
+            )
+        )
+        assert has_vocals is False  # weiterhin korrekt als Halluzination erkannt
+        assert words == 0
+        assert score == pytest.approx(1.0)  # Score bleibt erhalten, nicht mehr 0.0
+        assert best_path == lrc
+
     def test_cache_hit_laedt_kein_whisper_modell(self, tmp_path, monkeypatch):
         """Regressionstest (siehe ROADMAP.md): _get_whisper_model() lädt bei
         einem Cache-Miss ein volles Modell in den Speicher -- bei einem
@@ -1775,6 +1863,46 @@ class TestTranscriptCache:
         assert cached["transcript"] == "hello world foo bar"
         assert cached["no_speech_prob"] == 0.05
         assert cached["avg_logprob"] == -0.3
+
+    def test_langes_echtes_outro_hat_vocals_trotz_wiederholung(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix-Regressionstest, Cache-Miss-Pfad: ein Song mit langem echtem
+        Outro (viele einzigartige Wörter im Song, aber ein dominant
+        wiederholtes Hook-Wort am Ende, wie bei "Never Can Say Goodbye" oder
+        "Lost Your Number") darf nicht mehr als kein-Vokal/Halluzination
+        behandelt werden -- die absolute Vokabelgrenze (94/51 einzigartige
+        Wörter >> _HALLUCINATION_MAX_UNIQUE_WORDS) muss das verhindern."""
+        self._prep(monkeypatch, tmp_path)
+
+        # Rein alphabetische Fuellwoerter (keine Ziffern): _extract_lrc_words
+        # nutzt "[^\W\d_]+" und wuerde z.B. "wort0"/"wort1" beide zu "wort"
+        # zusammenstutzen -- das LRC unten muss dieselben Woerter enthalten.
+        unique_words = [f"wort{chr(97 + i)}" for i in range(20)]
+        raw_words = unique_words + ["no"] * 60  # 80 Wörter, 21 einzigartig
+
+        def _fake_transcribe(*a, **k):
+            return raw_words, 0.7, -0.3, False  # no_speech > 0,65-Schwelle
+
+        monkeypatch.setattr(
+            lyrics_core, "_transcribe_with_early_stop", _fake_transcribe
+        )
+
+        flac = tmp_path / "song3.flac"
+        flac.write_bytes(b"z")
+        lrc = self._make_lrc(
+            tmp_path, "c.lrc", "[00:01.00]" + " ".join(unique_words) + "\n"
+        )
+
+        best_path, score, has_vocals, words, model, lang, margin, early_stopped = (
+            lyrics_core._whisper_best(
+                flac, [lrc], artist="Outro Artist", title="Outro Title"
+            )
+        )
+        assert has_vocals is True  # nicht mehr faelschlich "kein Vokal"
+        assert words == 80
+        assert best_path == lrc
+        assert score > 0.0
 
     def test_zweiter_lauf_selber_song_nutzt_cache_ohne_erneutes_transkribieren(
         self, tmp_path, monkeypatch

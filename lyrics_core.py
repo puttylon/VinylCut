@@ -43,7 +43,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.26"
+__version__ = "1.13.28"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -123,6 +123,11 @@ _VOCALS_NO_SPEECH_THOLD = (
 )
 _HALLUCINATION_MIN_WORDS = 20  # ab hier Wiederholungsrate prüfen
 _HALLUCINATION_MAX_UNIQUE_RATIO = 0.25  # < 25 % einzigartige Wörter → Halluzination
+_HALLUCINATION_MAX_UNIQUE_WORDS = 15  # > so viele einzigartige Wörter → kein Alarm,
+# selbst bei niedriger Ratio (echte Songs mit langem wiederholtem Outro/Hook wie
+# "no no no..." oder "lost lost lost..." haben oft 50+ einzigartige Wörter im Rest
+# des Songs, echte Whisper-Halluzinationsschleifen wie "lets go" x20 nur 2-10 --
+# siehe ROADMAP.md)
 # _HALLUCINATION_AVG_LOGPROB entfernt: sprachbiased (Deutsch < Englisch), _is_hallucination reicht
 
 _CACHE_FILENAME = ".fetch_songtext.json"
@@ -1266,14 +1271,25 @@ def _is_hallucination(words: list[str]) -> bool:
     """Erkennt Whisper-Halluzinationsschleifen (z.B. 'let's go' ×20).
 
     Viele Wörter, aber kaum einzigartige → Wiederholungsschleife statt Lyrik.
+    Beide bisherigen Kriterien (unique-ratio, dominantes Wort) sind rein
+    RELATIV zur Gesamtwortzahl -- ein echter Song mit langem wiederholtem
+    Outro/Hook (z.B. "no no no..." bei Bronski Beat/Communards "Never Can Say
+    Goodbye", real 94 einzigartige Wörter im restlichen Song) erzeugt dieselbe
+    Signatur wie eine echte Halluzinationsschleife. Das dritte Kriterium
+    (absolute Vokabelgröße) trennt beide Fälle: echte Loops bestehen aus sehr
+    wenigen verschiedenen Wörtern insgesamt, unabhängig von der Songlänge
+    (siehe ROADMAP.md).
     """
     if len(words) < _HALLUCINATION_MIN_WORDS:
         return False
-    if len(set(words)) / len(words) >= _HALLUCINATION_MAX_UNIQUE_RATIO:
+    unique = set(words)
+    if len(unique) > _HALLUCINATION_MAX_UNIQUE_WORDS:
+        return False
+    if len(unique) / len(words) >= _HALLUCINATION_MAX_UNIQUE_RATIO:
         return False
     # Niedrige Wortvielfalt allein reicht nicht — repetitive Songs haben das auch.
     # Zusätzlich muss ein einzelnes Wort ≥ MAX_UNIQUE_RATIO aller Wörter ausmachen.
-    most_common = max(words.count(w) for w in set(words))
+    most_common = max(words.count(w) for w in unique)
     return most_common / len(words) >= _HALLUCINATION_MAX_UNIQUE_RATIO
 
 
@@ -1647,16 +1663,20 @@ def _whisper_best(
 
     if cached_transcript is not None:
         # Song-Cache-Treffer: kein einziger Whisper-Aufruf für diesen Lauf.
-        words = (
+        raw_words = (
             cached_transcript["transcript"].split()
             if cached_transcript["transcript"]
             else []
         )
-        if _is_hallucination(words):
-            words = []
         no_speech = cached_transcript["no_speech_prob"]
         logprob = cached_transcript["avg_logprob"]
-        total_words = len(words)
+        # total_words (fuer has_vocals) zaehlt bei erkannter Halluzinations-
+        # schleife als 0 -- das Scoring unten nutzt bewusst IMMER raw_words:
+        # _score_against_idf/_contrastive_result_for vergleichen ueber
+        # set(...), Wiederholungshaeufigkeit spielt fuer den IDF-Jaccard-Score
+        # ohnehin keine Rolle. Das Nullsetzen wuerde dort nur einen echten
+        # Treffer zerstoeren koennen, ohne zusaetzlichen Schutz zu bieten.
+        total_words = 0 if _is_hallucination(raw_words) else len(raw_words)
         has_vocals = (
             no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
         )
@@ -1664,13 +1684,13 @@ def _whisper_best(
         best_path: Path | None = None
         best_score = 0.0
         for p in candidates:
-            s = _score_against_idf(words, p)
+            s = _score_against_idf(raw_words, p)
             if s > best_score:
                 best_score = s
                 best_path = p
 
         _, margin, _fallback = _contrastive_result_for(
-            best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
+            best_score, raw_words, lrc_lang, artist_key, titel_key, n_docs, df
         )
 
         return (
@@ -1722,8 +1742,6 @@ def _whisper_best(
         n_docs,
         df,
     )
-    words = [] if _is_hallucination(raw_words) else raw_words
-
     # Early-Stop-Log: JEDER echte Whisper-Versuch (fruh gestoppt oder nicht),
     # unabhaengig vom Transkript-Cache unten -- reine Telemetrie fuer die
     # Auswertung der Early-Stop-Wirksamkeit (siehe cache_store.log_early_stop_attempt).
@@ -1736,20 +1754,24 @@ def _whisper_best(
         except Exception:
             pass
 
-    # has_vocals: primär no_speech_prob, sekundär Wortzahl
-    total_words = len(words)
+    # has_vocals: primär no_speech_prob, sekundär Wortzahl. Zaehlt bei
+    # erkannter Halluzinationsschleife als 0 -- das Scoring unten nutzt
+    # bewusst IMMER raw_words, siehe Kommentar im Cache-Treffer-Zweig oben
+    # (identische Begruendung: set-basiertes IDF-Jaccard ist gegen
+    # Wiederholungshaeufigkeit ohnehin immun).
+    total_words = 0 if _is_hallucination(raw_words) else len(raw_words)
     has_vocals = no_speech < _VOCALS_NO_SPEECH_THOLD or total_words >= _VOCALS_MIN_WORDS
 
     best_path = None
     best_score = 0.0
     for p in candidates:
-        score = _score_against_idf(words, p)
+        score = _score_against_idf(raw_words, p)
         if score > best_score:
             best_score = score
             best_path = p
 
     _, margin, _fallback = _contrastive_result_for(
-        best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
+        best_score, raw_words, lrc_lang, artist_key, titel_key, n_docs, df
     )
 
     # GENAU EINMAL persistent cachen (das eine Transkript dieses Laufs) --

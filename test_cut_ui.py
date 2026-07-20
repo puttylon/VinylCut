@@ -146,16 +146,32 @@ class TestLastTrackLength:
 
     def test_without_total_flac_dur_shows_unknown(self):
         panel = build_cutting_panel(
-            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
-            phase="export", export_status=["✓", "✓", "✓"],
+            "A",
+            "B",
+            TRACKS_NO_DUR,
+            [0.0, 100.0, 250.0],
+            2,
+            250.0,
+            True,
+            0.0,
+            phase="export",
+            export_status=["✓", "✓", "✓"],
         )
         out = render(panel)
         assert "?:??" in out
 
     def test_with_total_flac_dur_shows_real_length(self):
         panel = build_cutting_panel(
-            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
-            phase="export", export_status=["✓", "✓", "✓"],
+            "A",
+            "B",
+            TRACKS_NO_DUR,
+            [0.0, 100.0, 250.0],
+            2,
+            250.0,
+            True,
+            0.0,
+            phase="export",
+            export_status=["✓", "✓", "✓"],
             total_flac_dur=300.0,
         )
         out = render(panel)
@@ -164,8 +180,16 @@ class TestLastTrackLength:
 
     def test_total_footer_uses_flac_dur_when_metadata_missing(self):
         panel = build_cutting_panel(
-            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
-            phase="export", export_status=["✓", "✓", "✓"],
+            "A",
+            "B",
+            TRACKS_NO_DUR,
+            [0.0, 100.0, 250.0],
+            2,
+            250.0,
+            True,
+            0.0,
+            phase="export",
+            export_status=["✓", "✓", "✓"],
             total_flac_dur=300.0,
         )
         out = render(panel)
@@ -175,8 +199,16 @@ class TestLastTrackLength:
         # Mittlerer Track (B) hat schon einen echten nächsten Startpunkt —
         # total_flac_dur darf dessen Länge nicht verändern.
         panel = build_cutting_panel(
-            "A", "B", TRACKS_NO_DUR, [0.0, 100.0, 250.0], 2, 250.0, True, 0.0,
-            phase="export", export_status=["✓", "✓", "✓"],
+            "A",
+            "B",
+            TRACKS_NO_DUR,
+            [0.0, 100.0, 250.0],
+            2,
+            250.0,
+            True,
+            0.0,
+            phase="export",
+            export_status=["✓", "✓", "✓"],
             total_flac_dur=300.0,
         )
         out = render(panel)

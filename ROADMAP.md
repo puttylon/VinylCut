@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.26`):
+`lyrics_core.py`, `1.13.28`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,69 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: "kein Vokal"-Sonderfall abgeschafft + Halluzinationsfilter erkannte echte Songs mit langem Outro fälschlich als Loop
+
+**Auslöser:** Beim Aufräumen der Neil-Diamond-Alben fiel auf, dass der
+Sonderfall „bei `has_vocals=False` reicht 2-Provider-Konsens trotzdem zum
+Speichern" (siehe Archiv, `_provider_consensus(candidates, min_providers=2)`
+im `not has_vocals`-Zweig von `evaluate_lyrics.py`) in der echten Bibliothek
+tatsächlich noch auftrat -- 23 Treffer über die gesamte Musikbibliothek
+gefunden (`no_vocal: true` + `method: konsens` im JSON-Ordner-Cache). Beispiel
+Carpenters „Carol Of The Bells": die gespeicherte LRC zeigte die echten,
+offiziellen Songtexte, obwohl diese konkrete Aufnahme instrumental ist --
+Provider-Konsens allein kann nicht unterscheiden, ob ein Songtitel offizielle
+Lyrics hat oder ob die KONKRETE Aufnahme tatsächlich gesungen wird.
+
+**Fix 1 (`evaluate_lyrics.py`):** Nutzer-Entscheidung: „wenn `no_vocal=true`,
+ist keine LRC valide." Der 2-Provider-Rettungszweig komplett entfernt --
+`has_vocals=False` führt jetzt immer zu `reason: "kein-vokal"`, nie mehr zu
+einem automatischen Speichern. Alle 23 betroffenen `.lrc`-Dateien in der
+Bibliothek identifiziert und gelöscht; die zugehörigen JSON-Ordner-Cache-
+Einträge müssen nicht manuell angefasst werden -- `lyrics_core.
+_cache_entry_up_to_date()` erkennt fehlende `.lrc`-Dateien automatisch und
+bewertet den Track beim nächsten Lauf neu (`entry.get("r") == "ok" and not
+lrc_path.exists()` → `False`).
+
+**Fund beim Identifizieren:** 2 der 23 Treffer (Bronski Beat/Communards
+„Never Can Say Goodbye", Nu Shooz „Lost Your Number") haben tatsächlich
+durchgehend Gesang -- Whisper (Modell `medium`, aktuell) hatte den Text
+korrekt erkannt, aber `_is_hallucination()` warf das komplette Transkript weg.
+Beide Songs haben ein langes ECHTES Fade-out/Outro, in dem ein Hook-Wort real
+wiederholt gesungen wird ("no" x149/36,8%, "lost" x121/38,3% aller Wörter) --
+das erfüllt beide bisherigen Kriterien (unique-ratio <25% UND dominantes Wort
+≥25%, siehe v1.4.20) genauso wie eine echte Halluzinationsschleife.
+
+**Fix 2 (`lyrics_core.py`), nach Zweitmeinung von Opus konsolidiert:**
+1. Neue Konstante `_HALLUCINATION_MAX_UNIQUE_WORDS = 15` als zusätzliches
+   UND-Kriterium in `_is_hallucination()`: mehr als 15 einzigartige Wörter
+   insgesamt → kein Alarm, unabhängig von den Ratios. Echte
+   Halluzinationsschleifen ("lets go" ×20) haben nur 2-10 einzigartige
+   Wörter, echte Songs mit langem Outro auch bei niedriger Ratio 50+ (94 bzw.
+   51 im konkreten Fall) -- die Ratio-Kriterien allein sind blind für diesen
+   Größenunterschied, da beide relativ zur Gesamtwortzahl sind.
+2. Scoring von der Halluzinations-Filterung entkoppelt: `_score_against_idf`
+   (und die kontrastive Marge) nutzen jetzt in beiden `_whisper_best`-Pfaden
+   (Cache-Hit UND Cache-Miss) immer `raw_words` statt der gefilterten Liste.
+   Begründung: der Score arbeitet ohnehin über `set(...)` -- Wiederholungs-
+   häufigkeit eines Worts geht nie in den IDF-Jaccard-Score ein, das frühere
+   Nullsetzen bot dort also keinen zusätzlichen Schutz vor Halluzinationen
+   (eine echte kurze Loop wie `{"lets","go"}` ergibt gegen eine echte LRC
+   ohnehin nur eine winzige Schnittmenge, der Score bleibt von selbst
+   niedrig), konnte aber im Fehlalarmfall einen validen Treffer auf `0.0`
+   zerstören. Der Halluzinations-Flag steuert jetzt ausschließlich noch
+   `total_words`/`has_vocals`.
+
+**Trade-off (laut Opus-Zweitmeinung, akzeptiert):** Eine Halluzination mit
+zufällig >15 verschiedenen Müll-Wörtern würde künftig nicht mehr erkannt --
+in der Praxis selten, da echte Whisper-Loops kurze Fixphrasen sind; der
+Schaden bliebe dank Fix 2 ohnehin auf `has_vocals` begrenzt.
+
+23/23 gelöschte Fälle stichprobenartig live gegengeprüft (Carol Of The Bells,
+Tubular Bells etc. weiterhin korrekt "kein Vokal"; Never Can Say Goodbye,
+Lost Your Number jetzt korrekt "hat Vokal"). 8 neue Tests
+(`test_lyrics_core.py`, `test_evaluate_lyrics.py`), 533/533 Tests grün, `ruff`
+sauber. `lyrics_core.__version__` auf `1.13.28` erhöht.
 
 ## ✓ Aufräumen: WER/Modellvergleich-Rohdaten + -Doku entfernt
 

@@ -192,7 +192,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
         assert extras["reason"] == "unter-schwelle"
         assert "unter Schwelle" in info_str
 
-    def test_kein_vokal_faellt_auf_2er_konsens_zurueck(self, tmp_path, monkeypatch):
+    def test_kein_vokal_wird_trotz_2er_konsens_abgelehnt(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "genius": LRC_B})
         flac_path = tmp_path / "song.flac"
@@ -205,14 +205,12 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
 
         monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
 
-        found, info_str, extras = evaluate_lyrics.evaluate_song(
+        found, _info, extras = evaluate_lyrics.evaluate_song(
             conn, "artist", "title", flac_path=flac_path
         )
 
-        assert found is True
-        assert extras["method"] == "konsens"
-        assert extras["no_vocal"] is True
-        assert "kein Vokal" in info_str
+        assert found is False
+        assert extras["reason"] == "kein-vokal"
 
     def test_kein_vokal_ohne_2er_konsens_wird_abgelehnt(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")

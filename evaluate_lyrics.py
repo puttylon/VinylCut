@@ -246,34 +246,25 @@ def evaluate_song(
         )
 
         if not has_vocals:
-            novocal_rep, novocal_jaccard = lyrics_core._provider_consensus(
-                candidates, min_providers=2
-            )
-            if novocal_rep is not None:
-                best_content = novocal_rep.read_bytes()
-                info_str = f"{prov_str} │ Konsens {novocal_jaccard:.0%} (kein Vokal)"
-                extras = {
-                    "providers": len(candidates),
-                    "provider_names": provider_hits,
-                    "method": "konsens",
-                    "no_vocal": True,
-                    "score": round(novocal_jaccard, 3),
-                    "words": whisper_words,
-                    "language": lrc_lang,
-                }
-            else:
-                best_content = None
-                info_str = f"{prov_str} │ {whisper_head} kein Vokal"
-                extras = {
-                    "providers": len(candidates),
-                    "provider_names": provider_hits,
-                    "method": method,
-                    "no_vocal": True,
-                    "score": 0.0,
-                    "reason": "kein-vokal",
-                    "words": 0,
-                    "language": lrc_lang,
-                }
+            # Frueher: bei >=2 Providern im Konsens wurde deren LRC trotzdem
+            # gespeichert ("Konsens (kein Vokal)"). Abgeschafft (siehe
+            # ROADMAP.md) -- Provider-Konsens allein kann nicht unterscheiden,
+            # ob eine KONKRETE Aufnahme gesungen wird oder nur der Songtitel
+            # offizielle Lyrics hat (z.B. Instrumental-Cover eines Songs mit
+            # bekanntem Text). has_vocals=False gilt jetzt immer als
+            # kein-vokal, unabhaengig vom Provider-Konsens.
+            best_content = None
+            info_str = f"{prov_str} │ {whisper_head} kein Vokal"
+            extras = {
+                "providers": len(candidates),
+                "provider_names": provider_hits,
+                "method": method,
+                "no_vocal": True,
+                "score": 0.0,
+                "reason": "kein-vokal",
+                "words": 0,
+                "language": lrc_lang,
+            }
         elif lyrics_core._whisper_accept(
             best_score, lrc_lang, margin=contrastive_margin
         ):

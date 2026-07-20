@@ -239,7 +239,7 @@ Die kontrastive Marge braucht dafür immer eine offene Cache-DB als Hintergrund-
 
 `has_vocals` (steuert den „kein Vokal erkannt"-Zweig unten) kommt direkt aus dem Whisper-Durchlauf (`no_speech_prob` und Wortanzahl) — ohne separate Probe.
 
-→ Bei „kein Vokal erkannt" werden die Provider-LRCs untereinander verglichen (Jaccard). Stimmen mindestens 2 Provider zu ≥ 40 % überein, wird die repräsentativste LRC gespeichert — als „Konsens (kein Vokal)". Sind die Provider sich uneinig, wird nichts gespeichert.
+→ Bei „kein Vokal erkannt" wird nichts gespeichert (`reason: "kein-vokal"`) — auch nicht, wenn mehrere Provider untereinander übereinstimmen. Provider-Konsens allein kann nicht unterscheiden, ob ein Songtitel offizielle Lyrics hat oder ob die konkrete Aufnahme tatsächlich gesungen wird (siehe `ROADMAP.md`, Bugfix „kein Vokal"-Sonderfall).
 
 **Ohne Audiodatei** (Schritt `--bewerten` ohne zugeordnete Datei, z. B. bei einem eigenständigen Lauf ohne PFAD): Whisper entfällt, es entscheidet eine reine Dauer-Heuristik — der Kandidat mit dem besten `_score_lrc`-Wert wird genommen, außer seine Dauer weicht zu stark vom Track ab, dann wird nichts gespeichert (`reason: "dauer-abweichung"`).
 

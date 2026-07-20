@@ -275,18 +275,6 @@ def evaluate_song(
             p for p in [model_str, lang_str, "Whisper", words_str, early_stop_str] if p
         )
 
-        # Bugfix (siehe ROADMAP.md): _whisper_best() hat best_path/best_score
-        # bereits ueber ALLE all_candidates (inkl. existing_lrc) berechnet --
-        # unabhaengig von has_vocals und der Akzeptanz-Schwelle. War
-        # existing_lrc selbst der beste Match am echten Audio, darf der
-        # Aufrufer (write_lrc.py/cut.py) sie bei found=False NICHT loeschen,
-        # auch wenn das GESAMT-Ergebnis unter der Schwelle liegt oder
-        # faelschlich als "kein Vokal" gilt -- beide Signale sind verrauscht
-        # (Vokal-Flag durch die Halluzinations-Klassifikation, Schwelle durch
-        # die mit dem Cache wandernde kontrastive Marge), best_path selbst
-        # nicht.
-        existing_is_best = has_existing and best_path == existing_lrc
-
         if not has_vocals:
             # Frueher: bei >=2 Providern im Konsens wurde deren LRC trotzdem
             # gespeichert ("Konsens (kein Vokal)"). Abgeschafft (siehe
@@ -295,6 +283,16 @@ def evaluate_song(
             # offizielle Lyrics hat (z.B. Instrumental-Cover eines Songs mit
             # bekanntem Text). has_vocals=False gilt jetzt immer als
             # kein-vokal, unabhaengig vom Provider-Konsens.
+            #
+            # Bugfix (siehe ROADMAP.md, "Pohlmann-Fall"): existing_best hier
+            # bewusst IMMER False, auch wenn existing_lrc selbst best_path
+            # war -- das Whisper-Verdikt ist final, unabhaengig davon ob der
+            # Text von einem Provider oder von der Platte kam. Frueher schuetzte
+            # "existing_lrc war der beste Kandidat" auch dann vor dem Loeschen,
+            # wenn sie schlicht der EINZIGE Kandidat war (0 Provider-Treffer) --
+            # ein katastrophal schlechter Match "gewann" dann automatisch gegen
+            # niemanden. Als frischer Einzel-Kandidat waere dieselbe Datei nie
+            # akzeptiert worden.
             best_content = None
             info_str = f"{prov_str} │ {whisper_head} kein Vokal"
             extras = {
@@ -306,7 +304,7 @@ def evaluate_song(
                 "reason": "kein-vokal",
                 "words": 0,
                 "language": lrc_lang,
-                "existing_best": existing_is_best,
+                "existing_best": False,
             }
         elif lyrics_core._whisper_accept(
             best_score, lrc_lang, margin=contrastive_margin
@@ -338,7 +336,7 @@ def evaluate_song(
                 "reason": "unter-schwelle",
                 "words": whisper_words,
                 "language": lrc_lang,
-                "existing_best": existing_is_best,
+                "existing_best": False,  # Whisper-Verdikt final, siehe kein-vokal-Zweig oben
             }
     else:
         best_content, _score = lyrics_core._heuristic_best(all_candidates, expected_dur)

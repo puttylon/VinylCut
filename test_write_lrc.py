@@ -100,9 +100,10 @@ class TestWriteAllSchreibenLoeschen(_GlobalsResetMixin):
         assert counts["not_found"] == 1
 
     def test_existing_best_wird_nicht_geloescht(self, tmp_path, monkeypatch):
-        """Bugfix (siehe ROADMAP.md): existing_lrc war selbst der beste
-        Kandidat am Audio (extras["existing_best"]=True) -- ein found=False
-        dieser Runde darf sie dann nicht mehr loeschen."""
+        """Bugfix (siehe ROADMAP.md): extras["existing_best"]=True (heute nur
+        noch im Kein-Audio-Fall moeglich, siehe evaluate_lyrics.py -- ein
+        Whisper-Verdikt ist sonst immer final, auch fuer existing_lrc) darf
+        write_all() nicht loeschen lassen."""
         conn = cs.open_cache(tmp_path / "cache.db")
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
@@ -113,9 +114,9 @@ class TestWriteAllSchreibenLoeschen(_GlobalsResetMixin):
             _stub_evaluate_song(
                 (
                     False,
-                    "1/4: lrclib │ [medium] en Whisper 40W unter Schwelle idf-jacc=0.100",
+                    "1/4: lrclib │ Heuristik Dauer-Abweichung",
                     {
-                        "reason": "unter-schwelle",
+                        "reason": "dauer-abweichung",
                         "existing_best": True,
                         "content": None,
                     },

@@ -137,10 +137,12 @@ def write_all(
         new_content = extras.pop("content", None)
 
         if not found and extras.get("existing_best") and lrc_path.exists():
-            # Bugfix (siehe ROADMAP.md): existing_lrc war selbst der beste
-            # Kandidat am echten Audio (oder es gab keine Audiodatei fuer
-            # einen Gegenbeweis) -- ein "kein Ergebnis dieser Runde" ist
-            # dann kein Beleg, dass die Datei falsch ist. NICHT loeschen.
+            # Bugfix (siehe ROADMAP.md): existing_best ist heute nur noch
+            # True, wenn es KEINE Audiodatei fuer einen Gegenbeweis gab --
+            # ein Whisper-Verdikt (kein-vokal/unter-schwelle) ist sonst immer
+            # final, auch fuer eine bereits vorhandene Datei ("Pohlmann-
+            # Fall": eine Datei ohne jede Konkurrenz "gewann" frueher
+            # automatisch, obwohl ihr Score katastrophal niedrig war).
             extras["outcome"] = "keep"
             lyrics_core._tprint(
                 f"{lyrics_core._ts()}  {audio_path.name}  {info_str}  ="

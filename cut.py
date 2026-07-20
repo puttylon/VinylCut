@@ -83,8 +83,9 @@ def _fetch_lyrics_for_track(
             lrc_path.write_bytes(new_content)
     elif not found and not extras.get("existing_best"):
         # Bugfix (siehe ROADMAP.md, evaluate_lyrics.py existing_best):
-        # existing_lrc nicht loeschen, wenn sie selbst der beste Kandidat
-        # am Audio war (oder mangels Audio kein Gegenbeweis moeglich ist).
+        # existing_lrc nur noch schuetzen, wenn mangels Audiodatei gar kein
+        # Whisper-Gegenbeweis moeglich war -- ein echtes Whisper-Verdikt
+        # (kein-vokal/unter-schwelle) ist sonst immer final.
         lrc_path.unlink(missing_ok=True)
 
     return found, info_str, extras

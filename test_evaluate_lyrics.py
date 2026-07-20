@@ -466,11 +466,21 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
 
 class TestEvaluateSongExistingBest(_GlobalsResetMixin):
     """Bugfix (siehe ROADMAP.md): extras["existing_best"] signalisiert den
-    Aufrufern (write_lrc.py/cut.py), ob existing_lrc selbst der beste
-    Kandidat am Audio war -- unabhängig von has_vocals oder der
-    Akzeptanz-Schwelle, die beide für sich genommen verrauscht sind."""
+    Aufrufern (write_lrc.py/cut.py), ob existing_lrc trotz negativem
+    Whisper-Verdikt NICHT gelöscht werden darf. Das Whisper-Verdikt selbst
+    (kein-vokal/unter-schwelle) ist final und gilt für existing_lrc genauso
+    wie für einen frischen Provider-Kandidaten -- existing_best wird in
+    diesen beiden Fällen daher IMMER False (siehe "Pohlmann-Fall": eine
+    Datei ohne jede Konkurrenz "gewann" früher automatisch gegen niemanden,
+    obwohl ihr Score katastrophal niedrig war). Der einzig verbleibende
+    True-Fall ist der Kein-Audio-Zweig -- dort gibt es kein Whisper-Verdikt,
+    das etwas widerlegen könnte."""
 
-    def test_existing_best_true_bei_kein_vokal(self, tmp_path, monkeypatch):
+    def test_existing_best_false_bei_kein_vokal(self, tmp_path, monkeypatch):
+        """Regressionstest "Pohlmann-Fall": existing_lrc war der einzige
+        Kandidat (kein Konkurrent), Whisper sagt trotzdem "kein Vokal" --
+        muss gelöscht werden duerfen, keine Sonderbehandlung nur weil sie
+        schon auf der Platte lag."""
         conn = cs.open_cache(tmp_path / "cache.db")
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
@@ -491,7 +501,7 @@ class TestEvaluateSongExistingBest(_GlobalsResetMixin):
 
         assert found is False
         assert extras["reason"] == "kein-vokal"
-        assert extras["existing_best"] is True
+        assert extras["existing_best"] is False
 
     def test_existing_best_false_wenn_anderer_kandidat_gewinnt(
         self, tmp_path, monkeypatch
@@ -518,7 +528,14 @@ class TestEvaluateSongExistingBest(_GlobalsResetMixin):
         assert found is False
         assert extras["existing_best"] is False
 
-    def test_existing_best_true_bei_unter_schwelle(self, tmp_path, monkeypatch):
+    def test_existing_best_false_bei_unter_schwelle(self, tmp_path, monkeypatch):
+        """Regressionstest "Pohlmann-Fall" (echter Bug, vom Nutzer live
+        entdeckt): 0 Provider-Treffer, existing_lrc war der einzige
+        Kandidat und "gewann" automatisch gegen niemanden -- Score
+        0,01/idf-jacc weit unter der Schwelle. Waere derselbe Text als
+        einziger frischer Provider-Kandidat gekommen, waere er nie
+        akzeptiert worden -- existing_lrc bekommt keinen Sonderstatus nur
+        weil sie schon auf der Platte lag."""
         conn = cs.open_cache(tmp_path / "cache.db")
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
@@ -539,7 +556,7 @@ class TestEvaluateSongExistingBest(_GlobalsResetMixin):
 
         assert found is False
         assert extras["reason"] == "unter-schwelle"
-        assert extras["existing_best"] is True
+        assert extras["existing_best"] is False
 
     def test_existing_best_konservativ_true_ohne_audio(self, tmp_path):
         # Ohne Audiodatei kein Beleg gegen existing_lrc -- Dauer-Heuristik

@@ -118,8 +118,9 @@ class TestComputeLastGap:
 class TestFetchLyricsForTrackExistingBest(_QueryProviderNoopMixin):
     """Bugfix (siehe ROADMAP.md, evaluate_lyrics.py existing_best): cut.py
     hatte dieselbe Lücke wie write_lrc.py -- eine bereits vorhandene .lrc
-    wurde bei found=False bedingungslos gelöscht, auch wenn sie selbst der
-    beste Kandidat am Audio war."""
+    wurde bei found=False bedingungslos gelöscht, auch wenn extras
+    signalisierte, dass sie nicht angetastet werden sollte (heute nur noch
+    im Kein-Audio-Fall moeglich)."""
 
     def test_existing_best_wird_nicht_geloescht(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
@@ -128,8 +129,8 @@ class TestFetchLyricsForTrackExistingBest(_QueryProviderNoopMixin):
             "evaluate_song",
             lambda *a, **kw: (
                 False,
-                "1/4: lrclib │ unter Schwelle",
-                {"reason": "unter-schwelle", "existing_best": True, "content": None},
+                "1/4: lrclib │ Heuristik Dauer-Abweichung",
+                {"reason": "dauer-abweichung", "existing_best": True, "content": None},
             ),
         )
         flac_path = tmp_path / "song.flac"

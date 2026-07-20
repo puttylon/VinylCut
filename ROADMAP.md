@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.30`):
+`lyrics_core.py`, `1.13.31`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,58 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: existing_lrc ohne Konkurrenz "gewann" automatisch trotz katastrophal niedrigem Score ("Pohlmann-Fall")
+
+**Auslöser:** Live-Lauf des Nutzers zeigte eine Zeile mit `0/4: —` (kein
+einziger Provider kannte den Song, Pohlmann – "Besser Glauben Wir An Uns")
+und `unter Schwelle idf-jacc=0,056` — aber die bestehende `.lrc`-Datei wurde
+NICHT gelöscht (`=` statt `–` am Zeilenende).
+
+**Ursache:** `existing_is_best = has_existing and best_path == existing_lrc`
+(voriger Eintrag) prüfte nur, ob existing_lrc der beste Kandidat war — bei 0
+frischen Treffern ist sie zwangsläufig die EINZIGE, "gewinnt" also
+automatisch gegen niemanden. Ihr tatsächlicher Score floss in diese
+Schutz-Entscheidung nie ein. Nutzer-Gegenprobe, die den Bug klar belegt: wäre
+derselbe Text stattdessen als einziger FRISCHER Provider-Kandidat gekommen,
+hätte `_whisper_accept(0,056, ...)` ihn klar abgelehnt — kein automatisches
+Speichern. Reiner Zufall der Herkunft (Provider vs. bereits auf der Platte)
+entschied bisher über Löschen oder Behalten, nicht die Qualität des Textes.
+
+**Diskutierte, aber verworfene Zwischenlösung:** existing_best zusätzlich an
+`contrastive_margin >= 0` binden (nicht schlechter als der Zufalls-
+Hintergrund) hätte Pohlmann korrekt behandelt, aber echte Grenzfälle
+weiterhin speziell geschützt. Nutzer-Entscheidung (von Opus als Zweitmeinung
+bestätigt): einfachere, härtere Regel — das Whisper-Verdikt ist IMMER final,
+unabhängig davon ob der Text von einem Provider oder von der Platte kam. Der
+ursprüngliche Grund für die Sonderbehandlung (Halluzinations-Fehlklassifikation
+konnte `has_vocals` fälschlich `False` setzen) ist bereits in einer früheren
+Session-Änderung behoben — die Marge-Rauschen-Sorge bleibt zwar real, aber
+`existing_best` war dafür ohnehin viel zu grob (schützte einen
+Totalausfall wie 0,056 genauso wie einen echten Grenzfall bei 0,28). Der
+saubere Ort für Margen-Rauschen ist die Marge selbst (größere/stabilere
+Hintergrund-Stichprobe), nicht eine Bestandsschutz-Klausel.
+
+**Fix:** `extras["existing_best"]` ist in den Zweigen `kein-vokal` und
+`unter-schwelle` jetzt IMMER `False` — ein Whisper-Verdikt gilt für
+existing_lrc genauso wie für einen frischen Kandidaten. Einzig verbliebener
+`True`-Fall: der Kein-Audio-Zweig (`dauer-abweichung`), weil dort mangels
+Audiodatei gar kein Whisper-Verdikt existiert, das etwas widerlegen könnte.
+Die `existing_best`-Infrastruktur selbst (extras-Key, Aufrufer-Check in
+`write_lrc.py`/`cut.py`) bleibt bestehen — sie hat mit diesem einen
+verbliebenen Fall weiterhin eine echte, nicht-redundante Funktion.
+
+**Ehrlicher Trade-off (bewusst in Kauf genommen):** ein Grenzfall-Score nahe
+der Schwelle kann bei ungünstiger Zufalls-Hintergrundziehung künftig gelöscht
+statt behalten werden. Das ist selbstheilend (ein späterer Lauf mit anderer
+Stichprobe oder neuen Provider-Daten schreibt ihn bei echter Übereinstimmung
+neu) und bewusst der einfacheren, konsistenteren Regel vorgezogen.
+
+2 Tests umgedreht (`test_existing_best_false_bei_kein_vokal`,
+`test_existing_best_false_bei_unter_schwelle`, vormals `..._true_...`),
+Klassen-Docstring und Aufrufer-Kommentare in `write_lrc.py`/`cut.py`
+korrigiert. 558/558 Tests grün, `ruff` sauber. `lyrics_core.__version__` auf
+`1.13.31` erhöht.
 
 ## ✓ Bugfix: starke Mehrheits-Einigkeit wurde durch die Gruppierung selbst verworfen ("Fernando-Fall")
 

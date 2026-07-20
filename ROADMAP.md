@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.29`):
+`lyrics_core.py`, `1.13.30`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,65 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: starke Mehrheits-Einigkeit wurde durch die Gruppierung selbst verworfen ("Fernando-Fall")
+
+**Auslöser:** Empirische Prüfung des Konsens-Umbaus (siehe vorheriger Eintrag)
+gegen 5 echte englischsprachige Songs aus der Bibliothek. Bei ABBA "Fernando"
+(4/4 frische Provider-Treffer) wurde die bestehende, korrekte `.lrc`-Datei
+unerwartet durch eine leicht andere Fassung ersetzt, obwohl objektiv eine
+sehr starke Übereinstimmung vorlag.
+
+**Ursache, mit echten Zahlen belegt:** Alle 5 Quellen (existing_lrc + 4
+Provider) stimmten paarweise zu 82–100% überein -- lrclib/musixmatch/netease/
+existing_lrc landeten wegen dieser extremen Ähnlichkeit korrekt in EINER
+Gruppe (`_group_candidates`, Zweck: keine Doppelzählung), Genius (durch seine
+Kontributoren-Kopfzeile leicht verwässert, aber immer noch 82-84% ähnlich)
+blieb als zweite, eigene Gruppe übrig. Macht nur noch **2 Gruppen** --
+`_provider_consensus` verlangt aber `min_providers=3` **Gruppen**, bevor es
+überhaupt die tatsächliche Übereinstimmung zwischen ihnen prüft. Ergebnis:
+trotz 82%+ Übereinstimmung wurde der Fall als "zu wenig Kandidaten"
+abgewiesen und fiel auf die (unabhängige, ältere) Dauer-Heuristik zurück, die
+ihrerseits per Zeilenanzahl eine andere Fassung als die bestehende wählte.
+
+**Kernfrage (vom Nutzer aufgeworfen):** Wozu dient Gruppierung/Dedup
+eigentlich? Antwort: um zu verhindern, dass NICHT-unabhängige (gespiegelte/
+korrelierte) Quellen als mehrere unabhängige Bestätigungen durchgehen -- NICHT
+um echte, starke Übereinstimmung zu bestrafen. Die Mindestanzahl-Schwelle
+(`min_providers`) sollte deshalb auf der **rohen, ungruppierten**
+Quellenzahl prüfen (genug unabhängige Quellen überhaupt vorhanden?), während
+die eigentliche Übereinstimmungs-Rechnung weiterhin auf den **gruppierten**
+Repräsentanten läuft (schützt weiter vor Mehrfachzählung durch Mirrors).
+
+**Fix:** `lyrics_core._provider_consensus()` bekommt einen neuen Parameter
+`raw_count` -- die Mindestanzahl-Prüfung (`min_providers`) läuft jetzt darauf
+statt auf der Länge der (ggf. gruppierten) `candidates`-Liste. Default (kein
+`raw_count` übergeben) zählt weiterhin nur AUSWERTBARE (nicht-leere)
+Kandidaten in `candidates` selbst -- eine leere/unlesbare Datei darf die
+Schwelle nie mit erfüllen helfen, auch nicht indirekt (Regressionsschutz für
+`test_leere_lrc_zählt_nicht`, bei einem ersten Entwurf dieses Fixes real
+kaputtgegangen und beim Testen aufgefallen). `evaluate_lyrics.evaluate_song()`
+übergibt jetzt `raw_count=lyrics_core._nonempty_candidate_count(all_candidates)`
+(neue kleine Hilfsfunktion, zählt Kandidaten mit echtem Wortinhalt VOR der
+Gruppierung). Fables Zirkelschluss-Schutz (vorheriger Eintrag) bleibt
+unangetastet: dort bilden sich ebenfalls nur 2 Gruppen, die sich aber
+UNEINIG sind -- die Übereinstimmungs-Rechnung selbst (unverändert auf den
+Gruppen) verweigert weiterhin den Konsens.
+
+**Erneut empirisch verifiziert** (dieselben 5 Songs, echte Bibliotheksdaten,
+read-only): Fernando jetzt `Konsens 84%`, Datei unverändert. "2 Unlimited –
+Faces" (2 frische Provider) erreicht jetzt ebenfalls Konsens (87%) statt
+Heuristik -- der ursprünglich beabsichtigte Nutzen des ganzen Umbaus
+(existing_lrc als dritte Stimme). "Adamski – Over Killer" (nur 1 frischer
+Treffer + existing = 2 rohe Quellen) bleibt korrekt unter der Schwelle.
+
+4 neue Tests (`test_lyrics_core.py`: `TestProviderConsensus` --
+`test_raw_count_rettet_starke_einigkeit_trotz_wenig_gruppen`,
+`test_raw_count_ohne_uebergabe_zaehlt_nur_auswertbare_kandidaten`,
+`test_raw_count_schuetzt_weiterhin_vor_zirkelschluss`;
+`test_evaluate_lyrics.py`: `test_starke_mehrheits_einigkeit_ueber_nur_zwei_gruppen`).
+558/558 Tests grün, `ruff` sauber. `lyrics_core.__version__` auf `1.13.30`
+erhöht.
 
 ## ✓ Umbau: existing_lrc als vollwertiger Konsens-Kandidat + Löschschutz gegen verrauschte Signale
 

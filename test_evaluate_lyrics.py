@@ -186,6 +186,50 @@ class TestEvaluateSongKonsens(_GlobalsResetMixin):
         assert found is True
         assert extras["method"] == "konsens"
 
+    def test_starke_mehrheits_einigkeit_ueber_nur_zwei_gruppen(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix (siehe ROADMAP.md, "Fernando-Fall"): existing_lrc + 3 der 4
+        frischen Provider sind praktisch wortgleich -- die Gruppierung fasst
+        sie zu EINER Gruppe zusammen (kein Doppelzaehlen), der 4. Provider
+        weicht formulierungsmaessig ab und bleibt eine zweite, eigene Gruppe.
+        Macht nur noch 2 Gruppen bei 5 rohen Quellen -- die Mindestanzahl-
+        Pruefung muss trotzdem bestehen (raw_count statt Gruppenzahl), weil
+        beide Gruppen sich inhaltlich klar einig sind (>40%). Kein Whisper
+        noetig, obwohl real nur 2 "Meinungen" uebrig sind."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(
+            conn,
+            "artist",
+            "title",
+            {
+                "lrclib": LRC_A,
+                "musixmatch": LRC_A,
+                "netease": LRC_A,
+                "genius": LRC_B,
+            },
+        )
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_A, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        def _fail_if_called(*a, **kw):
+            raise AssertionError(
+                "starke Mehrheits-Einigkeit ueber nur 2 Gruppen muss reichen -- "
+                "kein Whisper noetig"
+            )
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+
+        assert found is True
+        assert extras["method"] == "konsens"
+        assert extras["content"] == existing.read_bytes()
+
     def test_konsens_passend_zu_existing_lrc_bleibt_schnellpfad(
         self, tmp_path, monkeypatch
     ):

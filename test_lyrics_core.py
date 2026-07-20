@@ -415,6 +415,51 @@ class TestProviderConsensus:
         for p in paths:
             p.unlink(missing_ok=True)
 
+    def test_raw_count_rettet_starke_einigkeit_trotz_wenig_gruppen(self):
+        # Bugfix (siehe ROADMAP.md, "Fernando-Fall"): 5 rohe Quellen, von
+        # denen 4 praktisch wortgleich sind -- _group_candidates fasst sie zu
+        # EINER Gruppe zusammen (2 Gruppen insgesamt: die große + 1 Ausreißer-
+        # aehnliche). Ohne raw_count wuerde "nur 2 Gruppen" faelschlich als
+        # "zu wenig Kandidaten" verworfen, obwohl beide Gruppen sich zu >80%
+        # einig sind. Mit raw_count=5 (rohe Anzahl) besteht die Mindestanzahl-
+        # Pruefung, die Rechnung selbst laeuft weiter auf den 2 Gruppen.
+        raw_paths = self._paths(
+            self.LRC_A, self.LRC_A, self.LRC_A, self.LRC_A, self.LRC_B
+        )
+        grouped = _group_candidates(raw_paths)
+        assert len(grouped) == 2  # A-Quadrupel zu 1 Gruppe, B eigene Gruppe
+        rep, score = _provider_consensus(grouped, raw_count=len(raw_paths))
+        assert rep is not None, "starke Einigkeit zwischen den 2 Gruppen muss reichen"
+        assert score >= _CONSENSUS_MIN_JACCARD
+        for p in raw_paths:
+            p.unlink(missing_ok=True)
+
+    def test_raw_count_ohne_uebergabe_zaehlt_nur_auswertbare_kandidaten(self):
+        # Regressionsschutz: OHNE explizites raw_count darf eine leere/
+        # unlesbare Kandidatendatei nicht mitzaehlen (siehe
+        # test_leere_lrc_zählt_nicht) -- der Default muss sich wie zuvor
+        # verhalten, nicht einfach die rohe Listenlaenge nehmen.
+        paths = self._paths(self.LRC_A, self.LRC_B, "")
+        rep, score = _provider_consensus(paths)
+        assert rep is None
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+    def test_raw_count_schuetzt_weiterhin_vor_zirkelschluss(self):
+        # Fables Szenario (siehe ROADMAP.md): 3 rohe Quellen, 2 davon
+        # (existing + ihr Herkunfts-Provider) gruppieren zusammen, die
+        # dritte (echt abweichende, korrekte) Quelle bleibt eigene Gruppe.
+        # raw_count=3 besteht die Mindestanzahl-Pruefung, aber die 2 Gruppen
+        # sind sich UNEINIG (LRC_WRONG vs. LRC_A) -- kein Konsens, C3 kann
+        # nicht rebten (braucht selbst >=3 Gruppen).
+        raw_paths = self._paths(self.LRC_WRONG, self.LRC_WRONG, self.LRC_A)
+        grouped = _group_candidates(raw_paths)
+        assert len(grouped) == 2
+        rep, score = _provider_consensus(grouped, raw_count=len(raw_paths))
+        assert rep is None
+        for p in raw_paths:
+            p.unlink(missing_ok=True)
+
 
 class TestWhisperAccept:
     """_whisper_accept() ohne Marge (margin=None): faellt auf die alte

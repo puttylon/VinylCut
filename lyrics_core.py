@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.29"
+__version__ = "1.13.30"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -926,6 +926,20 @@ def _extract_lrc_words(content: str) -> list[str]:
     return words
 
 
+def _nonempty_candidate_count(paths: list[Path]) -> int:
+    """Anzahl der Kandidaten mit tatsächlich extrahierbarem Wortinhalt --
+    leere/unlesbare Dateien liefern keine Evidenz und zählen nicht (siehe
+    ROADMAP.md, raw_count-Parameter von `_provider_consensus`)."""
+    count = 0
+    for p in paths:
+        try:
+            if _extract_lrc_words(p.read_text(encoding="utf-8")):
+                count += 1
+        except Exception:
+            pass
+    return count
+
+
 def _detect_lrc_language(candidates: list[Path]) -> str | None:
     """Erkennt Sprache aus LRC-Inhalt via langdetect (ISO 639-1, z.B. 'de').
 
@@ -1515,17 +1529,34 @@ def _transcribe_with_early_stop(
 def _provider_consensus(
     candidates: list[Path],
     min_providers: int = _CONSENSUS_MIN_PROVIDERS,
+    raw_count: int | None = None,
 ) -> tuple[Path | None, float]:
-    """Prüft ob ≥ min_providers Provider inhaltlich übereinstimmen.
+    """Prüft ob genug (unabhängige) Kandidaten inhaltlich übereinstimmen.
 
     Gibt (repräsentativsten Kandidaten, avg_score) zurück, oder (None, avg_score)
     wenn kein Konsens erreicht wird. avg_score ist die durchschnittliche
     paarweise Jaccard-Ähnlichkeit (hoch = ähnlich). C3: Bei initialem
     Scheitern wird der stärkste Ausreißer herausgeworfen und der Check auf
-    den verbleibenden Kandidaten wiederholt.
+    den verbleibenden Kandidaten wiederholt (braucht dafür weiterhin ≥3
+    Kandidaten in `candidates`).
+
+    raw_count (siehe ROADMAP.md, Fernando-Fall): Anzahl der UNGEGRUPPIERTEN
+    Rohquellen, aus denen `candidates` durch vorheriges Gruppieren
+    (`_group_candidates`) hervorgegangen ist -- Default None zählt die
+    auswertbaren (nicht-leeren) Einträge in `candidates` selbst
+    (rückwärtskompatibel für Aufrufer ohne Gruppierung). Die Mindestanzahl-
+    Schwelle (min_providers) prüft IMMER raw_count: genug unabhängige
+    Rohquellen müssen ÜBERHAUPT vorhanden gewesen sein, bevor ein Konsens
+    überhaupt versucht wird -- eine leere/unlesbare Kandidatendatei liefert
+    keine Evidenz und darf diese Schwelle nie mit erfüllen helfen (auch nicht
+    indirekt über einen vom Aufrufer übergebenen raw_count, der ungefiltert
+    die rohe Listenlänge zählt). Die eigentliche Übereinstimmungs-Rechnung
+    (Durchschnitt, Ausreißer-Wurf) läuft dagegen auf `candidates` selbst (den
+    ggf. bereits gruppierten Repräsentanten) -- vermeidet, dass gespiegelte/
+    korrelierte Quellen die Rechnung verfälschen. Reine Sicherheits-Untergrenze
+    für die eigentliche Rechnung: mindestens 2 auswertbare Kandidaten, sonst
+    ergibt ein paarweiser Vergleich keinen Sinn (und Division durch 0).
     """
-    if len(candidates) < min_providers:
-        return None, 0.0
     path_words: list[tuple[Path, set]] = []
     for p in candidates:
         try:
@@ -1534,7 +1565,11 @@ def _provider_consensus(
                 path_words.append((p, ws))
         except Exception:
             pass
-    if len(path_words) < min_providers:
+    if raw_count is None:
+        raw_count = len(path_words)
+    if raw_count < min_providers:
+        return None, 0.0
+    if len(path_words) < 2:
         return None, 0.0
 
     def _jaccard(a: set, b: set) -> float:

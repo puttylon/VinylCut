@@ -197,8 +197,19 @@ def evaluate_song(
     # inhaltsgleichen frischen Nachfolger ihres urspruenglichen Providers
     # doppelt zaehlen (beide landen in derselben Gruppe, siehe dortiger
     # Docstring zum C3-Ausreisser-Exploit).
+    #
+    # Bugfix (siehe ROADMAP.md, "Fernando-Fall"): die Mindestanzahl-Schwelle
+    # (_CONSENSUS_MIN_PROVIDERS) muss auf der ROHEN, ungruppierten Quellenzahl
+    # pruefen (raw_count=len(all_candidates)) -- nicht auf der Gruppenzahl.
+    # Sonst wird starke, echte Einigkeit (z.B. 4 von 5 Quellen sagen praktisch
+    # dasselbe, landen in EINER Gruppe) faelschlich als "zu wenig Kandidaten"
+    # verworfen, obwohl die verbleibenden Gruppen selbst hochgradig
+    # uebereinstimmen. Die eigentliche Rechnung (Durchschnitt, Ausreisser-Wurf)
+    # laeuft weiterhin auf den gruppierten Repraesentanten.
     grouped = lyrics_core._group_candidates(all_candidates)
-    consensus_rep, consensus_jaccard = lyrics_core._provider_consensus(grouped)
+    consensus_rep, consensus_jaccard = lyrics_core._provider_consensus(
+        grouped, raw_count=lyrics_core._nonempty_candidate_count(all_candidates)
+    )
 
     if consensus_rep is not None:
         best_content: bytes | None = consensus_rep.read_bytes()

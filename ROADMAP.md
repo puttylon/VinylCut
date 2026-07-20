@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.31`):
+`lyrics_core.py`, `1.13.32`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,39 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: Sonderzeichen im Titel-Tag ließen die Live-Provider-Suche ins Leere laufen ("Pro Secco"-Fall)
+
+**Auslöser:** Live-Lauf des Nutzers zeigte `0/4: —` für Pro Secco – "Tu sei
+l´unica donna per me (Versione Pro Secco)", obwohl der Song laut Nutzer bei
+lrclib existiert. DB-Nachschau bestätigte: lrclib wurde tatsächlich live
+abgefragt (kein Cache-/Rate-Limit-Bug) und lieferte "nichts".
+
+**Ursache:** Der Titel-Tag enthält `l´unica` mit einem alleinstehenden
+**ACUTE ACCENT** (`´`, U+00B4) statt eines normalen Apostrophs (`'`) --
+vermutlich ein Tagging-Artefakt beim ursprünglichen Rippen. lrclib indiziert
+den Song vermutlich unter der üblichen Schreibweise mit echtem Apostroph --
+die Live-Suchanfrage mit dem falschen Zeichen matcht dagegen nicht, obwohl
+der Song existiert. Die Klammer-Entfernung für die Suche (`_clean_query_title`)
+funktionierte korrekt und war nicht die Ursache.
+
+**Fix:** `lyrics_core._query_provider()` faltet die Suchanfrage jetzt über
+`library.to_ascii_fold()` (bereits vorhanden, bisher nur für den lokalen
+lrclib-Datenbank-Abzug genutzt) zu ASCII, bevor sie an `syncedlyrics`
+übergeben wird -- `"l´unica"` → `"l'unica"`. Nur EINE gemeinsame Stelle
+geändert (`_query_provider`), da alle drei Live-Query-Bau-Stellen
+(`fetch_providers.py`, `cut.py`, `lyrics_core._retry_missing`) dort
+durchlaufen. `artist_key`/`title_key` (Cache-Schlüssel) bleiben bewusst
+unverändert -- nur die Suchanfrage selbst wird gefaltet, damit bestehende
+Cache-Einträge nicht auseinanderlaufen.
+
+**Für bestehende Bibliotheken:** Kein Migrationsskript nötig -- Songs mit
+solchen Tag-Artefakten, die bisher `nichts` gecacht haben, werden bei
+`--nachholen` automatisch mit der gefalteten Suchanfrage neu versucht.
+
+1 neuer Test (`test_lyrics_core.py::TestProviderCache::
+test_live_suchanfrage_wird_ascii_gefaltet`). 559/559 Tests grün, `ruff`
+sauber. `lyrics_core.__version__` auf `1.13.32` erhöht.
 
 ## ✓ Bugfix: existing_lrc ohne Konkurrenz "gewann" automatisch trotz katastrophal niedrigem Score ("Pohlmann-Fall")
 

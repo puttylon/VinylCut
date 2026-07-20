@@ -1538,6 +1538,34 @@ class TestProviderCache:
         )
         assert (provider, path) == ("lrclib", None)
 
+    def test_live_suchanfrage_wird_ascii_gefaltet(self, tmp_path, monkeypatch):
+        """Bugfix (siehe ROADMAP.md, "Pro Secco"-Fall): ein alleinstehendes
+        ACUTE ACCENT (´) statt eines normalen Apostrophs im Titel-Tag liess
+        die Provider-Suche bisher ins Leere laufen, obwohl der Song unter
+        der ueblichen Schreibweise existiert. Die an syncedlyrics
+        uebergebene Suchanfrage muss deshalb ASCII-gefaltet sein --
+        artist_key/title_key (Cache-Schluessel) bleiben davon unberuehrt."""
+        self._open(tmp_path)
+        seen_queries = []
+
+        class _Result:
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            seen_queries.append(cmd[1])
+            return _Result()
+
+        monkeypatch.setattr(lyrics_core.subprocess, "run", _fake_run)
+        lyrics_core._query_provider(
+            "tu sei l´unica donna per me",
+            "lrclib",
+            {},
+            artist="pro secco",
+            title="tu sei l´unica donna per me",
+        )
+
+        assert seen_queries == ["tu sei l'unica donna per me"]
+
 
 def _make_dump_conn(
     synced: dict[tuple[str, str], str] | None = None,

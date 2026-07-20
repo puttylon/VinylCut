@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
 
+import library
+
 try:
     import cache_store
 except ImportError:
@@ -42,7 +44,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.31"
+__version__ = "1.13.32"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -646,6 +648,16 @@ def _query_provider(
     keine Live-Abfrage, sein Ergebnis darf also auch unter --cache-only
     verwendet werden.
     """
+    # Bugfix (siehe ROADMAP.md, "Pro Secco"-Fall): Tag-Artefakte wie ein
+    # alleinstehendes ACUTE ACCENT (´, U+00B4) statt eines normalen
+    # Apostrophs koennen die Live-Suche bei den Providern ins Leere laufen
+    # lassen, obwohl der Song dort unter der ueblichen Schreibweise
+    # existiert. to_ascii_fold() (bisher nur fuer den lokalen lrclib-Dump-
+    # Abzug genutzt, siehe library.py) transliteriert solche Zeichen zu
+    # normalem ASCII ("l´unica" -> "l'unica") -- nur fuer die Suchanfrage
+    # selbst, NICHT fuer artist_key/title_key (Cache-Schluessel bleiben
+    # unveraendert, damit bestehende Cache-Eintraege nicht auseinanderlaufen).
+    query = library.to_ascii_fold(query) if query else query
     use_cache = cache_store is not None and _cache_conn is not None
     artist_key = title_key = None
     if cache_store is not None:

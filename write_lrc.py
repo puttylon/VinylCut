@@ -136,7 +136,18 @@ def write_all(
         )
         new_content = extras.pop("content", None)
 
-        if not found:
+        if not found and extras.get("existing_best") and lrc_path.exists():
+            # Bugfix (siehe ROADMAP.md): existing_lrc war selbst der beste
+            # Kandidat am echten Audio (oder es gab keine Audiodatei fuer
+            # einen Gegenbeweis) -- ein "kein Ergebnis dieser Runde" ist
+            # dann kein Beleg, dass die Datei falsch ist. NICHT loeschen.
+            extras["outcome"] = "keep"
+            lyrics_core._tprint(
+                f"{lyrics_core._ts()}  {audio_path.name}  {info_str}  ="
+            )
+            counts["skipped"] += 1
+            cache_result = "ok"
+        elif not found:
             had_lrc = lrc_path.exists()
             lrc_path.unlink(missing_ok=True)
             extras["outcome"] = "delete" if had_lrc else "none"

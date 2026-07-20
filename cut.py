@@ -81,7 +81,10 @@ def _fetch_lyrics_for_track(
         old_content = lrc_path.read_bytes() if lrc_path.exists() else None
         if old_content != new_content:
             lrc_path.write_bytes(new_content)
-    elif not found:
+    elif not found and not extras.get("existing_best"):
+        # Bugfix (siehe ROADMAP.md, evaluate_lyrics.py existing_best):
+        # existing_lrc nicht loeschen, wenn sie selbst der beste Kandidat
+        # am Audio war (oder mangels Audio kein Gegenbeweis moeglich ist).
         lrc_path.unlink(missing_ok=True)
 
     return found, info_str, extras

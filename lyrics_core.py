@@ -17,7 +17,6 @@ alten --no-whisper-Flag gebraucht, das die neue Pipeline nicht hat).
 
 import errno
 import fcntl
-import hashlib
 import math
 import random
 import re
@@ -43,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.28"
+__version__ = "1.13.29"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -115,6 +114,9 @@ _CONSENSUS_MIN_PROVIDERS = (
 )
 _CONSENSUS_MIN_JACCARD = (
     0.40  # mindest-Übereinstimmung zwischen den Provider-LRCs untereinander
+)
+_GROUP_WORD_JACCARD = (
+    0.90  # >= dies gilt als "derselbe Text" -- Gruppierung vor dem Konsens
 )
 
 _VOCALS_MIN_WORDS = 5  # Fallback: weniger Wörter → als instrumental behandelt
@@ -817,25 +819,47 @@ def _query_provider(
     return provider, found_path
 
 
-def _dedupe_by_content(
-    paths: list[Path], provider_hits: list[str]
-) -> tuple[list[Path], list[str]]:
-    """Entfernt inhaltlich identische Kandidaten (gespiegelte Provider-Datenbanken).
+def _group_candidates(
+    paths: list[Path], threshold: float = _GROUP_WORD_JACCARD
+) -> list[Path]:
+    """Fasst inhaltlich (wort-basiert) nahezu identische Kandidaten zu einer
+    Gruppe zusammen, gibt je Gruppe genau den ERSTEN Kandidaten in `paths`
+    als Repräsentanten zurück (Reihenfolge steuert also, wer bevorzugt wird).
 
-    Erster Treffer in Prioritätsreihenfolge bleibt, Duplikat-Dateien werden gelöscht.
+    Ersetzt den früheren reinen Byte-Hash-Vergleich (`_dedupe_by_content`,
+    gespiegelte Provider-Datenbanken) durch einen wort-basierten (Jaccard
+    über die extrahierten Wortmengen) -- erfasst zusätzlich inhaltlich
+    gleiche, aber anders formatierte/zeitgestempelte Duplikate (z.B. eine
+    bereits vorhandene `.lrc` gegenüber einem frischen Re-Fetch desselben
+    Providers).
+    Löscht NICHTS von der Platte (anders als die alte Funktion) -- rein
+    logische Gruppierung, Aufräumen bleibt Sache des Aufrufers.
+
+    Wichtig für den Konsens (siehe ROADMAP.md, "existing_lrc im Konsens"):
+    ohne dieses Gruppieren VOR dem eigentlichen Konsens-Vergleich könnte ein
+    inhaltsgleiches Paar (z.B. eine alte, bereits akzeptierte Datei + ein
+    frischer Re-Fetch genau des Providers, von dem sie ursprünglich stammt)
+    als zwei unabhängige Stimmen durchgehen -- der Ausreißer-Rettungs-
+    Mechanismus in `_provider_consensus` (C3) könnte dann einen dritten,
+    tatsächlich abweichenden (und richtigen) Kandidaten fälschlich als
+    Ausreißer verwerfen. Mit vorheriger Gruppierung zählt das Paar nur als
+    EINE Stimme, der Exploit greift nicht mehr.
     """
-    seen_hashes: set[bytes] = set()
-    deduped: list[Path] = []
-    deduped_hits: list[str] = []
-    for path, provider in zip(paths, provider_hits):
-        h = hashlib.md5(path.read_bytes()).digest()
-        if h not in seen_hashes:
-            seen_hashes.add(h)
-            deduped.append(path)
-            deduped_hits.append(provider)
+    groups: list[tuple[Path, set[str]]] = []
+    for path in paths:
+        try:
+            words = set(_extract_lrc_words(path.read_text(encoding="utf-8")))
+        except Exception:
+            words = set()
+        if not words:
+            continue
+        for _rep, rep_words in groups:
+            u = words | rep_words
+            if u and len(words & rep_words) / len(u) >= threshold:
+                break
         else:
-            path.unlink(missing_ok=True)  # Duplikat-Temp-Datei sofort löschen
-    return deduped, deduped_hits
+            groups.append((path, words))
+    return [rep for rep, _ in groups]
 
 
 def _faster_whisper_available() -> bool:

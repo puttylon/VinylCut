@@ -47,6 +47,7 @@ from lyrics_core import (
     _extract_lrc_words,
     _first_timestamp,
     _global_cache_idf,
+    _group_candidates,
     _heuristic_best,
     _idf,
     _idf_jaccard,
@@ -304,6 +305,52 @@ def _make_lrc(text: str) -> Path:
     f.write(text)
     f.close()
     return Path(f.name)
+
+
+class TestGroupCandidates:
+    def test_identischer_inhalt_wird_gruppiert(self):
+        a = _make_lrc("[00:10.00]hello world foo bar\n")
+        b = _make_lrc("[00:10.00]hello world foo bar\n")
+        assert _group_candidates([a, b]) == [a]
+
+    def test_wortgleich_andere_formatierung_wird_gruppiert(self):
+        # Bugfix (siehe ROADMAP.md): byte-verschieden (Zeitstempel/Umbrüche),
+        # aber wort-identisch -- muss trotzdem als eine Gruppe zaehlen.
+        a = _make_lrc("[00:10.00]hello world foo bar\n")
+        b = _make_lrc("[00:12.00]hello world foo bar\r\n")
+        assert _group_candidates([a, b]) == [a]
+
+    def test_komplett_verschieden_bleibt_getrennt(self):
+        a = _make_lrc("[00:10.00]hello world foo bar\n")
+        b = _make_lrc("[00:10.00]opa opa tanzen alle\n")
+        assert _group_candidates([a, b]) == [a, b]
+
+    def test_erster_in_reihenfolge_bleibt_repraesentant(self):
+        a = _make_lrc("[00:10.00]hello world foo bar\n")
+        b = _make_lrc("[00:10.00]hello world foo bar\n")
+        assert _group_candidates([b, a]) == [b]
+
+    def test_leere_datei_wird_uebersprungen(self):
+        a = _make_lrc("[00:10.00]hello world\n")
+        b = _make_lrc("")
+        assert _group_candidates([a, b]) == [a]
+
+    def test_fehlende_datei_wirft_nicht(self):
+        a = _make_lrc("[00:10.00]hello world\n")
+        assert _group_candidates([a, Path("/nicht/vorhanden.lrc")]) == [a]
+
+    def test_drei_kandidaten_zwei_gruppen(self):
+        a = _make_lrc("[00:10.00]hello world foo bar\n")
+        b = _make_lrc("[00:12.00]hello world foo bar\r\n")  # wortgleich zu a
+        c = _make_lrc("[00:10.00]opa opa tanzen alle\n")
+        assert _group_candidates([a, b, c]) == [a, c]
+
+    def test_unter_schwelle_bleibt_getrennt(self):
+        # Nur teilweise Ueberlappung, deutlich unter der 0.90-Gruppierungs-
+        # schwelle -- muss als zwei getrennte Kandidaten erhalten bleiben.
+        a = _make_lrc("[00:10.00]a b c d\n")
+        b = _make_lrc("[00:10.00]a b e f\n")
+        assert _group_candidates([a, b]) == [a, b]
 
 
 class TestProviderConsensus:

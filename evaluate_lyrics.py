@@ -76,8 +76,8 @@ def _load_candidate_texts(
     conn: sqlite3.Connection, song_id: int
 ) -> list[tuple[str, str]]:
     """(provider, inhalt) je Treffer fuer song_id, in _ALL_PROVIDERS-Reihenfolge
-    (wichtig fuer _dedupe_by_content: "erster Treffer in Prioritaetsreihenfolge
-    bleibt").
+    (wichtig fuer lyrics_core._group_candidates: "erster Treffer in
+    Prioritaetsreihenfolge bleibt Gruppen-Repraesentant").
 
     Filtert Übersetzungsseiten (lyrics_core._looks_like_translation) trotz
     status='treffer' heraus: diese Funktion liest direkt aus der Cache-DB,
@@ -144,13 +144,18 @@ def evaluate_song(
 
     candidates: list[Path] = [_write_temp_lrc(content) for _, content in provider_texts]
     provider_hits = [p for p, _ in provider_texts]
-    candidates, provider_hits = lyrics_core._dedupe_by_content(
-        candidates, provider_hits
-    )
 
-    all_candidates = candidates + (
-        [existing_lrc] if existing_lrc and existing_lrc.exists() else []
-    )
+    has_existing = bool(existing_lrc and existing_lrc.exists())
+    # existing_lrc steht bewusst VORNE (nicht hinten): _whisper_best()s
+    # Scoring-Schleife nutzt striktes ">" -- bei einem Score-Gleichstand
+    # gewinnt der ZUERST in der Liste stehende Kandidat. existing_lrc und ein
+    # frischer Kandidat mit wortgleichem (aber z.B. anders formatiertem/
+    # zeitgestempeltem) Text erzeugen denselben IDF-Jaccard-Score (der
+    # arbeitet auf Wortmengen, nicht auf Bytes) -- ohne diese Reihenfolge
+    # würde bei so einem Gleichstand faelschlich der frische Kandidat
+    # gewinnen, obwohl inhaltlich gleichwertig, und existing_lrc koennte im
+    # Anschluss faelschlich geloescht werden (siehe ROADMAP.md).
+    all_candidates = ([existing_lrc] if has_existing else []) + candidates
 
     def _cleanup() -> None:
         for p in candidates:  # nur eigene Temp-Dateien, nie existing_lrc
@@ -174,13 +179,26 @@ def evaluate_song(
                 "words": None,
                 "language": None,
                 "content": None,
+                "existing_best": False,  # has_existing hier immer False, s.o.
             },
         )
 
     hit_str = ", ".join(provider_hits) if provider_hits else "—"
     prov_str = f"{len(candidates)}/{n_providers}: {hit_str}"
 
-    consensus_rep, consensus_jaccard = lyrics_core._provider_consensus(candidates)
+    # Bugfix (siehe ROADMAP.md, "existing_lrc im Konsens"): frueher lief der
+    # Konsens NUR ueber die 4 frischen Provider (reiner Byte-Dedup vorher,
+    # existing_lrc komplett aussen vor, nur ein nachtraeglicher Veto-Check
+    # gegen einen abweichenden Konsens). Jetzt: EIN wort-basierter
+    # Gruppierungsschritt (_group_candidates) ueber ALLE Kandidaten
+    # (existing_lrc + frische) ersetzt sowohl den alten Byte-Dedup als auch
+    # den separaten Veto-Check -- existing_lrc nimmt jetzt als vollwertiger
+    # Kandidat am Konsens teil, kann sich dabei aber NIE mit einem
+    # inhaltsgleichen frischen Nachfolger ihres urspruenglichen Providers
+    # doppelt zaehlen (beide landen in derselben Gruppe, siehe dortiger
+    # Docstring zum C3-Ausreisser-Exploit).
+    grouped = lyrics_core._group_candidates(all_candidates)
+    consensus_rep, consensus_jaccard = lyrics_core._provider_consensus(grouped)
 
     if consensus_rep is not None:
         best_content: bytes | None = consensus_rep.read_bytes()
@@ -193,6 +211,7 @@ def evaluate_song(
             "score": round(consensus_jaccard, 3),
             "words": None,
             "language": None,
+            "existing_best": False,
         }
     elif flac_path is not None and flac_path.exists():
         # Grund, WARUM Whisper ueberhaupt noetig ist (kein Konsens moeglich)
@@ -245,6 +264,18 @@ def evaluate_song(
             p for p in [model_str, lang_str, "Whisper", words_str, early_stop_str] if p
         )
 
+        # Bugfix (siehe ROADMAP.md): _whisper_best() hat best_path/best_score
+        # bereits ueber ALLE all_candidates (inkl. existing_lrc) berechnet --
+        # unabhaengig von has_vocals und der Akzeptanz-Schwelle. War
+        # existing_lrc selbst der beste Match am echten Audio, darf der
+        # Aufrufer (write_lrc.py/cut.py) sie bei found=False NICHT loeschen,
+        # auch wenn das GESAMT-Ergebnis unter der Schwelle liegt oder
+        # faelschlich als "kein Vokal" gilt -- beide Signale sind verrauscht
+        # (Vokal-Flag durch die Halluzinations-Klassifikation, Schwelle durch
+        # die mit dem Cache wandernde kontrastive Marge), best_path selbst
+        # nicht.
+        existing_is_best = has_existing and best_path == existing_lrc
+
         if not has_vocals:
             # Frueher: bei >=2 Providern im Konsens wurde deren LRC trotzdem
             # gespeichert ("Konsens (kein Vokal)"). Abgeschafft (siehe
@@ -264,6 +295,7 @@ def evaluate_song(
                 "reason": "kein-vokal",
                 "words": 0,
                 "language": lrc_lang,
+                "existing_best": existing_is_best,
             }
         elif lyrics_core._whisper_accept(
             best_score, lrc_lang, margin=contrastive_margin
@@ -279,6 +311,7 @@ def evaluate_song(
                 "words": whisper_words,
                 "language": lrc_lang,
                 "early_stopped": early_stopped,
+                "existing_best": False,
             }
         else:
             best_content = None
@@ -294,6 +327,7 @@ def evaluate_song(
                 "reason": "unter-schwelle",
                 "words": whisper_words,
                 "language": lrc_lang,
+                "existing_best": existing_is_best,
             }
     else:
         best_content, _score = lyrics_core._heuristic_best(all_candidates, expected_dur)
@@ -307,6 +341,7 @@ def evaluate_song(
                 "score": None,
                 "words": None,
                 "language": None,
+                "existing_best": False,
             }
         else:
             info_str = f"{prov_str} │ Heuristik Dauer-Abweichung"
@@ -319,6 +354,9 @@ def evaluate_song(
                 "reason": "dauer-abweichung",
                 "words": None,
                 "language": None,
+                # Konservativ: ohne Audiodatei kein Beweis, dass existing_lrc
+                # falsch ist (siehe ROADMAP.md) -- Loeschen nur mit Beleg.
+                "existing_best": has_existing,
             }
 
     _cleanup()

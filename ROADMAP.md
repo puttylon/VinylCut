@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.28`):
+`lyrics_core.py`, `1.13.29`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,88 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Umbau: existing_lrc als vollwertiger Konsens-Kandidat + Löschschutz gegen verrauschte Signale
+
+**Auslöser:** Nutzerfrage, wie das Programm verhindert, dass eine erneute
+Provider-Abfrage (`--nachholen`) eine bereits korrekte `.lrc`-Datei durch
+einen schlechteren/falschen Treffer ersetzt oder grundlos löscht. Beim
+Durchverfolgen von `evaluate_lyrics.py`/`write_lrc.py`/`cut.py` (mit
+Zweitmeinungen von Opus und Fable) fielen mehrere zusammenhängende Lücken auf.
+
+**Fund 1 -- Konsens-Schnellpfad umging existing_lrc komplett:**
+`_provider_consensus(candidates)` prüfte nur frische Provider untereinander,
+ohne jeden Vergleich mit einer bereits vorhandenen Datei. Erster Fix: ein
+nachträglicher Veto-Check (Konsens-Kandidat gegen existing_lrc per Jaccard
+vergleichen, bei Abweichung zu Whisper durchreichen). Nach weiterer Diskussion
+verworfen zugunsten von Fund 4 (sauberere Lösung).
+
+**Fund 2 -- "kein Vokal"/"unter Schwelle" löschten existing_lrc ohne Beleg:**
+`write_lrc.py`/`cut.py` löschten eine vorhandene `.lrc` bei jedem
+`found=False`, auch wenn `_whisper_best()` sie selbst intern als besten
+Kandidaten gescort hatte (`best_path == existing_lrc`) -- die beiden
+Signale, die `found=False` auslösen (has_vocals-Flag, kontrastive
+Marge/Schwelle), sind beide verrauscht (Halluzinations-Fehlklassifikation
+bzw. mit dem Cache wandernder Hintergrund-Pool). **Fix (dauerhaft):**
+`evaluate_lyrics.evaluate_song()` liefert jetzt `extras["existing_best"]`
+(True wenn `best_path == existing_lrc`, oder -- ohne Audiodatei, also ohne
+jeden Gegenbeweis -- konservativ True wenn existing_lrc existiert).
+`write_lrc.py`/`cut.py` löschen nur noch, wenn `existing_best` False ist
+(`outcome: "keep"`, Cache-Eintrag bleibt `r="ok"`, spätere echte
+Provider-Neuigkeiten lösen weiterhin `--nachholen`-Neubewertung aus).
+
+**Fund 3 -- Score-Gleichstand bevorzugte fälschlich den frischen Kandidaten:**
+Nutzer-Einwand: existing_lrc kann von Hand oder ursprünglich von einem
+Provider stammen -- läuft aber nie durch einen Dedup-Schritt gegen frische
+Kandidaten. Ist sie wort-identisch, aber byte-verschieden (andere
+Zeitstempel/Formatierung) zu einem frischen Kandidaten, entscheidet
+`_whisper_best()`s striktes `>` beim Scoring-Gleichstand -- der zuerst in der
+Liste stehende Kandidat gewinnt. **Fix (dauerhaft):** `all_candidates` stellt
+existing_lrc an den Anfang, nicht ans Ende -- bei Gleichstand gewinnt sie,
+ohne dass ein strikt besserer frischer Kandidat je verdrängt würde.
+
+**Fund 4 -- existing_lrc sollte als vollwertige Konsens-Stimme zählen dürfen:**
+Nutzer-Vorschlag (mehrfach präzisiert): alle bis zu 5 Quellen (4 frische +
+existing_lrc) gemeinsam deduplizieren, danach bei ≥3 verbleibenden Konsens
+versuchen, sonst Whisper. Erster Sonnet-Einwand (Byte-Dedup würde die echte
+Datei physisch löschen bzw. erfasse den Fall praktisch nie) traf nur die
+wörtliche Byte-Implementierung, nicht die Idee (Opus-Zweitmeinung). Fable
+fand danach einen echten, testbelegten Fehlerkanal: `_provider_consensus`s
+C3-Ausreißer-Rettung prüft nach dem Rauswurf des schlechtesten Kandidaten
+NICHT erneut gegen `min_providers` (siehe `test_ausreisser_c3_gerettet`) --
+wäre existing_lrc eine ungruppierte Stimme neben ihrem eigenen (unveränderten)
+Herkunfts-Provider, könnte dieses Paar einen dritten, tatsächlich korrekten
+Kandidaten als vermeintlichen Ausreißer verdrängen. Nutzer-Gegenprüfung
+(durch Code-Beleg bestätigt): die 4 Provider matchen alle über Fuzzy-/
+Textsuche (`_looks_like_translation`-Kommentar: Genius übernimmt "ungeprüft
+den ersten Suchtreffer"; Präzedenzfall im selben Projekt, MusicBrainz-Dauer-
+Bug "Bohemian Rhapsody" 157s statt 355s, gefixt mit Median statt erstem
+Treffer) -- eine exakte Wiederholung derselben Provider-Antwort ist NICHT der
+Normalfall. Und strukturell entschärft sich Fables Angriff von selbst, wenn
+(wie vorgesehen) ERST gruppiert und DANACH gezählt wird: ein existing_lrc,
+die mit ihrem Herkunfts-Provider übereinstimmt, landet dann in derselben
+Gruppe und zählt nur als eine Stimme -- das Ausreißer-Paar aus Fables Szenario
+kann so gar nicht erst entstehen.
+
+**Umsetzung:**
+1. `lyrics_core._dedupe_by_content()` (reiner Byte-Hash, löschte
+   Duplikat-Dateien) ersetzt durch `lyrics_core._group_candidates()`
+   (wort-basierte Jaccard-Gruppierung, Schwelle `_GROUP_WORD_JACCARD=0,90`,
+   löscht nichts -- rein logische Gruppierung, erster Kandidat in
+   Prioritätsreihenfolge bleibt Repräsentant).
+2. `evaluate_lyrics.evaluate_song()`: Gruppierung läuft jetzt über
+   `all_candidates` (existing_lrc + alle frischen, existing zuerst), das
+   Ergebnis geht direkt in `_provider_consensus()` -- der separate
+   Veto-Check aus Fund 1 entfällt (jetzt redundant), `_lrc_word_jaccard()`
+   dadurch ebenfalls ungenutzt und entfernt.
+3. Fund 2 (existing_best) und Fund 3 (Reihenfolge) bleiben unverändert
+   bestehen -- unabhängig vom Konsens-Umbau, schützen die Whisper-Stufe.
+
+23 neue/angepasste Tests (`test_lyrics_core.py`: `TestGroupCandidates`,
+`TestIsHallucination`-Nachbarschaft; `test_evaluate_lyrics.py`:
+`TestEvaluateSongExistingBest`, `TestEvaluateSongKonsens`; `test_write_lrc.py`,
+`test_cut.py`). 554/554 Tests grün, `ruff` sauber. `lyrics_core.__version__`
+auf `1.13.29` erhöht.
 
 ## ✓ Bugfix: "kein Vokal"-Sonderfall abgeschafft + Halluzinationsfilter erkannte echte Songs mit langem Outro fälschlich als Loop
 

@@ -1,6 +1,24 @@
 import pytest
-from cut import compute_last_gap, estimate_start
+
+import cache_store as cs
+import evaluate_lyrics
+import lyrics_core
+from cut import _fetch_lyrics_for_track, compute_last_gap, estimate_start
 from cut_ui import fmt_dur
+
+
+class _QueryProviderNoopMixin:
+    """_fetch_lyrics_for_track fragt vor evaluate_song erst live alle 4
+    Provider ab (ThreadPoolExecutor) -- fuer Tests der Loesch-/Behalten-Logik
+    danach uninteressant, hier neutralisiert (kein Netzwerk, kein Treffer)."""
+
+    @pytest.fixture(autouse=True)
+    def _noop_query_provider(self, monkeypatch):
+        monkeypatch.setattr(
+            lyrics_core,
+            "_query_provider",
+            lambda query, provider, env, artist="", title="": (provider, None),
+        )
 
 
 class TestFmtDur:
@@ -95,3 +113,59 @@ class TestComputeLastGap:
         assert compute_last_gap(
             current_start=50.0, prev_start=0.0, prev_dur_s=100.0
         ) == pytest.approx(0.0)
+
+
+class TestFetchLyricsForTrackExistingBest(_QueryProviderNoopMixin):
+    """Bugfix (siehe ROADMAP.md, evaluate_lyrics.py existing_best): cut.py
+    hatte dieselbe Lücke wie write_lrc.py -- eine bereits vorhandene .lrc
+    wurde bei found=False bedingungslos gelöscht, auch wenn sie selbst der
+    beste Kandidat am Audio war."""
+
+    def test_existing_best_wird_nicht_geloescht(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            lambda *a, **kw: (
+                False,
+                "1/4: lrclib │ unter Schwelle",
+                {"reason": "unter-schwelle", "existing_best": True, "content": None},
+            ),
+        )
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+        lrc_path = tmp_path / "song.lrc"
+        lrc_path.write_text("[00:01.00]Bereits korrekter Text\n", encoding="utf-8")
+
+        found, _info, _extras = _fetch_lyrics_for_track(
+            conn, "artist title", lrc_path, {}, 0.0, flac_path, "artist", "title"
+        )
+
+        assert found is False
+        assert lrc_path.exists()
+        assert (
+            lrc_path.read_text(encoding="utf-8") == "[00:01.00]Bereits korrekter Text\n"
+        )
+
+    def test_ohne_existing_best_wird_geloescht(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            lambda *a, **kw: (
+                False,
+                "0/4: — │ kein Provider",
+                {"reason": "kein-provider", "content": None},
+            ),
+        )
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+        lrc_path = tmp_path / "song.lrc"
+        lrc_path.write_text("[00:01.00]Alter Text\n", encoding="utf-8")
+
+        found, _info, _extras = _fetch_lyrics_for_track(
+            conn, "artist title", lrc_path, {}, 0.0, flac_path, "artist", "title"
+        )
+
+        assert found is False
+        assert not lrc_path.exists()

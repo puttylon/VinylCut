@@ -99,6 +99,43 @@ class TestWriteAllSchreibenLoeschen(_GlobalsResetMixin):
         assert not lrc_path.exists()
         assert counts["not_found"] == 1
 
+    def test_existing_best_wird_nicht_geloescht(self, tmp_path, monkeypatch):
+        """Bugfix (siehe ROADMAP.md): existing_lrc war selbst der beste
+        Kandidat am Audio (extras["existing_best"]=True) -- ein found=False
+        dieser Runde darf sie dann nicht mehr loeschen."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            _stub_evaluate_song(
+                (
+                    False,
+                    "1/4: lrclib │ [medium] en Whisper 40W unter Schwelle idf-jacc=0.100",
+                    {
+                        "reason": "unter-schwelle",
+                        "existing_best": True,
+                        "content": None,
+                    },
+                )
+            ),
+        )
+        audio = tmp_path / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+        lrc_path.write_text("[00:01.00]Bereits korrekter Text\n", encoding="utf-8")
+
+        counts = write_lrc.write_all(conn, [(audio, "artist", "title")])
+
+        assert lrc_path.exists()
+        assert (
+            lrc_path.read_text(encoding="utf-8") == "[00:01.00]Bereits korrekter Text\n"
+        )
+        assert counts["not_found"] == 0
+        assert counts["skipped"] == 1
+
     def test_unveraenderter_inhalt_wird_nicht_neu_geschrieben(
         self, tmp_path, monkeypatch
     ):

@@ -131,6 +131,90 @@ class TestEvaluateSongKonsens(_GlobalsResetMixin):
         assert "Konsens" in info_str
         assert extras["content"] is not None
 
+    def test_falsche_existing_lrc_wird_von_frischem_konsens_ueberstimmt(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix (siehe ROADMAP.md, "existing_lrc im Konsens"): existing_lrc
+        nimmt jetzt als vollwertiger Kandidat am Konsens teil (wort-basierte
+        Gruppierung vor _provider_consensus statt reinem Byte-Dedup + separatem
+        Veto). Weicht existing_lrc klar von 3 sich einigen frischen Providern
+        ab, wird sie vom C3-Ausreisser-Mechanismus korrekt ausgestimmt --
+        Konsens gewinnt trotzdem, OHNE Whisper (billiger als die alte
+        Veto-Loesung, die hier immer erst zu Whisper durchgereicht hätte)."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(
+            conn,
+            "artist",
+            "title",
+            {"lrclib": LRC_A, "musixmatch": LRC_B, "genius": LRC_C},
+        )
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_WRONG, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        def _fail_if_called(*a, **kw):
+            raise AssertionError(
+                "C3 sollte existing_lrc als Ausreisser ausstimmen -- kein Whisper noetig"
+            )
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+
+        assert found is True
+        assert extras["method"] == "konsens"
+        assert extras["content"] != LRC_WRONG.encode("utf-8")
+
+    def test_existing_lrc_zaehlt_als_dritte_stimme(self, tmp_path):
+        """Kernnutzen des Umbaus: nur 2 frische Provider allein reichten
+        frueher NIE fuer Konsens (_CONSENSUS_MIN_PROVIDERS=3 galt nur unter
+        den frischen). existing_lrc kann jetzt die fehlende dritte,
+        unabhaengige Stimme stellen, wenn sie inhaltlich passt -- Konsens
+        gelingt ohne Whisper, was vorher unmoeglich war."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "musixmatch": LRC_B})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_C, encoding="utf-8")
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", existing_lrc=existing
+        )
+
+        assert found is True
+        assert extras["method"] == "konsens"
+
+    def test_konsens_passend_zu_existing_lrc_bleibt_schnellpfad(
+        self, tmp_path, monkeypatch
+    ):
+        """Stimmt der frische Konsens ohnehin mit existing_lrc überein, bleibt
+        der Schnellpfad unverändert -- kein unnötiger Whisper-Lauf."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(
+            conn,
+            "artist",
+            "title",
+            {"lrclib": LRC_A, "musixmatch": LRC_B, "genius": LRC_C},
+        )
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_A, encoding="utf-8")
+
+        def _fail_if_called(*a, **kw):
+            raise AssertionError(
+                "Konsens passt zu existing_lrc -> Whisper sollte nicht laufen"
+            )
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", existing_lrc=existing
+        )
+
+        assert found is True
+        assert extras["method"] == "konsens"
+
 
 class TestEvaluateSongWhisper(_GlobalsResetMixin):
     def test_kein_konsens_kein_flac_faellt_auf_heuristik_zurueck(self, tmp_path):
@@ -275,6 +359,176 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
         )
         assert found is True
         assert existing.exists()  # evaluate_song schreibt/löscht nie selbst
+
+    def test_existing_lrc_steht_vorne_in_der_kandidatenliste(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix (siehe ROADMAP.md, Nutzer-Hinweis): existing_lrc muss VOR
+        den frischen Kandidaten stehen -- _whisper_best()s Scoring nutzt
+        striktes ">", bei einem Score-Gleichstand (z.B. wortgleicher, aber
+        anders formatierter Text) gewinnt sonst faelschlich immer der
+        frische Kandidat statt der inhaltlich gleichwertigen bestehenden
+        Datei."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_B, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        seen_order = []
+
+        def _fake_whisper_best(
+            flac, candidates, expected_dur, artist="", title="", reason=""
+        ):
+            seen_order.extend(candidates)
+            return (candidates[0], 0.9, True, 10, "medium", "en", 0.5, False)
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
+
+        evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+
+        assert seen_order[0] == existing
+
+    def test_existing_lrc_verliert_gegen_echten_besseren_kandidaten(
+        self, tmp_path, monkeypatch
+    ):
+        """Gegenprobe: ein strikt besserer frischer Kandidat gewinnt
+        weiterhin -- die Reihenfolge bevorzugt existing_lrc nur bei
+        echtem Gleichstand, nicht grundsaetzlich."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_WRONG, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        def _fake_whisper_best(
+            flac, candidates, expected_dur, artist="", title="", reason=""
+        ):
+            better = next(p for p in candidates if p != existing)
+            return (better, 0.9, True, 10, "medium", "en", 0.5, False)
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+        assert found is True
+        assert extras["existing_best"] is False
+
+
+class TestEvaluateSongExistingBest(_GlobalsResetMixin):
+    """Bugfix (siehe ROADMAP.md): extras["existing_best"] signalisiert den
+    Aufrufern (write_lrc.py/cut.py), ob existing_lrc selbst der beste
+    Kandidat am Audio war -- unabhängig von has_vocals oder der
+    Akzeptanz-Schwelle, die beide für sich genommen verrauscht sind."""
+
+    def test_existing_best_true_bei_kein_vokal(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_B, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        def _fake_whisper_best(
+            flac, candidates, expected_dur, artist="", title="", reason=""
+        ):
+            return (existing, 0.8, False, 0, "medium", "en", None, False)
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+
+        assert found is False
+        assert extras["reason"] == "kein-vokal"
+        assert extras["existing_best"] is True
+
+    def test_existing_best_false_wenn_anderer_kandidat_gewinnt(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_B, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        def _fake_whisper_best(
+            flac, candidates, expected_dur, artist="", title="", reason=""
+        ):
+            other = next(p for p in candidates if p != existing)
+            return (other, 0.8, False, 0, "medium", "en", None, False)
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+
+        assert found is False
+        assert extras["existing_best"] is False
+
+    def test_existing_best_true_bei_unter_schwelle(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_B, encoding="utf-8")
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        def _fake_whisper_best(
+            flac, candidates, expected_dur, artist="", title="", reason=""
+        ):
+            return (existing, 0.01, True, 5, "medium", "en", -0.5, False)
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fake_whisper_best)
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=flac_path, existing_lrc=existing
+        )
+
+        assert found is False
+        assert extras["reason"] == "unter-schwelle"
+        assert extras["existing_best"] is True
+
+    def test_existing_best_konservativ_true_ohne_audio(self, tmp_path):
+        # Ohne Audiodatei kein Beleg gegen existing_lrc -- Dauer-Heuristik
+        # lehnt hier alle Kandidaten wegen grober Dauer-Abweichung ab.
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+        existing = tmp_path / "song.lrc"
+        existing.write_text(LRC_B, encoding="utf-8")
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn,
+            "artist",
+            "title",
+            flac_path=None,
+            expected_dur=500.0,
+            existing_lrc=existing,
+        )
+
+        assert found is False
+        assert extras["reason"] == "dauer-abweichung"
+        assert extras["existing_best"] is True
+
+    def test_existing_best_false_ohne_existing_lrc(self, tmp_path):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
+
+        found, _info, extras = evaluate_lyrics.evaluate_song(
+            conn, "artist", "title", flac_path=None, expected_dur=500.0
+        )
+
+        assert found is False
+        assert extras["reason"] == "dauer-abweichung"
+        assert extras["existing_best"] is False
 
 
 class TestSelectWhisperModel(_GlobalsResetMixin):

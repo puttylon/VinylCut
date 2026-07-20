@@ -1,5 +1,76 @@
 # VinylCut Roadmap
 
+Aktueller Stand + geplante Arbeit. Die komplette bisherige Historie (Bug-
+Ursachen, verworfene Ansätze, Kalibrierungsergebnisse) steht unverändert
+weiter unten im Archiv — viele Code-Kommentare zitieren einzelne
+Archiv-Abschnitte namentlich, deshalb bleibt deren Titel/Inhalt stabil.
+
+## Feature-Status
+
+**assemble.py** (`1.1.12`) — Roh-FLAC vorbereiten, zerstörungsfrei:
+Stille-basierte Seitenerkennung, interaktives Setzen von Trim-/
+Übergangspunkten, Crossfade-Vorschau mit Feinjustierung, Zusammenfügen,
+DC-Offset-Entfernung, optionaler Kanalausgleich, Peak-Normalisierung auf
+−1 dBFS. Rich-Vollbild-UI, Fortsetzen über `assemble.json`.
+
+**fetch_metadata.py** — Discogs-Release-Auswahl per Score (Vinyl
+bevorzugt), interaktive Tracklist, manuelle ID-Vorgabe, Cover-Download →
+`release.json` + `cover.jpg`. Benötigt `DISCOGS_TOKEN`.
+
+**cut.py** (`1.9.19`) — interaktives Setzen der Track-Startpunkte
+(ffplay-Vorschau, optionaler Normton), sample-genauer Schnitt via SoX,
+FLAC-Tagging inkl. Versions-Kommentar, Fortsetzen über `progress.json`,
+Flags `--out`/`--no-songtext`/`--preview`. Holt Songtexte pro Track
+automatisch nach.
+
+**Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
+`scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
+`lyrics_core.py`, `1.13.26`):
+- Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
+  `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
+  Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
+- 4 Anbieter (lrclib inkl. lokalem DB-Abzug, musixmatch, netease, genius),
+  Konsens-Schnellpfad, IDF-gewichtetes Jaccard.
+- Whisper-Verifikation: Modellwahl nach Sprache (`medium` EN / `large-v3`
+  sonst), Early-Stop bei sicherer Erkennung, kontrastive Marge gegen einen
+  sprachgleichen Zufalls-Hintergrund.
+- Cache `cache.db` (`songs`/`ergebnisse`/`texte`/`transkripte` +
+  `early_stop_log`); 90 Tage Anbieter-TTL; JSON-Ordner-Cache für
+  Schreib-Skip.
+
+**Gemeinsame Bausteine:** `library.py` (UI-unabhängige Utilities),
+`cache_store.py` (DB-Schicht), `cut_ui.py`/`assemble_ui.py` (zentralisierte
+Styles).
+
+**Diagnose-Werkzeuge:** `db_analyse.py` (DB-Statistik), `lrc_analyse.py`
+(JSON-Cache-Statistik), `lrc_recheck.py` (fehlgeschlagene Einträge erneut
+einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
+(manueller Modellvergleich).
+
+## Geplant / offen
+
+1. **`--nachpruefen` (Plausibilitätsprüfung):** bereits akzeptierte
+   `.lrc`-Dateien erneut bewerten, auch wenn die DB nichts Neues hat --
+   z.B. weil inzwischen ein besseres Whisper-Modell verfügbar ist. Bisher
+   nur diskutiert, bewusst zurückgestellt (siehe Archiv). Schließt den
+   Fall mit ein, dass alte `small`-Modell-Transkripte nie automatisch mit
+   dem heutigen sprachabhängigen Modell nachgeprüft werden.
+2. **Sequenzbewusstes Text-Matching** (WER/Levenshtein statt reinem
+   Bag-of-Words-Jaccard) als eigenständige Forschungsidee -- nicht zu
+   verwechseln mit dem bereits getesteten und verworfenen Bigramm-Jaccard
+   (siehe Archiv, "✗ Bigramm-Jaccard").
+3. **Einheitliches `vinylcut`-Kommandozeilenwerkzeug** statt separater
+   Skripte, inkl. eines möglichen Record-Schritts.
+
+## Design-Dokumente
+
+- `CACHE_DESIGN.md` -- Cache-Schema/-Verhalten
+- `CLAUDE.md` -- Arbeitsregeln, Doku-Struktur, Testpflicht
+
+---
+
+# Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
 ## ✓ Aufräumen: WER/Modellvergleich-Rohdaten + -Doku entfernt
 
 Alle Rohdaten und Zwischen-Dokus der längst abgeschlossenen WER- und
@@ -380,7 +451,7 @@ mit einem durch diesen Bug "verseuchten" Eintrag wird beim nächsten
 Antreffen ein letztes Mal neu bewertet (heilt sich dabei selbst), danach
 dauerhaft korrekt übersprungen.
 
-## ⧗ Offen — Aufräumen: welche Skripte werden noch gebraucht, welche können weg
+## ✓ Aufräumen: welche Skripte werden noch gebraucht, welche können weg
 
 **Ziel:** Projekt schlank halten — alles, was nicht mehr gebraucht wird, weg.
 
@@ -1534,7 +1605,7 @@ ohne die Zeile lässt sich der Leer-Verzeichnis-Fallback nicht mehr über
 Konsolentext belegen. Volle Suite: 474/474 grün. `ruff check`/`format`
 sauber. `lyrics_core.__version__` auf `1.13.15` erhöht.
 
-**⧗ Offen — TODO für einen der nächsten Schritte: Ordner-Kopfzeile löscht
+**✓ Inzwischen behoben (siehe weiter unten "✓ Behoben. Die Ordner-Kopfzeile..."): Ordner-Kopfzeile löscht
 die transiente "Scanne: ..."-Statuszeile nicht sauber, Ausgabe "beißt
 sich".** Live-Test gegen `/Volumes/music/musik/_Various Artists --recursive`
 (direkt im Anschluss an den lazy-Walk-Nachtrag oben): Nutzer sah in echt

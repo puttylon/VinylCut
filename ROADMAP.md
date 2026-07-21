@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.31`):
+`lyrics_core.py`, `1.13.33`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,133 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: JSON-Cache erkannte Retagging nicht + ⚠ offenes Risiko bei Selbstheilung (Signatur-Snapshot)
+
+**Auslöser:** Nutzerfrage direkt nach dem vorherigen Fix: "Prüfst du denn beim
+Lauf wirklich ob sich die Songdatei geändert hat zu dem was in der Datenbank
+steht? Song, Artist, Genre??? Oder nur gegen den JSON-Cache???" Antwort nach
+Prüfung: nur `_db_newer_than_json_entry()`, ein reiner Zeitstempel-Vergleich
+-- der bei nicht-monotonen Änderungen (Retag ohne neue DB-Zeile, Löschungen)
+blind ist. Nutzerwunsch: Songdatei als Single Point of Truth, JSON-Cache soll
+sich bei jeder identitätsrelevanten Änderung selbst invalidieren. Auf
+ausdrücklichen Wunsch mit Opus konsultiert ("ich will richtig wirklich gute
+Vorschläge").
+
+**Lösung (Opus-Vorschlag, umgesetzt):** Neue Funktion `lyrics_core.
+_current_sig(conn, artist_key, titel_key) -> [titel_key, artist_key,
+is_skip]` -- ein Signatur-Snapshot der Entscheidungs-Eingaben. Wird in jedem
+Cache-Eintrag mitgespeichert (`_build_cache_entry`) und bei jedem Zugriff
+zuerst gegen die aktuelle Signatur verglichen (`_cache_entry_up_to_date`),
+noch vor dem alten Zeitstempel-Check. Jede Abweichung -- Genre wechselt
+zu/von Skip-Genre, Artist/Titel-Retag -- macht den Eintrag sofort veraltet,
+unabhängig davon ob und wann neue DB-Zeilen entstanden. Zusätzlich liest
+`evaluate_lyrics.evaluate_song()` das Genre jetzt direkt aus der DB und
+bricht bei Skip-Genre sofort mit `kein-provider` ab -- unabhängig vom Zustand
+der `ergebnisse`-Tabelle. Das macht den `DELETE FROM ergebnisse`-Teilschritt
+aus dem vorigen Eintrag überflüssig; er wurde zurückgenommen (siehe dort).
+
+Per `AskUserQuestion` explizit "Volle Selbstheilung" gewählt: fehlende
+Signatur in einem alten JSON-Eintrag gilt automatisch als veraltet, kein
+gesonderter Migrationsschritt nötig.
+
+Tests: `TestCurrentSig` (5 neue Tests), `TestCacheEntryUpToDate` um 3 Tests
+erweitert (fehlende Signatur, Genre-Wechsel zu Skip, unveränderte Signatur
+bleibt aktuell). 566/566 Tests grün, `ruff` sauber.
+`lyrics_core.__version__` auf `1.13.33` erhöht.
+
+**⚠ Offenes Risiko, NICHT behoben:** Nach Freigabe der "vollen Selbstheilung"
+lief der Nutzer `--recursive` erneut, und das Log zeigte für Songs mit
+geänderter Signatur durchgehend neue Whisper-Läufe. Ich hatte vorher
+unbelegt behauptet, die Selbstheilungs-Welle sei größtenteils günstig, weil
+Transkripte gecacht seien -- das war eine Vermutung, kein verifizierter
+Befund (Verstoß gegen "Evidenz vor Vermutung", vom Nutzer zurecht scharf
+zurückgewiesen). Reale Prüfung per DB-Abfrage `SELECT early_stopped,
+COUNT(*) FROM early_stop_log GROUP BY early_stopped` ergab: `0 → 324`,
+`1 → 3244`. **3244 von 3568 historischen Whisper-Versuchen (91%) wurden früh
+gestoppt** -- und früh gestoppte Transkripte werden bewusst NIE in
+`transkripte` persistiert (Design-Grund: unvollständige Daten sollen
+künftige Vergleiche nicht verunreinigen).
+
+Konsequenz: Für ~91% der bereits Whisper-verifizierten Songs verursacht die
+Selbstheilungs-Welle bei jeder Neuauswertung (Genre-/Tag-Änderung) volle
+Whisper-Kosten, keine billige Cache-Nachprüfung. Die Grundannahme hinter der
+Nutzer-Entscheidung "Volle Selbstheilung" -- dass eine Neubewertung günstig
+ist -- trifft für den Großteil der Bibliothek nicht zu. Bewusst offen
+gelassen: der Nutzer hat die Session an dieser Stelle gestoppt, um das erst
+zu bewerten, bevor weitere große `--recursive`-Läufe gestartet werden.
+
+Mögliche Ansatzpunkte für eine künftige Session (nicht umgesetzt, nur
+Ideen, mit Trade-offs abzuwägen): früh gestoppte Transkripte doch
+persistieren (steht dem ursprünglichen Kontaminationsgrund entgegen); Signatur-
+Änderung nur bei tatsächlich Whisper-relevanten Feldern auslösen statt bei
+jeder Artist/Titel-Änderung; eine separate, günstigere Vorprüfung ob sich die
+Datei überhaupt hörbar geändert hat, vor einem vollen Re-Whisper.
+
+## ✓ Bugfix: Genre-Retagging kam nie in der DB an + Kontext-Aufbau zu früh ("Big City Beats"-Fall)
+
+**Auslöser:** Nutzer taggte Party-/Club-Remix-Tracks ohne sinnvollen Songtext
+als Genre `Club Remix Instrumental` (siehe `--is_skip_genre`-Mechanismus),
+damit sie beim `--abfragen`-Schritt übersprungen werden. Bei einem realen
+Lauf über `_Various Artists` liefen zwei Dinge trotzdem falsch: (1) der
+kontrastive Hintergrund-Kontext (teurer Aufbau, ~34k IDF-Dokumente) wurde
+sofort beim ersten bewerteten Song gebaut, obwohl dieser genre-geskippt war
+und nie Whisper brauchte; (2) Track "45 (Olav Basoski Remix)" (Big City Beats
+Vol. 14) durchlief trotz korrektem aktuellem Genre-Tag weiterhin volle
+Whisper-Auswertung.
+
+**Untersuchung, Befund 1 (Kontext-Timing):** `lyrics_core._note_contrastive_
+evaluation()` wurde bisher in `evaluate_all()`s Schleife für JEDEN
+*bewerteten* Song aufgerufen -- unabhängig davon, ob dieser Song überhaupt
+bis zum Whisper-Zweig kommt. Ein genre-geskippter Song (0 Kandidaten, landet
+immer bei `kein-provider`) zählte trotzdem als "bewerteter Song" und konnte
+so den teuren Aufbau auslösen, nur weil er zufällig der erste im Lauf war.
+
+**Untersuchung, Befund 2 (stale Genre + stale Provider-Cache), per DB-Abfrage
+verifiziert:** Track "45" hatte in der DB noch `genre='Dance & DJ'`
+gespeichert -- vom allerersten Scan (16.07.), bevor die Datei umgetaggt
+wurde. Ursache: `cache_store._get_or_create_song()` setzte ein Genre nur
+beim *erstmaligen* Anlegen (`COALESCE(songs.genre, excluded.genre)` bevorzugt
+den ALTEN Wert) -- ein späteres Retagging der Datei kam in der DB nie an.
+Zusätzlich blieben die beiden bereits gefundenen Provider-Treffer (lrclib,
+netease, ebenfalls vom 16.07.) unabhängig vom Genre für immer gültig im
+Cache -- selbst ein korrigiertes Genre hätte sie nicht entfernt.
+
+**Nutzer-Entscheidung (zwei Design-Fragen, da Datenverlust-Trade-offs
+betroffen):**
+1. `--scan` überschreibt das DB-Genre künftig immer mit dem aktuellen
+   Tag-Wert (nicht nur beim erstmaligen Anlegen) -- ein leerer/None-Wert
+   überschreibt dabei NICHT (schützt vor Datenverlust bei einem fehlerhaften
+   Tag-Lesevorgang).
+2. Wechselt das Genre zu einem Skip-Genre, werden bereits vorhandene
+   Provider-Treffer für diesen Song verworfen -- er verhält sich danach wie
+   neu angelegt.
+
+**Fix:**
+1. `cache_store._get_or_create_song()`: `COALESCE(excluded.genre,
+   songs.genre)` (Reihenfolge umgedreht -- neuer Wert hat jetzt Vorrang,
+   alter nur noch Fallback bei leerem neuem Wert).
+2. `fetch_providers.fetch_all()`: bei erkanntem Skip-Genre wurde zusätzlich
+   `DELETE FROM ergebnisse WHERE song_id=?` ausgeführt, bevor der Song
+   übersprungen wird. **Dieser Teilschritt wurde im nächsten Eintrag
+   (Signatur-Snapshot) wieder zurückgenommen** -- er brach
+   `_db_newer_than_json_entry()` (weniger `ergebnisse`-Zeilen ließen den
+   JSON-Skip-Eintrag fälschlich "aktuell" statt "veraltet" aussehen) und
+   war ohnehin unvollständig (deckte den Fall Artist/Titel-Retagging ohne
+   Genre-Änderung nicht ab). Siehe dort für die endgültige Lösung.
+3. `evaluate_lyrics.evaluate_song()`: `lyrics_core._note_contrastive_
+   evaluation()` wird jetzt direkt im Whisper-Zweig aufgerufen (kurz bevor
+   `_whisper_best()` gebraucht wird), nicht mehr pauschal in `evaluate_all()`s
+   Schleife für jeden bewerteten Song.
+
+11 Tests in `test_evaluate_lyrics.py` mussten wegen der verschobenen
+Aufrufstelle von `_note_contrastive_evaluation()` eine echte Cache-
+Verbindung bekommen (`lyrics_core._cache_conn = conn`, spiegelt was die
+Produktion an dieser Stelle ohnehin immer schon setzt); 3 Tests, die
+`evaluate_song()` komplett wegmockten, riefen `_note_contrastive_
+evaluation()` jetzt selbst in ihrem Mock auf, um die neue Aufrufstelle
+korrekt zu simulieren. 558/558 Tests grün, `ruff` sauber.
+`lyrics_core.__version__` auf `1.13.32` erhöht.
 
 ## ✓ Bugfix: existing_lrc ohne Konkurrenz "gewann" automatisch trotz katastrophal niedrigem Score ("Pohlmann-Fall")
 

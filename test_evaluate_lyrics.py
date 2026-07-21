@@ -276,6 +276,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
 
     def test_whisper_akzeptiert_liefert_besten_kandidaten(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "genius": LRC_WRONG})
 
         flac_path = tmp_path / "song.flac"
@@ -301,6 +302,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
 
     def test_whisper_unter_schwelle_wird_abgelehnt(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "genius": LRC_WRONG})
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
@@ -322,6 +324,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
 
     def test_kein_vokal_wird_trotz_2er_konsens_abgelehnt(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "genius": LRC_B})
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
@@ -342,6 +345,7 @@ class TestEvaluateSongWhisper(_GlobalsResetMixin):
 
     def test_kein_vokal_ohne_2er_konsens_wird_abgelehnt(self, tmp_path, monkeypatch):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
@@ -383,6 +387,7 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
         self, tmp_path, monkeypatch
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         # nur EIN Provider-Treffer -> allein kein Konsens, existing_lrc macht 2
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
@@ -414,6 +419,7 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
         frische Kandidat statt der inhaltlich gleichwertigen bestehenden
         Datei."""
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
         existing.write_text(LRC_B, encoding="utf-8")
@@ -443,6 +449,7 @@ class TestEvaluateSongExistingLrc(_GlobalsResetMixin):
         weiterhin -- die Reihenfolge bevorzugt existing_lrc nur bei
         echtem Gleichstand, nicht grundsaetzlich."""
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
         existing.write_text(LRC_WRONG, encoding="utf-8")
@@ -482,6 +489,7 @@ class TestEvaluateSongExistingBest(_GlobalsResetMixin):
         muss gelöscht werden duerfen, keine Sonderbehandlung nur weil sie
         schon auf der Platte lag."""
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
         existing.write_text(LRC_B, encoding="utf-8")
@@ -507,6 +515,7 @@ class TestEvaluateSongExistingBest(_GlobalsResetMixin):
         self, tmp_path, monkeypatch
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
         existing.write_text(LRC_B, encoding="utf-8")
@@ -537,6 +546,7 @@ class TestEvaluateSongExistingBest(_GlobalsResetMixin):
         akzeptiert worden -- existing_lrc bekommt keinen Sonderstatus nur
         weil sie schon auf der Platte lag."""
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         existing = tmp_path / "song.lrc"
         existing.write_text(LRC_B, encoding="utf-8")
@@ -638,6 +648,7 @@ class TestWhisperModelOverrideRestored(_GlobalsResetMixin):
         self, tmp_path, monkeypatch
     ):
         conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
         _put_texts(conn, "artist", "title", {"lrclib": LRC_A})
         flac_path = tmp_path / "song.flac"
         flac_path.write_bytes(b"")
@@ -752,17 +763,19 @@ class TestEvaluateAll(_GlobalsResetMixin):
             "_build_contrastive_context",
             lambda: refresh_calls.append(1),
         )
+
         # evaluate_song fuegt NIE neue texte/transkripte-Zeilen hinzu --
-        # die Datensignatur bleibt ueber den ganzen Lauf konstant.
-        monkeypatch.setattr(
-            evaluate_lyrics,
-            "evaluate_song",
-            lambda conn, a, t, *ar, **kw: (
-                False,
-                "x",
-                {"reason": "kein-provider", "content": None},
-            ),
-        )
+        # die Datensignatur bleibt ueber den ganzen Lauf konstant. Ruft
+        # _note_contrastive_evaluation() selbst auf (Bugfix, siehe
+        # ROADMAP.md "Big City Beats"-Fall: der echte Aufruf sitzt jetzt in
+        # evaluate_song()s Whisper-Zweig, nicht mehr in evaluate_all()s
+        # Schleife -- diese simulierten Songs erreichen den Zweig hier per
+        # Definition immer, wie ein echter Whisper-bedürftiger Song).
+        def _fake_evaluate_song(conn, a, t, *ar, **kw):
+            lyrics_core._note_contrastive_evaluation()
+            return (False, "x", {"reason": "kein-provider", "content": None})
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _fake_evaluate_song)
 
         evaluate_lyrics.evaluate_all(conn)
 
@@ -803,6 +816,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
                     (f"fp-{call_count['n']}", "neuer Songtext"),
                 )
                 conn.commit()
+            lyrics_core._note_contrastive_evaluation()
             return (False, "x", {"reason": "kein-provider", "content": None})
 
         monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _fake_evaluate_song)
@@ -826,6 +840,7 @@ class TestEvaluateAll(_GlobalsResetMixin):
         conn = cs.open_cache(tmp_path / "cache.db")
         cs._get_or_create_song(conn, "artist a", "song a")
         cs._get_or_create_song(conn, "artist b", "song b")
+        lyrics_core._cache_conn = conn  # noetig fuer _contrastive_data_signature
         monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
         monkeypatch.setattr(
             lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
@@ -838,15 +853,12 @@ class TestEvaluateAll(_GlobalsResetMixin):
             "_build_contrastive_context",
             lambda: refresh_calls.append(1),
         )
-        monkeypatch.setattr(
-            evaluate_lyrics,
-            "evaluate_song",
-            lambda conn, a, t, *ar, **kw: (
-                False,
-                "x",
-                {"reason": "kein-provider", "content": None},
-            ),
-        )
+
+        def _fake_evaluate_song(conn, a, t, *ar, **kw):
+            lyrics_core._note_contrastive_evaluation()
+            return (False, "x", {"reason": "kein-provider", "content": None})
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _fake_evaluate_song)
 
         # simuliert zwei Ordner mit je einem Song, statt einem Aufruf mit
         # scope=None über beide -- genau das, was eine Ordner-für-Ordner-

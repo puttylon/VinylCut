@@ -561,6 +561,55 @@ def _fake_query_provider(contents: dict[str, str]):
     return _fake
 
 
+class TestCurrentSig:
+    """Signatur-Snapshot der Entscheidungs-Eingaben (siehe ROADMAP.md,
+    "Songdatei als Single Point of Truth", "Big City Beats"-Fall)."""
+
+    def test_ohne_conn_liefert_none(self):
+        assert lyrics_core._current_sig(None, "a", "b") is None
+
+    def test_ohne_song_in_db_ist_is_skip_false(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        assert lyrics_core._current_sig(conn, "unbekannt", "song") == [
+            "song",
+            "unbekannt",
+            False,
+        ]
+
+    def test_normales_genre_ist_is_skip_false(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        assert lyrics_core._current_sig(conn, "artist", "title") == [
+            "title",
+            "artist",
+            False,
+        ]
+
+    def test_skip_genre_ist_is_skip_true(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(
+            conn, "artist", "title", "Club Remix Instrumental"
+        )
+        assert lyrics_core._current_sig(conn, "artist", "title") == [
+            "title",
+            "artist",
+            True,
+        ]
+
+    def test_geaendertes_genre_aendert_die_signatur(self, tmp_path):
+        # Kern des Bugfixes: dieselbe Song-Identitaet, aber ein Genre-
+        # Wechsel zu Skip-worthy aendert die Signatur -- macht einen
+        # bestehenden Cache-Eintrag automatisch veraltet.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        sig_before = lyrics_core._current_sig(conn, "artist", "title")
+        cache_store._get_or_create_song(conn, "artist", "title", "Instrumental")
+        sig_after = lyrics_core._current_sig(conn, "artist", "title")
+        assert sig_before != sig_after
+        assert sig_before[2] is False
+        assert sig_after[2] is True
+
+
 class TestCacheEntryUpToDate:
     """War als fast identisches Prädikat dreifach unabhängig implementiert:
     inline in write_lrc.write_all(), inline in cut.py (ohne DB-Check), als
@@ -595,7 +644,13 @@ class TestCacheEntryUpToDate:
         conn.commit()
         cache_store.put_provider(conn, "lrclib", "artist", "title", "treffer", "x")
         conn.commit()
-        entry = {"v": lyrics_core.__version__, "r": "nf", "ts": "2000-01-01T00:00:00"}
+        sig = lyrics_core._current_sig(conn, "artist", "title")
+        entry = {
+            "v": lyrics_core.__version__,
+            "r": "nf",
+            "ts": "2000-01-01T00:00:00",
+            "sig": sig,
+        }
         assert (
             _cache_entry_up_to_date(
                 entry, tmp_path / "fehlt.lrc", conn, "artist", "title"
@@ -614,7 +669,75 @@ class TestCacheEntryUpToDate:
         future_ts = (
             datetime.datetime.now().astimezone() + datetime.timedelta(days=1)
         ).isoformat(timespec="seconds")
+        sig = lyrics_core._current_sig(conn, "artist", "title")
+        entry = {
+            "v": lyrics_core.__version__,
+            "r": "nf",
+            "ts": future_ts,
+            "sig": sig,
+        }
+        assert (
+            _cache_entry_up_to_date(
+                entry, tmp_path / "fehlt.lrc", conn, "artist", "title"
+            )
+            is True
+        )
+
+    def test_fehlende_signatur_ist_veraltet_selbstheilung(self, tmp_path):
+        # Bugfix (siehe ROADMAP.md, "Big City Beats"-Fall): ein Eintrag ohne
+        # "sig" (jeder vor diesem Fix geschriebene Eintrag) gilt automatisch
+        # als veraltet -- Selbstheilung ohne Migrationsskript, auch wenn der
+        # reine Zeitstempel-Vergleich fuer sich genommen "aktuell" saehe.
+        import datetime
+
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", None)
+        future_ts = (
+            datetime.datetime.now().astimezone() + datetime.timedelta(days=1)
+        ).isoformat(timespec="seconds")
         entry = {"v": lyrics_core.__version__, "r": "nf", "ts": future_ts}
+        assert (
+            _cache_entry_up_to_date(
+                entry, tmp_path / "fehlt.lrc", conn, "artist", "title"
+            )
+            is False
+        )
+
+    def test_genre_wechsel_zu_skip_macht_eintrag_veraltet(self, tmp_path):
+        # Kern des Bugfixes: Datei wird zu Skip-Genre (z.B. "Instrumental")
+        # umgetaggt, DB-Genre ist bereits aktualisiert (siehe
+        # cache_store._get_or_create_song) -- ein bestehender, sonst noch
+        # "aktueller" Cache-Eintrag muss trotzdem veraltet gelten.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        sig_pop = lyrics_core._current_sig(conn, "artist", "title")
+        entry = {
+            "v": lyrics_core.__version__,
+            "r": "nf",
+            "ts": "2099-01-01T00:00:00",
+            "sig": sig_pop,
+        }
+
+        # Genre wechselt zu Skip-worthy -- DB wird (wie --scan es tut) aktualisiert.
+        cache_store._get_or_create_song(conn, "artist", "title", "Instrumental")
+
+        assert (
+            _cache_entry_up_to_date(
+                entry, tmp_path / "fehlt.lrc", conn, "artist", "title"
+            )
+            is False
+        )
+
+    def test_unveraenderte_signatur_bleibt_aktuell(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        sig = lyrics_core._current_sig(conn, "artist", "title")
+        entry = {
+            "v": lyrics_core.__version__,
+            "r": "nf",
+            "ts": "2099-01-01T00:00:00",
+            "sig": sig,
+        }
         assert (
             _cache_entry_up_to_date(
                 entry, tmp_path / "fehlt.lrc", conn, "artist", "title"

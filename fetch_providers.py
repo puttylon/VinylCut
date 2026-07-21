@@ -195,6 +195,20 @@ def fetch_all(
     for song_id, artist_key, titel_key, genre, audio_path in rows:
         if genre and lyrics_core._is_skip_genre(genre):
             skipped_genre += 1
+            # Ein Song kann NACHTRAEGLICH zu einem Skip-Genre umgetaggt
+            # werden, nachdem er schon frueher (unter einem anderen Genre)
+            # live abgefragt wurde -- alte Ergebnis-Zeilen bleiben dann
+            # bewusst liegen (totes, aber harmloses Gewicht in der DB,
+            # siehe ROADMAP.md "Songdatei als Single Point of Truth": das
+            # Loeschen hier wurde wieder entfernt, weil es den Zeitstempel-
+            # basierten Aktualitaets-Check in die falsche Richtung schob und
+            # den Artist/Titel-Fall ohnehin nicht abdeckte). Zwei andere
+            # Mechanismen sorgen jetzt zuverlaessig dafuer, dass sie nie
+            # wieder benutzt werden: die Signatur-Pruefung im JSON-Ordner-
+            # Cache (lyrics_core._current_sig) erzwingt eine Neubewertung
+            # nach jedem Genre-Wechsel, und evaluate_lyrics.evaluate_song()
+            # selbst prueft das aktuelle Genre zuerst und ignoriert alte
+            # Treffer dann unabhaengig davon, ob sie noch in der DB liegen.
             continue
 
         failed_providers = {

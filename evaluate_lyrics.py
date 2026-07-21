@@ -136,10 +136,39 @@ def evaluate_song(
     # Globals (noch) nicht vorbereitet sind (siehe _prepare_lyrics_core_
     # globals), z.B. bei einem direkten Aufruf aus write_lrc.py.
     row = conn.execute(
-        "SELECT id FROM songs WHERE artist_key=? AND titel_key=?",
+        "SELECT id, genre FROM songs WHERE artist_key=? AND titel_key=?",
         (artist_key, titel_key),
     ).fetchone()
-    song_id = row[0] if row else None
+    song_id, genre = (row[0], row[1]) if row else (None, None)
+
+    # Bugfix (siehe ROADMAP.md, "Big City Beats"-Fall): Skip-Genre wird
+    # bisher NUR in fetch_providers.fetch_all() (Phase --abfragen) geprueft,
+    # bevor live abgefragt wird -- evaluate_song() selbst kannte Genre
+    # bisher gar nicht und benutzte auch schon vorhandene, evtl. aeltere
+    # Provider-Treffer (aus der Zeit VOR einem Retagging) trotzdem weiter.
+    # Der Kurzschluss hier ist die zweite Haelfte des SPoT-Fixes: selbst
+    # wenn eine Neubewertung ausgeloest wird (siehe _current_sig), verhaelt
+    # sich ein aktuell skip-genre-getaggter Song IMMER wie "kein Provider",
+    # unabhaengig davon was noch an alten Ergebnis-Zeilen in der DB liegt.
+    if genre and lyrics_core._is_skip_genre(genre):
+        info_str = f"0/{len(lyrics_core._ALL_PROVIDERS)}: — │ kein Provider (Genre)"
+        return (
+            False,
+            info_str,
+            {
+                "providers": 0,
+                "provider_names": [],
+                "method": None,
+                "no_vocal": False,
+                "score": None,
+                "reason": "kein-provider",
+                "words": None,
+                "language": None,
+                "content": None,
+                "existing_best": False,
+            },
+        )
+
     provider_texts = _load_candidate_texts(conn, song_id) if song_id is not None else []
 
     candidates: list[Path] = [_write_temp_lrc(content) for _, content in provider_texts]
@@ -225,6 +254,15 @@ def evaluate_song(
             "existing_best": False,
         }
     elif flac_path is not None and flac_path.exists():
+        # Bugfix (siehe ROADMAP.md, "Big City Beats"-Fall): der kontrastive
+        # Kontext-Aufbau wird erst HIER angestossen, direkt bevor Whisper
+        # tatsaechlich gebraucht wird -- nicht mehr pauschal fuer jeden
+        # bewerteten Song in evaluate_all()s Schleife. Ein Song, der per
+        # Konsens oder Genre-Skip (0 Kandidaten, "kein-provider") gar nie
+        # bis hierher kommt, loest den teuren Aufbau dadurch nicht mehr aus,
+        # nur weil er zufaellig der erste bewertete Song im Lauf war.
+        lyrics_core._note_contrastive_evaluation()
+
         # Grund, WARUM Whisper ueberhaupt noetig ist (kein Konsens moeglich)
         # -- nur fuer die transiente Statuszeile in lyrics_core._whisper_best
         # (siehe dortiger Docstring, ROADMAP.md Punkt 6: ohne Grund fuer den
@@ -502,14 +540,17 @@ def evaluate_all(
 
     # Kontrastiver Kontext (siehe lyrics_core._build_contrastive_context) UND
     # der IDF-Refresh alle lyrics_core._idf_refresh_interval(N) Songs laufen
-    # bewusst NICHT mehr vor der Schleife/nach Zeilen-Index, sondern lazy anhand
-    # tatsaechlich bewerteter Songs (siehe lyrics_core._note_contrastive_
-    # evaluation) -- ein Lauf, in dem JEDER Song wegen _skip_reevaluation
-    # uebersprungen wird, baut den Kontext dann gar nicht erst auf (realer
-    # Befund: ein reiner Wiederholungslauf ueber einen unveraenderten Pfad
-    # baute den Kontext trotzdem jedes Mal, siehe ROADMAP.md). Der Fortschritt
-    # (wurde je gebaut, wie viele Songs seit dem letzten Aufbau) ist dabei
-    # bewusst modulglobal in lyrics_core.py, nicht lokal hier -- ruft
+    # lazy anhand tatsaechlich Whisper-bedürftiger Songs (siehe
+    # lyrics_core._note_contrastive_evaluation, aufgerufen aus evaluate_song()
+    # direkt vor dem Whisper-Zweig, NICHT hier in der Schleife) -- ein Lauf,
+    # in dem JEDER Song wegen _skip_reevaluation uebersprungen ODER per
+    # Konsens/Genre-Skip ohne Whisper geloest wird, baut den Kontext dann gar
+    # nicht erst auf (realer Befund: sowohl ein reiner Wiederholungslauf über
+    # einen unveraenderten Pfad als auch ein Lauf, dessen erster bewerteter
+    # Song zufaellig genre-geskippt war, loesten den teuren Aufbau bisher
+    # trotzdem sofort aus, siehe ROADMAP.md). Der Fortschritt (wurde je
+    # gebaut, wie viele Songs seit dem letzten Aufbau) ist dabei bewusst
+    # modulglobal in lyrics_core.py, nicht lokal hier -- ruft
     # songtext_pipeline.py evaluate_all() mehrfach im selben Prozess auf
     # (z.B. einmal pro Ordner), bleibt der Fortschritt ueber diese Aufrufe
     # hinweg erhalten, siehe dortiger Docstring.
@@ -531,8 +572,6 @@ def evaluate_all(
         ):
             counts["uebersprungen"] += 1
             continue
-
-        lyrics_core._note_contrastive_evaluation()
 
         # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
         # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).

@@ -255,13 +255,17 @@ def _get_or_create_song(
 ) -> int:
     """Liefert die song_id für (artist_key, titel_key); legt die Zeile bei Bedarf an.
 
-    Ein mitgegebenes genre wird nur beim erstmaligen Anlegen gesetzt bzw. bei
-    einer bestehenden Zeile ergänzt, wenn dort noch kein Genre steht.
+    Bugfix (siehe ROADMAP.md): ein mitgegebenes NICHT-LEERES genre überschreibt
+    jetzt immer den bestehenden Wert -- vorher wurde ein einmal gesetztes Genre
+    nie wieder aktualisiert (COALESCE bevorzugte den alten Wert), ein späteres
+    Retagging der Datei (z.B. zu "Instrumental") kam dadurch nie in der DB an.
+    Ein leeres/None genre überschreibt NICHT (schützt vor Datenverlust, falls
+    ein Tag-Lesevorgang mal fehlschlägt/leer zurückkommt).
     """
     conn.execute(
         "INSERT INTO songs (artist_key, titel_key, genre) VALUES (?, ?, ?) "
         "ON CONFLICT(artist_key, titel_key) DO UPDATE SET "
-        "genre=COALESCE(songs.genre, excluded.genre)",
+        "genre=COALESCE(excluded.genre, songs.genre)",
         (artist_key, titel_key, genre),
     )
     row = conn.execute(

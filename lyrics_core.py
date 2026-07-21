@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.31"
+__version__ = "1.13.33"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1181,12 +1181,16 @@ def _contrastive_data_signature() -> int | None:
 
 
 def _note_contrastive_evaluation() -> None:
-    """Von evaluate_lyrics.evaluate_all() vor JEDEM tatsächlich bewerteten
-    Song aufgerufen (nicht bei übersprungenen, siehe dortiger Skip) --
-    prüft frühestens alle `_idf_refresh_interval(N)` tatsächlich bewertete
-    Songs, ob der kontrastive Kontext neu gebaut werden muss (N = zuletzt
-    bekannte Datenmenge, siehe _idf_refresh_interval -- proportional statt
-    fest, damit ein kleiner Cache öfter, ein großer seltener prüft).
+    """Von evaluate_lyrics.evaluate_song() direkt vor dem Whisper-Zweig
+    aufgerufen (Bugfix, siehe ROADMAP.md "Big City Beats"-Fall: NICHT mehr
+    pauschal fuer jeden bewerteten Song in evaluate_all()s Schleife -- ein
+    Song, der per Konsens oder Genre-Skip (0 Kandidaten) nie bis zum
+    Whisper-Zweig kommt, braucht den kontrastiven Kontext nie und darf
+    seinen Aufbau nicht mehr ausloesen) -- prüft frühestens alle
+    `_idf_refresh_interval(N)` tatsächlich Whisper-bedürftige Songs, ob der
+    kontrastive Kontext neu gebaut werden muss (N = zuletzt bekannte
+    Datenmenge, siehe _idf_refresh_interval -- proportional statt fest,
+    damit ein kleiner Cache öfter, ein großer seltener prüft).
 
     Der Zähler alleine reicht als Auslöser NICHT mehr (Nutzer-Feedback: bei
     einem Lauf mit vielen übersprungenen/bereits gecachten Songs kamen keine
@@ -2042,6 +2046,45 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
             lockfile.close()
 
 
+def _current_sig(
+    conn: sqlite3.Connection | None, artist_key: str | None, titel_key: str | None
+) -> list | None:
+    """Signatur-Snapshot der Entscheidungs-Eingaben eines Songs (siehe
+    ROADMAP.md, "Songdatei als Single Point of Truth"): [titel_key,
+    artist_key, is_skip]. is_skip kommt aus dem AKTUELLEN songs.genre
+    (--scan überschreibt dieses Feld bei jedem Lauf mit dem Datei-Tag, siehe
+    cache_store._get_or_create_song -- die DB-Spalte ist damit zur Scan-Zeit
+    stets aktuell).
+
+    Weicht diese frisch berechnete Signatur von der im JSON-Ordner-Cache-
+    Eintrag gespeicherten ab (siehe _cache_entry_up_to_date), hat sich etwas
+    an der Song-IDENTITÄT geändert (Artist/Titel retagged, oder Genre kippt
+    zur/von der Skip-Schwelle) -- unabhängig davon, ob die DB "neuere" Zeilen
+    hat oder nicht. Löst genau das Problem, dass der bisherige reine
+    Zeitstempel-Vergleich (_db_newer_than_json_entry) so eine Änderung nie
+    bemerkt: er prüft nur "ist etwas NEUES dazugekommen", nie "hat sich die
+    Identität hinter diesem Dateinamen geändert" (realer Befund, "Big City
+    Beats"-Fall: ein Song blieb nach Genre-Retagging zu "Instrumental" trotz
+    korrekt aktualisierter DB-Spalte für immer als "bereits bewertet"
+    stehen, weil kein einziger Zeitstempel dadurch "neuer" wurde).
+
+    None (statt eines Tupels) wenn conn/artist_key/titel_key fehlen -- der
+    Aufrufer (cut.py, ohne DB-Aktualitäts-Check) bekommt dann konsistent
+    keinen Signatur-Vergleich, wie bisher auch keinen Zeitstempel-Vergleich.
+    """
+    if conn is None or artist_key is None or titel_key is None:
+        return None
+    genre = None
+    row = conn.execute(
+        "SELECT genre FROM songs WHERE artist_key=? AND titel_key=?",
+        (artist_key, titel_key),
+    ).fetchone()
+    if row is not None:
+        genre = row[0]
+    is_skip = bool(genre and _is_skip_genre(genre))
+    return [titel_key, artist_key, is_skip]
+
+
 def _build_cache_entry(
     conn: sqlite3.Connection,
     artist_key: str,
@@ -2065,7 +2108,12 @@ def _build_cache_entry(
     `cache_store.latest_result_timestamp()` direkt; ohne DB-Zeile (z.B.
     Skip-Genre-Track ganz ohne Anbieter-Versuch) fällt es auf die Wanduhr
     zurück -- für diese Tracks fällt ohnehin nie Live-Arbeit an, ein
-    falsches "veraltet" kostet dort nichts."""
+    falsches "veraltet" kostet dort nichts.
+
+    "sig" (siehe ROADMAP.md, "Songdatei als Single Point of Truth"): Snapshot
+    der Entscheidungs-Eingaben (_current_sig) -- macht den Eintrag
+    selbst-invalidierend, sobald sich Artist/Titel/Genre-Skip-Status der
+    Datei ändern, unabhängig vom reinen Zeitstempel-Vergleich."""
     db_ts = (
         cache_store.latest_result_timestamp(conn, artist_key, titel_key)
         if cache_store is not None
@@ -2075,6 +2123,7 @@ def _build_cache_entry(
         "v": __version__,
         "r": result,
         "ts": db_ts or datetime.now().isoformat(timespec="seconds"),
+        "sig": _current_sig(conn, artist_key, titel_key),
         **extras,
     }
 
@@ -2138,12 +2187,21 @@ def _cache_entry_up_to_date(
     Art Drift, die schon beim Zeitstempel-Bug zugeschlagen hat).
 
     conn=None (Standard) überspringt den DB-Aktualitäts-Check
-    (_db_newer_than_json_entry) komplett -- cut.py verarbeitet frisch
-    geschnittene Tracks, bei denen dieser Check bisher bewusst fehlte (siehe
-    ROADMAP.md, Redundanz-Audit: "cut.py bewusst ohne
-    _db_newer_than_json_entry-Teil"). Mit conn+artist_key+titel_key gesetzt
-    (write_lrc.py, evaluate_lyrics.py) läuft die volle Prüfung inkl.
-    DB-Aktualität.
+    (_db_newer_than_json_entry) UND den Signatur-Check (_current_sig)
+    komplett -- cut.py verarbeitet frisch geschnittene Tracks, bei denen
+    dieser Check bisher bewusst fehlte (siehe ROADMAP.md, Redundanz-Audit:
+    "cut.py bewusst ohne _db_newer_than_json_entry-Teil"). Mit
+    conn+artist_key+titel_key gesetzt (write_lrc.py, evaluate_lyrics.py)
+    läuft die volle Prüfung inkl. DB-Aktualität UND Signatur.
+
+    Signatur-Check (siehe ROADMAP.md, "Songdatei als Single Point of
+    Truth", _current_sig-Docstring) läuft VOR dem reinen Zeitstempel-
+    Vergleich: stimmt die aktuell aus Artist/Titel/Genre berechnete
+    Signatur nicht mit der im Eintrag gespeicherten überein, ist der
+    Eintrag veraltet -- unabhängig davon, ob die DB "neuere" Zeilen hat.
+    Ein Eintrag ohne "sig" (alter, vor diesem Fix geschriebener Eintrag)
+    gilt automatisch als veraltet (None != echte Signatur) -- heilt sich
+    beim nächsten Antreffen selbst, kein Migrationsskript nötig.
     """
     if not entry:
         return False
@@ -2153,6 +2211,8 @@ def _cache_entry_up_to_date(
         return False
     if conn is None:
         return True
+    if entry.get("sig") != _current_sig(conn, artist_key, titel_key):
+        return False
     return not _db_newer_than_json_entry(conn, artist_key, titel_key, entry.get("ts"))
 
 

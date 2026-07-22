@@ -2714,6 +2714,62 @@ class TestTranscribeWithEarlyStop:
         assert "verarbeitet" not in words  # 4. Segment nie konsumiert
         assert lyrics_core._early_stop_stats["timeout"] == stats_before + 1
 
+    def test_stoppt_frueh_bei_anhaltend_score_nahe_null(self, monkeypatch):
+        """Regressionstest fuer die realen Haenger-Faelle "Dooh Dooh" und
+        "Dragostea Din Tei" (ohne Sprachvorgabe, ROADMAP.md): Whisper
+        halluziniert komplett am Kandidatentext vorbei (dort: kyrillisch statt
+        lateinisch, hier simuliert durch disjunkte Wortmengen) -- der Score
+        bleibt ueber mehrere Checkpoints praktisch bei Null. Muss lange vor
+        dem 300s-Wall-Clock-Deckel abbrechen, OHNE selbst "kein Match" zu
+        entscheiden (nur frueh gestoppt, wie beim Timeout -- die eigentliche
+        Annahme/Ablehnung faellt weiterhin in _whisper_best/_whisper_accept)."""
+        x_words = self._alpha_words("xw", 25)  # disjunkt zu a_words/b_words/bgword*
+        x_text = " ".join(sorted(x_words))
+        poison_words = self._alpha_words("aw", 25)  # entspricht candidate a
+
+        segments = [
+            self._FakeSegment(x_text, end=35.0),  # Checkpoint 1: Score 0
+            self._FakeSegment("", end=50.0),  # Checkpoint 2: Score 0
+            self._FakeSegment("", end=65.0),  # Checkpoint 3: Score 0 -> Stop
+            self._FakeSegment(
+                " ".join(sorted(poison_words)), end=80.0
+            ),  # darf NIE verarbeitet werden
+        ]
+        stats_before = lyrics_core._early_stop_stats["nahe_null"]
+
+        words, no_speech, logprob, early_stopped = self._run(
+            monkeypatch, segments, [poison_words, self._alpha_words("bw", 25)]
+        )
+
+        assert early_stopped is True
+        assert set(words) == x_words  # das 4. (poison) Segment wurde nie konsumiert
+        assert lyrics_core._early_stop_stats["nahe_null"] == stats_before + 1
+
+    def test_kurzer_score_einbruch_z_b_instrumental_intro_stoppt_nicht_faelschlich(
+        self, monkeypatch
+    ):
+        """Robustheit gegen Fehlalarm: ein einzelner (oder zweier) Nahe-Null-
+        Checkpoint allein darf nicht abbrechen -- z.B. ein Instrumental-Intro,
+        bevor der eigentliche (passende) Gesang einsetzt. Sobald wieder ein
+        Treffer-Score auftaucht, muss der Nahe-Null-Zaehler zuruecksetzen und
+        die Transkription normal weiterlaufen."""
+        x_words = self._alpha_words("xw", 25)  # erste zwei Checkpoints: kein Treffer
+        a_words = self._alpha_words("aw", 25)  # dritter Checkpoint: echter Treffer
+
+        segments = [
+            self._FakeSegment(" ".join(sorted(x_words)), end=35.0),  # Score 0
+            self._FakeSegment("", end=50.0),  # weiterhin Score 0 (2. in Folge)
+            self._FakeSegment(
+                " ".join(sorted(a_words)), end=65.0
+            ),  # Treffer -> Zaehler reset
+        ]
+        words, no_speech, logprob, early_stopped = self._run(
+            monkeypatch, segments, [a_words, self._alpha_words("bw", 25)]
+        )
+
+        assert early_stopped is False  # weder Nahe-Null- noch Akzeptanz-Stop ausgeloest
+        assert set(words) == x_words | a_words  # alle Segmente wurden konsumiert
+
 
 class TestSongCandidateWords:
     """_song_candidate_words() tokenisiert die Kandidatentexte eines

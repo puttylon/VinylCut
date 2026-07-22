@@ -200,9 +200,14 @@ def evaluate_lyrics_normal(
     stats = lyrics_core._early_stop_stats
     if stats["versuche"]:
         timeout_str = f", davon {stats['timeout']} Timeout" if stats["timeout"] else ""
+        nahe_null_str = (
+            f", davon {stats['nahe_null']} Score-nahe-Null"
+            if stats["nahe_null"]
+            else ""
+        )
         print(
             f"  Whisper-Early-Stop: {stats['frueh_gestoppt']}/{stats['versuche']} "
-            f"Läufe früh gestoppt{timeout_str}, "
+            f"Läufe früh gestoppt{timeout_str}{nahe_null_str}, "
             f"~{stats['audio_sek_gespart']:.0f}s Audio gespart."
         )
 

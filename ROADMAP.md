@@ -25,15 +25,16 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `2.0.3`):
+`lyrics_core.py`, `2.0.4`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
 - 4 Anbieter (lrclib inkl. lokalem DB-Abzug, musixmatch, netease, genius),
   Konsens-Schnellpfad, IDF-gewichtetes Jaccard.
 - Whisper-Verifikation: Modellwahl nach Sprache (`medium` EN / `large-v3`
-  sonst), Early-Stop bei sicherer Erkennung, kontrastive Marge gegen einen
-  sprachgleichen Zufalls-Hintergrund.
+  sonst), Early-Stop bei sicherer Erkennung ODER anhaltend score-nahe-Null
+  (spart Wartezeit vor dem 300s-Wall-Clock-Deckel), kontrastive Marge gegen
+  einen sprachgleichen Zufalls-Hintergrund.
 - Cache `cache.db` (`songs`/`ergebnisse`/`texte`/`transkripte` +
   `early_stop_log`); 90 Tage Anbieter-TTL; JSON-Ordner-Cache für
   Schreib-Skip.
@@ -70,6 +71,60 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Score-basierter früher Ausstieg gegen anhaltend aussichtslose Whisper-Transkriptionen
+
+**Auslöser:** Die beiden bereits im "Dooh Dooh"/Wall-Clock-Eintrag unten
+untersuchten Hänger-Fälle ("Dooh Dooh", "Dragostea Din Tei" ohne
+Sprachvorgabe) hielten dank des 300s-Deckels nicht mehr unbegrenzt an, aber
+beide brauchten dennoch die vollen 300s -- obwohl in beiden Fällen die
+Sprache falsch erkannt und kyrillischer Text halluziniert wurde (NULL
+Wortüberschneidung mit den echten lateinschriftigen Kandidatentexten
+möglich, laut Whisper-Ausgabe schon nach wenigen Sekunden erkennbar).
+
+**Fix:** `lyrics_core._transcribe_with_early_stop()` bekommt einen zweiten,
+symmetrischen Ausstiegspfad neben dem bestehenden Akzeptanz-Early-Stop:
+bleibt der beste Score gegen ALLE Kandidaten (`_EARLY_STOP_NEARZERO_
+THRESHOLD = 0.01`) über `_EARLY_STOP_NEARZERO_N_CONFIRM = 3`
+aufeinanderfolgende Checkpoints praktisch bei Null, wird die Transkription
+vorzeitig beendet -- **ausdrücklich keine frühe Ablehnung**, nur identisch
+zum Timeout behandelt (`early_stopped=True`, kein Cache des unvollständigen
+Transkripts). Das gesammelte Teilstück durchläuft danach dieselbe
+Scoring-/Akzeptanz-Pipeline (`_whisper_best` → `_idf_jaccard` →
+`_whisper_accept`) wie jedes andere Transkript -- die Annahme-/
+Ablehnungsentscheidung selbst ändert sich nicht.
+
+**Schwelle mit echten Produktionsdaten hergeleitet** (live mit der echten
+`_idf_jaccard` gegen echte Kandidatentexte aus `cache.db` nachgerechnet):
+"Dooh Dooh" und "Dragostea Din Tei" (ohne Sprachvorgabe) lagen an
+Checkpoint ~30s UND ~60s exakt bei `0.0000`. Derselbe Song MIT korrekter
+Sprachvorgabe (echter, guter Fall) lag selbst an seiner schwächsten Stelle
+(Checkpoint ~30s, nur 3 Wörter) schon bei `0.0412` -- dem Vierfachen der
+gewählten Schwelle `0.01`.
+
+**Bekannte Einschränkung (dokumentiert, nicht verschwiegen):** die
+Datenlage deckt nur "komplett falsches Alphabet" ab (kyrillisch vs.
+lateinisch, daher die exakten Nullen). Für "falsche, aber schriftverwandte
+Sprache" (z.B. Französisch statt Deutsch halluziniert, beides lateinisches
+Alphabet) gibt es keine echten Belege -- unbewiesene Annahme, keine
+verifizierte Tatsache.
+
+**Positiv-Verifikation gegen echte Produktionsdaten (Pflicht vor Commit,
+siehe CLAUDE.md):** Wegwerf-Skript gegen `cache.db` (Tabelle `transkripte`
++ `ergebnisse`/`texte`), 80 echte, bereits erfolgreich per Whisper
+akzeptierte Songs (voller Score gegen den echten Kandidatentext ≥ 0,065,
+der alte absolute Whisper-Schwellwert als Beleg für "echter guter Match"),
+Checkpoints per Wort-Präfix (20/40/60/100 Wörter) simuliert. Ergebnis:
+**0 von 80 hätten den neuen Ausstieg fälschlich ausgelöst.** Ein Fall
+("The Mystics -- Hushabye") hatte an Checkpoint 1 (20 Wörter) `0.0068`
+-- unter der Schwelle, aber nur EIN Checkpoint, erholte sich sofort auf
+`0.1439` -- genau das Szenario, gegen das `_EARLY_STOP_NEARZERO_N_CONFIRM
+= 3` (Instrumental-Intro o.ä.) absichert.
+
+2 neue Tests (`test_stoppt_frueh_bei_anhaltend_score_nahe_null`,
+`test_kurzer_score_einbruch_z_b_instrumental_intro_stoppt_nicht_faelschlich`,
+`TestTranscribeWithEarlyStop`). 586/586 Tests grün, `ruff` sauber.
+`lyrics_core.__version__` auf `2.0.4` erhöht.
 
 ## ✓ Bugfix: Whisper ohne Sprachvorgabe löschte übereinstimmende Provider-Texte fälschlich ("Ilumbarada"-Fall)
 

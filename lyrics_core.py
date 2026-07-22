@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "2.0.3"
+__version__ = "2.0.4"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -270,6 +270,49 @@ _EARLY_STOP_DEDUPE_JACCARD = (
 # best_score bei wortidentischen Mehrfach-Provider-Texten == second_score,
 # der Separations-Check schlaegt dann IMMER fehl und es wird nie frueh gestoppt.
 
+# Score-basierter frueher AUSSTIEG (symmetrisch zum Akzeptanz-Early-Stop oben,
+# aber NICHT dasselbe wie "frueh ablehnen" -- siehe Docstring von
+# _transcribe_with_early_stop): bricht NUR die Transkription vorzeitig ab,
+# wenn der Score gegen ALLE Kandidaten ueber mehrere Checkpoints praktisch bei
+# Null bleibt. Das gesammelte Teil-Transkript durchlaeuft danach exakt dieselbe
+# Scoring-/Akzeptanz-Pipeline wie ein vollstaendiges oder per Timeout
+# abgebrochenes Transkript (_whisper_best -> _idf_jaccard -> _whisper_accept) --
+# hier wird NICHTS ueber Annahme/Ablehnung entschieden, nur Wartezeit gespart
+# (deutlich vor _TRANSCRIBE_TIMEOUT_SEC=300s).
+#
+# Auslöser: zwei Whisper-Haenger ("Dooh Dooh", "Dragostea Din Tei" ohne
+# Sprachvorgabe), beide erkannten die Sprache falsch (Russisch statt
+# Englisch/Rumaenisch) und halluzinierten kyrillischen Text -- NULL
+# Wortueberschneidung mit den echten (lateinschriftigen) Kandidaten moeglich.
+# Live mit der echten _idf_jaccard gegen echte Kandidatentexte aus der
+# Produktions-DB nachgerechnet:
+#   "Dooh Dooh" (Halluzination):            Checkpoint ~30s 0.0000 (1 Wort),
+#                                            Checkpoint ~60s 0.0000 (29 Woerter)
+#   "Dragostea din Tei" ohne Sprachvorgabe: Checkpoint ~30s 0.0000 (2 Woerter),
+#                                            Checkpoint ~60s 0.0000 (31 Woerter)
+#   "Dragostea din Tei" MIT Sprachvorgabe (echter guter Fall, zum Vergleich):
+#                                            Checkpoint ~30s 0.0412 (nur 3
+#                                            Woerter!), Checkpoint ~60s 0.3905
+# Der gute Fall liegt selbst an seiner schwaechsten Stelle beim Vierfachen der
+# Schwelle -- entsprechender Sicherheitsabstand.
+#
+# BEKANNTE EINSCHRAENKUNG (unbewiesene Annahme, kein verifizierter Fakt): die
+# Datenlage deckt nur "komplett falsches Alphabet" ab (kyrillisch vs.
+# lateinisch, daher exakte Nullen). Fuer "falsche, aber schriftverwandte
+# Sprache" (z.B. Whisper halluziniert Franzoesisch statt Deutsch, beides
+# lateinisches Alphabet, zufaellige kurze Wortueberschneidungen moeglich) gibt
+# es keine echten Daten -- der Schwellwert koennte dort zu niedrig sein, um
+# anzuschlagen. Das ist eine bewusste, dokumentierte Grenze, keine versteckte
+# Schwachstelle (siehe ROADMAP.md).
+_EARLY_STOP_NEARZERO_THRESHOLD = (
+    0.01  # Score unterhalb gilt als "praktisch null" (siehe Herleitung oben)
+)
+_EARLY_STOP_NEARZERO_N_CONFIRM = (
+    3  # dieselbe Anzahl wie _EARLY_STOP_N_CONFIRM -- gegen ein einzelnes
+)
+# Instrumental-Intro (noch kein Gesang), das sonst einen einzigen Nahe-Null-
+# Checkpoint erzeugen und einen gesunden Song faelschlich abbrechen koennte.
+
 # Wall-Clock-Deckel gegen Whisper-Haenger ("Dooh Dooh"-Fall, ROADMAP.md):
 # extrem repetitive, weitgehend wortlose Vocals ("dooh dooh dooh...") lassen
 # Whisper unabhaengig von korrekter Spracherkennung in eine interne
@@ -299,6 +342,7 @@ _early_stop_stats = {
     "frueh_gestoppt": 0,
     "audio_sek_gespart": 0.0,
     "timeout": 0,  # Teilmenge von frueh_gestoppt: davon per _TRANSCRIBE_TIMEOUT_SEC abgebrochen
+    "nahe_null": 0,  # Teilmenge von frueh_gestoppt: davon per Score-nahe-Null abgebrochen
 }
 
 # In-memory-Kontext für die kontrastive Marge, einmal pro Lauf gebaut (siehe
@@ -1459,6 +1503,16 @@ def _transcribe_with_early_stop(
     nie frueh ablehnen -- ohne fruehe Bestaetigung laeuft die Transkription
     unveraendert bis zum Ende durch (dann identisch zu _transcribe()).
 
+    Symmetrischer, aber vorsichtigerer zweiter Ausstiegspfad (siehe
+    _EARLY_STOP_NEARZERO_*-Konstanten): bleibt der beste Score gegen ALLE
+    Kandidaten ueber _EARLY_STOP_NEARZERO_N_CONFIRM aufeinanderfolgende
+    Checkpoints unter _EARLY_STOP_NEARZERO_THRESHOLD, wird die Transkription
+    ebenfalls vorzeitig beendet -- das ist WEITERHIN kein frueher Ablehnungs-
+    Entscheid, nur eine vorzeitig beendete Transkription (identisch behandelt
+    wie der Wall-Clock-Timeout unten). Das gesammelte Teilstueck durchlaeuft
+    danach dieselbe Scoring-/Akzeptanz-Pipeline (_whisper_best -> _idf_jaccard
+    -> _whisper_accept) wie jedes andere Transkript.
+
     Gibt zusaetzlich zurueck, ob frueh abgebrochen wurde -- _whisper_best
     cached ein frueh gestopptes (unvollstaendiges) Transkript NICHT, um
     spaetere Vergleiche mit neuen Kandidaten nicht auf unvollstaendigem
@@ -1497,9 +1551,11 @@ def _transcribe_with_early_stop(
         logprob_sum = 0.0
         n_segs = 0
         consecutive_ok = 0
+        consecutive_nearzero = 0
         last_best_idx: int | None = None
         next_checkpoint = _EARLY_STOP_CHECKPOINT_SEC
         early_stopped = False
+        nearzero_stopped = False
 
         t0 = time.monotonic()
         segs_iter, _info = model.transcribe(str(tmp_wav), **kwargs)
@@ -1531,6 +1587,19 @@ def _transcribe_with_early_stop(
             best_score = scores[best_idx]
             second_score = scores[order[1]] if len(order) > 1 else 0.0
 
+            if best_score < _EARLY_STOP_NEARZERO_THRESHOLD:
+                consecutive_nearzero += 1
+            else:
+                consecutive_nearzero = 0
+            if consecutive_nearzero >= _EARLY_STOP_NEARZERO_N_CONFIRM:
+                _print_status(
+                    f"  {flac_path.name}  Score bleibt nahe Null, breche "
+                    f"Transkription vorzeitig ab..."
+                )
+                early_stopped = True
+                nearzero_stopped = True
+                break
+
             _, margin, fallback = _contrastive_result_for(
                 best_score, words, lrc_lang, artist_key, titel_key, n_docs, df
             )
@@ -1557,6 +1626,8 @@ def _transcribe_with_early_stop(
         if early_stopped:
             _early_stop_stats["frueh_gestoppt"] += 1
             _early_stop_stats["audio_sek_gespart"] += context_sec - seg.end
+            if nearzero_stopped:
+                _early_stop_stats["nahe_null"] += 1
         return words, no_speech_sum / n_segs, logprob_sum / n_segs, early_stopped
     except Exception:
         return [], 1.0, 0.0, False

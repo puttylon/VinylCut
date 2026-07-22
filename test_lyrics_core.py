@@ -2713,6 +2713,7 @@ class TestTranscribeWithEarlyStop:
         assert early_stopped is True
         assert "verarbeitet" not in words  # 4. Segment nie konsumiert
         assert lyrics_core._early_stop_stats["timeout"] == stats_before + 1
+        assert lyrics_core._last_early_stop_reason == "timeout"
 
     def test_stoppt_frueh_bei_anhaltend_score_nahe_null(self, monkeypatch):
         """Regressionstest fuer die realen Haenger-Faelle "Dooh Dooh" und
@@ -2744,6 +2745,7 @@ class TestTranscribeWithEarlyStop:
         assert early_stopped is True
         assert set(words) == x_words  # das 4. (poison) Segment wurde nie konsumiert
         assert lyrics_core._early_stop_stats["nahe_null"] == stats_before + 1
+        assert lyrics_core._last_early_stop_reason == "nahe-null"
 
     def test_kurzer_score_einbruch_z_b_instrumental_intro_stoppt_nicht_faelschlich(
         self, monkeypatch
@@ -2769,6 +2771,29 @@ class TestTranscribeWithEarlyStop:
 
         assert early_stopped is False  # weder Nahe-Null- noch Akzeptanz-Stop ausgeloest
         assert set(words) == x_words | a_words  # alle Segmente wurden konsumiert
+        assert lyrics_core._last_early_stop_reason is None
+
+    def test_positiver_frueh_stopp_setzt_keinen_grund(self, monkeypatch):
+        """Der normale, positive Frueh-Stopp (Konfidenz-Checkpoints bestaetigt)
+        darf _last_early_stop_reason NICHT setzen -- nur Timeout und Nahe-Null
+        sind die beiden vorzeitigen Abbrueche, die in der Anzeige besonders
+        gekennzeichnet werden sollen (siehe evaluate_lyrics.py)."""
+        a_words = self._alpha_words("aw", 25)
+        b_words = self._alpha_words("bw", 25)
+        a_sorted = sorted(a_words)
+        segments = [
+            self._FakeSegment(" ".join(a_sorted), end=35.0),
+            self._FakeSegment("", end=50.0),
+            self._FakeSegment("", end=65.0),
+        ]
+        lyrics_core._last_early_stop_reason = "nahe-null"  # simuliert einen Altwert
+
+        words, no_speech, logprob, early_stopped = self._run(
+            monkeypatch, segments, [a_words, b_words]
+        )
+
+        assert early_stopped is True
+        assert lyrics_core._last_early_stop_reason is None
 
 
 class TestSongCandidateWords:

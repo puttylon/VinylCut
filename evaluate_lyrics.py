@@ -351,7 +351,16 @@ def evaluate_song(
         model_str = f"[{model_used}]" if model_used else ""
         lang_str = lrc_lang or ""
         words_str = f"{whisper_words}W"
-        early_stop_str = "früh-gestoppt" if early_stopped else ""
+        # Unterscheidet den positiven Frueh-Stopp (Konfidenz bestaetigt) von
+        # den beiden vorzeitigen Abbruechen (Nutzer-Feedback: "früh-gestoppt"
+        # stand fuer alle drei Faelle gleich, obwohl nur der erste positiv
+        # ist -- siehe lyrics_core._last_early_stop_reason-Docstring).
+        if lyrics_core._last_early_stop_reason == "timeout":
+            early_stop_str = "Timeout"
+        elif lyrics_core._last_early_stop_reason == "nahe-null":
+            early_stop_str = "nahe Null"
+        else:
+            early_stop_str = "früh-gestoppt" if early_stopped else ""
         whisper_head = " ".join(
             p for p in [model_str, lang_str, "Whisper", words_str, early_stop_str] if p
         )

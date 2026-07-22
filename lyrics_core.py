@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "2.0.4"
+__version__ = "2.0.5"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -344,6 +344,20 @@ _early_stop_stats = {
     "timeout": 0,  # Teilmenge von frueh_gestoppt: davon per _TRANSCRIBE_TIMEOUT_SEC abgebrochen
     "nahe_null": 0,  # Teilmenge von frueh_gestoppt: davon per Score-nahe-Null abgebrochen
 }
+
+# Seitenkanal fuer die Pro-Track-Anzeige (Nutzer-Feedback: "früh-gestoppt"
+# stand fuer den positiven Fall UND fuer Timeout/Nahe-Null gleichermassen,
+# nicht unterscheidbar): welcher der drei frueh_gestoppt-Faelle zuletzt
+# auftrat. None = kein frueher Abbruch ODER der normale positive frueh-
+# Stopp (Konfidenz-Checkpoints bestaetigt) -- nur Timeout/Nahe-Null setzen
+# hier explizit einen Grund. _whisper_best() setzt dies bei JEDEM Aufruf
+# zuerst auf None zurueck (auch im Song-Cache-Treffer-Zweig, der
+# _transcribe_with_early_stop() gar nicht erreicht) -- sonst koennte ein
+# veralteter Wert von einem vorherigen Song haengen bleiben. Bewusst KEIN
+# Rueckgabewert-Umbau von _transcribe_with_early_stop()/_whisper_best()
+# (haette ~20 bestehende Test-Mocks angefasst, die exakte Tupel-Laengen
+# erwarten) -- Seitenkanal nach demselben Muster wie _early_stop_stats.
+_last_early_stop_reason: str | None = None
 
 # In-memory-Kontext für die kontrastive Marge, einmal pro Lauf gebaut (siehe
 # _build_contrastive_context, in main() aufgerufen). None solange nicht gebaut.
@@ -1517,6 +1531,8 @@ def _transcribe_with_early_stop(
     cached ein frueh gestopptes (unvollstaendiges) Transkript NICHT, um
     spaetere Vergleiche mit neuen Kandidaten nicht auf unvollstaendigem
     Material laufen zu lassen."""
+    global _last_early_stop_reason
+    _last_early_stop_reason = None
     if _get_whisper_model(model_name) is None:
         return [], 1.0, 0.0, False
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -1572,6 +1588,7 @@ def _transcribe_with_early_stop(
                 )
                 early_stopped = True
                 _early_stop_stats["timeout"] += 1
+                _last_early_stop_reason = "timeout"
                 break
 
             if not groups or seg.end < next_checkpoint:
@@ -1598,6 +1615,7 @@ def _transcribe_with_early_stop(
                 )
                 early_stopped = True
                 nearzero_stopped = True
+                _last_early_stop_reason = "nahe-null"
                 break
 
             _, margin, fallback = _contrastive_result_for(
@@ -1782,6 +1800,8 @@ def _whisper_best(
     warum ein bestimmter Track überhaupt per Whisper geprüft wird). Ohne
     Angabe (Standard "") bleibt die Zeile wie bisher.
     """
+    global _last_early_stop_reason
+    _last_early_stop_reason = None
     ctx = _whisper_context_sec(expected_dur)
 
     # EIN Start-Offset fuer den EINEN Whisper-Lauf (frueheste Kandidaten-

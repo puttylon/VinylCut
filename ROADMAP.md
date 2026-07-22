@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `2.0.4`):
+`lyrics_core.py`, `2.0.5`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -125,6 +125,18 @@ Checkpoints per Wort-Präfix (20/40/60/100 Wörter) simuliert. Ergebnis:
 `test_kurzer_score_einbruch_z_b_instrumental_intro_stoppt_nicht_faelschlich`,
 `TestTranscribeWithEarlyStop`). 586/586 Tests grün, `ruff` sauber.
 `lyrics_core.__version__` auf `2.0.4` erhöht.
+
+**Nachtrag (2.0.5):** Nutzer-Feedback direkt nach dem Merge-Vorhaben: die
+feste Pro-Track-Logzeile zeigte "früh-gestoppt" für ALLE DREI Fälle
+gleichermassen (echter positiver Treffer, Timeout-Abbruch, Nahe-Null-
+Abbruch) -- nicht unterscheidbar, obwohl nur der erste tatsächlich gut ist.
+Neuer Seitenkanal `lyrics_core._last_early_stop_reason` (nach dem Vorbild
+von `_early_stop_stats`, kein Umbau der Rückgabe-Tupel -- hätte ~20
+bestehende Test-Mocks angefasst): wird bei jedem `_whisper_best()`-Aufruf
+zuerst auf `None` zurückgesetzt, nur Timeout/Nahe-Null setzen explizit
+einen Grund. `evaluate_lyrics.py` zeigt dann "Timeout" bzw. "nahe Null"
+statt irreführend "früh-gestoppt". 1 neuer Test (Reset-Verhalten). 587/587
+Tests grün. `lyrics_core.__version__` auf `2.0.5` erhöht.
 
 ## ✓ Bugfix: Whisper ohne Sprachvorgabe löschte übereinstimmende Provider-Texte fälschlich ("Ilumbarada"-Fall)
 

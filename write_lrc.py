@@ -123,6 +123,20 @@ def write_all(
             ):
                 counts["skipped"] += 1
                 continue
+            # Sig-Backfill (siehe lyrics_core._sig_backfill-Docstring): fehlt
+            # nur die "sig" (reine Migration, kein echter Genre-Wechsel),
+            # wird sie hier -- ohne Neubewertung -- nachgetragen und
+            # dauerhaft gespeichert, statt den Song unnoetig neu abzufragen/
+            # zu whispern (Nutzer-Feedback: "kein Mehrwert fuer die lrc").
+            backfill_sig = lyrics_core._sig_backfill(entry, conn, artist_key, titel_key)
+            if backfill_sig is not None:
+                entry["sig"] = backfill_sig
+                dir_cache[cache_key] = entry
+                lyrics_core._save_cache(
+                    audio_path.parent, dir_cache, lockfile=folder_lock
+                )
+                counts["skipped"] += 1
+                continue
 
         # "i/total: " nur bei echten Mehrfach-Laeufen (siehe fetch_providers.py,
         # gleiche Begruendung: bei total==1 reine Redundanz ohne Info).

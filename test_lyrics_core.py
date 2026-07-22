@@ -610,6 +610,109 @@ class TestCurrentSig:
         assert sig_after[2] is True
 
 
+class TestSigBackfill:
+    """_sig_backfill(): reines Nachtragen der "sig" fuer Eintraege von vor
+    dem Signatur-Fix, ohne echte Neubewertung -- nur wenn der Genre-Skip-
+    Status seither nachweislich unveraendert ist (siehe ROADMAP.md, "Sig-
+    Backfill")."""
+
+    def test_kein_eintrag_liefert_none(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        assert lyrics_core._sig_backfill(None, conn, "artist", "title") is None
+
+    def test_eintrag_hat_bereits_sig_liefert_none(self, tmp_path):
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        entry = {"sig": ["title", "artist", False]}
+        assert lyrics_core._sig_backfill(entry, conn, "artist", "title") is None
+
+    def test_ohne_conn_liefert_none(self):
+        entry = {"r": "ok"}
+        assert lyrics_core._sig_backfill(entry, None, "artist", "title") is None
+
+    def test_fehlender_ts_darf_nicht_nachgetragen_werden(self, tmp_path):
+        # Ohne "ts" kann nicht geprueft werden, ob seitdem neue DB-Aktivitaet
+        # dazukam -- konservativ ablehnen, echte Neubewertung noetig.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        entry = {"v": "1.13.17", "r": "ok", "method": "konsens"}
+        assert lyrics_core._sig_backfill(entry, conn, "artist", "title") is None
+
+    def test_neuere_db_aktivitaet_darf_nicht_nachgetragen_werden(self, tmp_path):
+        # Fehlendes "sig" ist nicht der EINZIGE Makel -- seit "ts" kam ein
+        # neuer Provider-Treffer dazu, das braucht eine echte Neubewertung.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        cache_store.put_provider(conn, "lrclib", "artist", "title", "treffer", "x")
+        conn.commit()
+        entry = {
+            "v": "1.13.17",
+            "r": "ok",
+            "method": "konsens",
+            "ts": "2000-01-01T00:00:00",
+        }
+        assert lyrics_core._sig_backfill(entry, conn, "artist", "title") is None
+
+    def test_normaler_song_unveraendert_liefert_sig(self, tmp_path):
+        # Alter Eintrag war eine normale Konsens-Bewertung (kein "reason"),
+        # Genre ist weiterhin kein Skip-Genre -- gefahrloses Nachtragen.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        entry = {
+            "v": "1.13.17",
+            "r": "ok",
+            "method": "konsens",
+            "ts": "2026-01-01T00:00:00",
+        }
+        result = lyrics_core._sig_backfill(entry, conn, "artist", "title")
+        assert result == ["title", "artist", False]
+
+    def test_skip_genre_unveraendert_liefert_sig(self, tmp_path):
+        # Alter Eintrag war schon damals wegen Genre geskippt und ist es
+        # immer noch -- gefahrloses Nachtragen.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(
+            conn, "artist", "title", "Club Remix Instrumental"
+        )
+        entry = {
+            "v": "1.13.17",
+            "r": "ok",
+            "reason": "kein-provider",
+            "ts": "2026-01-01T00:00:00",
+        }
+        result = lyrics_core._sig_backfill(entry, conn, "artist", "title")
+        assert result == ["title", "artist", True]
+
+    def test_genre_wurde_zu_skip_darf_nicht_nachgetragen_werden(self, tmp_path):
+        # Kern der Sicherung ("Big City Beats"-Fall): der alte Eintrag war
+        # eine echte Bewertung (kein "reason"="kein-provider"), das Genre ist
+        # inzwischen aber ein Skip-Genre -- braucht echte Neubewertung, sonst
+        # bliebe eine veraltete Entscheidung fuer immer als "aktuell" stehen.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(
+            conn, "artist", "title", "Club Remix Instrumental"
+        )
+        entry = {
+            "v": "1.13.17",
+            "r": "ok",
+            "method": "konsens",
+            "ts": "2026-01-01T00:00:00",
+        }
+        assert lyrics_core._sig_backfill(entry, conn, "artist", "title") is None
+
+    def test_genre_ist_nicht_mehr_skip_darf_nicht_nachgetragen_werden(self, tmp_path):
+        # Umgekehrter Fall: war geskippt, Genre ist jetzt normal -- braucht
+        # eine echte Erstbewertung, nicht nur ein Nachtragen der sig.
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        cache_store._get_or_create_song(conn, "artist", "title", "Pop")
+        entry = {
+            "v": "1.13.17",
+            "r": "ok",
+            "reason": "kein-provider",
+            "ts": "2026-01-01T00:00:00",
+        }
+        assert lyrics_core._sig_backfill(entry, conn, "artist", "title") is None
+
+
 class TestCacheEntryUpToDate:
     """War als fast identisches Prädikat dreifach unabhängig implementiert:
     inline in write_lrc.write_all(), inline in cut.py (ohne DB-Check), als

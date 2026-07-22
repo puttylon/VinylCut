@@ -959,6 +959,48 @@ class TestEvaluateAllSkipUnveraendert(_GlobalsResetMixin):
         assert counts["uebersprungen"] == 0
         assert counts["konsens"] == 1
 
+    def test_track_mit_sig_losem_aber_unveraendertem_eintrag_wird_uebersprungen(
+        self, tmp_path, monkeypatch
+    ):
+        """Sig-Backfill (siehe ROADMAP.md): ein Eintrag von vor dem
+        Signatur-Fix (keine "sig") ohne echte Genre-Aenderung darf auch die
+        --bewerten-Phase nicht zu einer erneuten Whisper-/Konsens-Bewertung
+        zwingen."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist", "title", "Pop")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        audio = tmp_path / "01 Song.flac"
+        audio.write_bytes(b"")
+
+        lyrics_core._save_cache(
+            tmp_path,
+            {
+                "01 Song.flac": {
+                    "v": "1.13.17",
+                    "r": "ok",
+                    "ts": "2026-01-01T00:00:00",
+                    "method": "konsens",
+                    "outcome": "write",
+                }
+            },
+        )
+
+        calls = []
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            lambda *a, **kw: calls.append(1) or (False, "", {}),
+        )
+
+        counts = evaluate_lyrics.evaluate_all(
+            conn, file_song_map={("artist", "title"): audio}
+        )
+
+        assert calls == []  # nicht erneut bewertet
+        assert counts["uebersprungen"] == 1
+
     def test_ohne_datei_zuordnung_wird_immer_bewertet(self, tmp_path, monkeypatch):
         """Ohne file_song_map-Eintrag (z.B. --bewerten ohne PFAD, ganze
         Bibliothek) gibt es keinen JSON-Ordner-Cache zu prüfen -- der Song

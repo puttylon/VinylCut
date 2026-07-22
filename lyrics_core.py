@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -2230,6 +2230,51 @@ def _cache_entry_up_to_date(
     if entry.get("sig") != _current_sig(conn, artist_key, titel_key):
         return False
     return not _db_newer_than_json_entry(conn, artist_key, titel_key, entry.get("ts"))
+
+
+def _sig_backfill(
+    entry: dict | None,
+    conn: sqlite3.Connection | None,
+    artist_key: str | None,
+    titel_key: str | None,
+) -> list | None:
+    """Liefert die aktuelle sig, wenn ein Eintrag OHNE gespeicherte "sig"
+    (alter, vor dem Signatur-Fix geschriebener Eintrag -- siehe ROADMAP.md,
+    "Signatur-Snapshot") GEFAHRLOS nur um sie nachgetragen werden kann, ohne
+    die Entscheidung neu zu berechnen -- sonst None (echte Neubewertung
+    nötig, Aufrufer fällt dann auf den normalen Pfad zurück).
+
+    Reines Nachtragen ist nur sicher, wenn sich am Genre-Skip-Status nichts
+    geändert hat: `entry["reason"] == "kein-provider"` markiert einen zur
+    Schreibzeit geskippten Song (siehe evaluate_lyrics.evaluate_song).
+    Stimmt das noch mit dem AKTUELLEN is_skip überein, war der Eintrag schon
+    immer korrekt -- nur das Feld fehlte. Weicht es ab, hat sich das Genre
+    seither wirklich geändert (der eigentliche "Big City Beats"-Fall) und
+    muss echt neu bewertet werden, sonst bliebe die falsche alte Entscheidung
+    für immer als "aktuell" markiert stehen (kein Selbstheilungs-Weg mehr).
+
+    Artist/Titel werden bewusst NICHT geprüft -- alte Einträge ohne "sig"
+    speichern sie gar nicht, ein Retagging bliebe hier also unentdeckt. In
+    der Praxis selten (siehe ROADMAP.md); der ganz überwiegende Teil der
+    fehlenden Signaturen ist reine Migration ohne echte Änderung.
+
+    Zusätzlich muss der Eintrag AUCH sonst noch gültig sein: fehlendes "sig"
+    darf der EINZIGE Makel sein. Ist seit "ts" bereits neue DB-Aktivität
+    dazugekommen (_db_newer_than_json_entry, z.B. ein neuer Provider-Treffer)
+    oder fehlt "ts" ganz, ist ein reines Nachtragen nicht sicher -- dann
+    lieber die normale, vollständige Neubewertung."""
+    if not entry or entry.get("sig") is not None:
+        return None
+    if _db_newer_than_json_entry(conn, artist_key, titel_key, entry.get("ts")):
+        return None
+    sig = _current_sig(conn, artist_key, titel_key)
+    if sig is None:
+        return None
+    is_skip = sig[2]
+    was_skip = entry.get("reason") == "kein-provider"
+    if is_skip != was_skip:
+        return None
+    return sig
 
 
 def _clear_status() -> None:

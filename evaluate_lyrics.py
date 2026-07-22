@@ -448,14 +448,23 @@ def _skip_reevaluation(
     Braucht audio_path, um dieselbe JSON-Datei wie write_lrc.write_all zu
     finden (.fetch_songtext.json im selben Ordner) -- ohne zugeordnete Datei
     (kein PFAD-Lauf) kann diese Prüfung nicht stattfinden, siehe Aufrufer.
+
+    Sig-Backfill (siehe lyrics_core._sig_backfill-Docstring): fehlt einem
+    sonst gültigen Eintrag nur die "sig" (reine Migration, kein echter
+    Genre-Wechsel), gilt er hier ebenfalls als "kann übersprungen werden" --
+    schreibt aber NICHTS (rein lesend, siehe oben). Das tatsächliche
+    Nachtragen auf der Platte übernimmt write_lrc.write_all() für denselben
+    Song im selben Durchlauf.
     """
     dir_cache = lyrics_core._load_cache(audio_path.parent)
     cache_key = unicodedata.normalize("NFC", audio_path.name)
     entry = dir_cache.get(cache_key)
     lrc_path = audio_path.with_suffix(".lrc")
-    return lyrics_core._cache_entry_up_to_date(
+    if lyrics_core._cache_entry_up_to_date(
         entry, lrc_path, conn, artist_key, titel_key
-    )
+    ):
+        return True
+    return lyrics_core._sig_backfill(entry, conn, artist_key, titel_key) is not None
 
 
 def evaluate_all(

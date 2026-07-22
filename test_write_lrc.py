@@ -222,6 +222,98 @@ class TestWriteAllJsonCacheSkip(_GlobalsResetMixin):
         assert len(calls) == 2
 
 
+class TestWriteAllSigBackfill(_GlobalsResetMixin):
+    """Regressionstests für ROADMAP.md, "Sig-Backfill": ein Eintrag von vor
+    dem Signatur-Fix (keine "sig" gespeichert) darf nicht bei jedem
+    Antreffen komplett neu bewertet werden, wenn sich am Genre-Skip-Status
+    nachweislich nichts geändert hat -- reines Nachtragen der sig reicht,
+    ohne evaluate_song() erneut aufzurufen (Nutzer-Feedback: "kein Mehrwert
+    für die lrc")."""
+
+    def test_unveraendertes_genre_wird_nur_die_sig_nachgetragen(
+        self, tmp_path, monkeypatch
+    ):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        cs._get_or_create_song(conn, "artist", "title", "Pop")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        calls = []
+        monkeypatch.setattr(
+            evaluate_lyrics,
+            "evaluate_song",
+            lambda *a, **kw: calls.append(1) or (False, "", {}),
+        )
+        audio = tmp_path / "01 Song.flac"
+        audio.write_bytes(b"")
+        lrc_path = audio.with_suffix(".lrc")
+        lrc_path.write_text("[00:01.00]Text\n", encoding="utf-8")
+
+        # Alter Eintrag von vor dem Signatur-Fix -- keine "sig" gespeichert.
+        lyrics_core._save_cache(
+            tmp_path,
+            {
+                "01 Song.flac": {
+                    "v": "1.13.17",
+                    "r": "ok",
+                    "ts": "2026-01-01T00:00:00",
+                    "method": "konsens",
+                    "outcome": "write",
+                }
+            },
+        )
+
+        counts = write_lrc.write_all(conn, [(audio, "artist", "title")])
+
+        assert calls == []  # evaluate_song NICHT erneut aufgerufen
+        assert counts["skipped"] == 1
+        entry = lyrics_core._load_cache(tmp_path)["01 Song.flac"]
+        assert entry["sig"] == ["title", "artist", False]
+        assert entry["method"] == "konsens"  # Rest des Eintrags unveraendert
+        assert lrc_path.exists()  # Datei unangetastet
+
+    def test_geaendertes_genre_erzwingt_echte_neubewertung(self, tmp_path, monkeypatch):
+        conn = cs.open_cache(tmp_path / "cache.db")
+        # Genre ist JETZT ein Skip-Genre -- der alte Eintrag war aber eine
+        # echte Bewertung (kein "reason"="kein-provider"): das Genre hat
+        # sich seit dem alten, sig-losen Eintrag offenbar geaendert.
+        cs._get_or_create_song(conn, "artist", "title", "Club Remix Instrumental")
+        monkeypatch.setattr(
+            lyrics_core, "_open_lrclib_dump_conn", lambda no_cache: None
+        )
+        calls = []
+
+        def _tracking_evaluate_song(conn, artist_key, titel_key, *a, **kw):
+            calls.append((artist_key, titel_key))
+            return (
+                False,
+                "0/4: — │ kein Provider",
+                {"reason": "kein-provider", "content": None},
+            )
+
+        monkeypatch.setattr(evaluate_lyrics, "evaluate_song", _tracking_evaluate_song)
+        audio = tmp_path / "01 Song.flac"
+        audio.write_bytes(b"")
+
+        lyrics_core._save_cache(
+            tmp_path,
+            {
+                "01 Song.flac": {
+                    "v": "1.13.17",
+                    "r": "ok",
+                    "ts": "2026-01-01T00:00:00",
+                    "method": "konsens",
+                    "outcome": "write",
+                }
+            },
+        )
+
+        counts = write_lrc.write_all(conn, [(audio, "artist", "title")])
+
+        assert calls == [("artist", "title")]  # echte Neubewertung ausgeloest
+        assert counts["not_found"] == 1
+
+
 class TestWriteAllDbNeuerAlsJsonEintrag(_GlobalsResetMixin):
     """Regressionstests für ROADMAP.md-Nachtrag "Kein Bindeglied zwischen
     JSON-Cache und SQLite-Cache" (live an einem Produktionslauf bestätigt):

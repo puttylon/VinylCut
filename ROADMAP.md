@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `2.0.0`):
+`lyrics_core.py`, `2.0.1`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,48 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Sig-Backfill: reines Nachtragen der Signatur ohne Neubewertung für die Migrationswelle
+
+**Auslöser:** Nach den beiden Fixes unten lief die "volle Selbstheilung"
+tatsächlich korrekt -- aber der Nutzer bemerkte live im Log, dass dabei
+Songs wie "01 Black Night"/"02 Love Machine" erneut per Konsens bewertet
+wurden, obwohl exakt dasselbe Ergebnis wie vorher rauskam ("Irgendwie schade,
+dass nur wegen der sig die Songs nochmal laufen müssen. Einen Mehrwert für
+die lrc hat es ja nicht, oder?"). Zutreffend: diese Songs hatten schlicht nie
+ein `sig`-Feld (sie stammen aus der Zeit VOR dem Signatur-Fix) -- am Genre
+oder der eigentlichen Textentscheidung hatte sich nichts geändert, die
+komplette Neubewertung (inkl. bei anderen Songs echtem Whisper-Aufwand) war
+für die eigentliche `.lrc`-Datei reine Verschwendung.
+
+**Fix:** Neue Funktion `lyrics_core._sig_backfill(entry, conn, artist_key,
+titel_key)`: für Einträge, denen NUR die `sig` fehlt, wird geprüft, ob sich
+der Genre-Skip-Status seit dem alten Eintrag nachweislich NICHT geändert hat
+(`entry["reason"] == "kein-provider"` vs. aktuelles `is_skip` müssen
+übereinstimmen) UND seit `entry["ts"]` keine neue DB-Aktivität dazukam
+(`_db_newer_than_json_entry`, z.B. ein neuer Provider-Treffer) -- nur dann
+wird die aktuelle `sig` gefahrlos in den bestehenden Eintrag nachgetragen,
+OHNE `evaluate_song()` (und damit ohne Whisper/Provider-Abfrage) erneut
+aufzurufen. Weicht der Genre-Status ab oder ist seit `ts` etwas Neues
+dazugekommen, greift weiterhin die normale volle Neubewertung (der
+eigentliche "Big City Beats"-Fall bleibt damit unverändert erkannt).
+
+Eingebunden an beiden Stellen, die tatsächlich Whisper/Provider-Arbeit
+auslösen könnten: `write_lrc.write_all()` (schreibt den nachgetragenen
+Eintrag auch dauerhaft) und `evaluate_lyrics._skip_reevaluation()`
+(--bewerten-Phase, rein lesend -- die eigentliche Persistierung übernimmt
+im selben Durchlauf ohnehin write_lrc.py für denselben Song).
+
+Bewusste Einschränkung: Artist/Titel werden beim Backfill NICHT geprüft --
+alte Einträge ohne `sig` speichern sie gar nicht. Ein gleichzeitiges
+Retagging von Artist/Titel (selten, siehe ROADMAP-Archiv "Umlaut-Tag-
+Korrekturen") bliebe hier unentdeckt; der ganz überwiegende Teil der
+fehlenden Signaturen ist reine Migration ohne echte Änderung.
+
+10 neue Tests (`TestSigBackfill` in `test_lyrics_core.py`,
+`TestWriteAllSigBackfill` in `test_write_lrc.py`, ein Test in
+`TestEvaluateAllSkipUnveraendert`). 580/580 Tests grün, `ruff` sauber.
+`lyrics_core.__version__` auf `2.0.1` erhöht.
 
 ## ✓ Bugfix: Selbstheilung landete nie auf der Platte -- Song wurde bei JEDEM Lauf neu gewhispert ("Helikopter-Fall")
 

@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `2.0.2`):
+`lyrics_core.py`, `2.0.3`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,61 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: Whisper ohne Sprachvorgabe löschte übereinstimmende Provider-Texte fälschlich ("Ilumbarada"-Fall)
+
+**Auslöser:** Live-Lauf des Nutzers zeigte für "27 Ilumbarada.flac"
+(20 Minuten Whisper-Laufzeit, gleiche Musterklasse wie der vorige Eintrag)
+`idf-jacc=0.000` und eine gelöschte `.lrc`-Datei -- obwohl zwei unabhängige
+Provider (lrclib, netease) inhaltlich übereinstimmende Texte lieferten.
+
+**Untersuchung:** `"language": null` im Cache-Eintrag -- `_resolve_lrc_
+language()` konnte den Kandidatentexten keine Sprache zuordnen (der Song
+enthält eine erfundene Kunstsprache, "Ilumbarada eja / Kuedere I / Ku
+aramane..."). Ohne Sprachvorgabe rät Whisper, hat dabei bereits zweimal live
+eine falsche Sprache erraten und halluziniert ("Dooh Dooh", "Dragostea Din
+Tei"). Bei "Kumba Yo!" (ebenfalls `language: null`, ebenfalls 12 Minuten
+Laufzeit, siehe voriger Eintrag) zeigte ein direkter Test beider
+Kandidatentexte gegen `_detect_lrc_language()`: **kein Widerspruch zwischen
+den Quellen** -- beide liefern schon einzeln `None`, obwohl der Text
+eindeutig Englisch ist (Nutzer-Einwand: "Kumba ya my lord... hätte ich als
+englisch eingestuft"). Vermutlich verwässert der dominante Wiederholungs-
+Chant ("Kumba kumba a kumba ya") die statistische Spracherkennung. Der
+fehlende Sprach-Hint ist also nicht immer eine echte Kunstsprache -- das
+Risiko für Whisper (Rateerei, Halluzination) ist aber in beiden Fällen
+identisch.
+
+**Fix:** `evaluate_lyrics.evaluate_song()` versucht bei fehlender
+Sprachvorgabe (`_resolve_lrc_language(all_candidates) is None`) zusätzlich
+einen Konsens mit abgesenkter Mindestanzahl (`_provider_consensus(...,
+min_providers=2)` statt der sonst nötigen 3, siehe `_CONSENSUS_MIN_
+PROVIDERS`). Weicht der Wortlaut ab, bleibt es beim normalen Whisper-Pfad --
+keine pauschale Aufweichung der Konsens-Schwelle.
+
+**Zweiter Bug, live beim Wiederherstellen von "Ilumbarada" entdeckt:**
+`min_providers=2` allein reichte nicht. `_group_candidates` fasst
+inhaltlich (fast) identische Rohquellen bereits VOR `_provider_consensus`
+zu einer einzigen Gruppe zusammen (>= 90% Wort-Jaccard) -- stimmen genau 2
+unabhängige Quellen so stark überein (wie bei Ilumbarada: lrclib/netease
+praktisch wortgleich), bleibt danach nur noch 1 Gruppe übrig, und
+`_provider_consensus` kann strukturell keinen paarweisen Vergleich mehr
+rechnen (braucht mindestens 2 Gruppen, siehe dortiger Docstring). Der Song
+lief beim ersten Testlauf des Fixes prompt erneut komplett durch Whisper.
+Fix: bei exakt 1 Gruppe aus >= 2 Rohquellen (stärkste Form von
+Übereinstimmung, wortgleich statt nur ähnlich) wird direkt akzeptiert, ohne
+`_provider_consensus` erneut zu bemühen.
+
+Produktionsdaten repariert: die live gelöschte `.lrc` für "Ilumbarada"
+über die (jetzt reparierte) echte Pipeline neu erzeugt -- 0,8s statt der
+vorherigen 20 Minuten, "Konsens 100%", kein Whisper mehr nötig.
+
+Kleine UX-Ergänzung (Nutzer-Feedback: "blöd, dass nicht der genaue
+Zeitstempel vor 'Whisper transkribiert' steht"): die transiente Statuszeile
+in `lyrics_core._whisper_best()` zeigt jetzt `_ts()` mit an.
+
+3 neue Tests (`TestEvaluateSongKonsens`, davon einer als direkter
+Regressionstest für den zweiten Bug). 584/584 Tests grün, `ruff` sauber.
+`lyrics_core.__version__` auf `2.0.3` erhöht.
 
 ## ✓ Wall-Clock-Deckel gegen Whisper-Hänger ("Dooh Dooh"-Fall)
 

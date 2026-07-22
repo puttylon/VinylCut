@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -1817,7 +1817,9 @@ def _whisper_best(
     # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
     # ein Transkript genuegt fuer den Vergleich mit allen.
     reason_suffix = f" ({reason})" if reason else ""
-    _print_status(f"  {flac_path.name}  Whisper transkribiert...{reason_suffix}")
+    _print_status(
+        f"  {_ts()}  {flac_path.name}  Whisper transkribiert...{reason_suffix}"
+    )
     candidate_word_sets = []
     for p in candidates:
         try:

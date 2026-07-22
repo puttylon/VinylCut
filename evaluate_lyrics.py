@@ -240,6 +240,49 @@ def evaluate_song(
         grouped, raw_count=lyrics_core._nonempty_candidate_count(all_candidates)
     )
 
+    # Bugfix ("Ilumbarada"-Fall, ROADMAP.md): liefert _resolve_lrc_language()
+    # aus den Kandidatentexten KEIN Ergebnis, bekommt Whisper keine sinnvolle
+    # Sprachvorgabe und rät -- hat dabei bereits mehrfach live eine falsche
+    # Sprache erraten und halluziniert ("Dooh Dooh", "Dragostea Din Tei"), oft
+    # nach mehrminuetiger aussichtsloser Transkription. Der Grund fuer das
+    # fehlende Ergebnis ist NICHT immer eine echte Kunstsprache (Ilumbarada) --
+    # bei "Kumba Yo!" lieferte langdetect auch fuer eindeutig englischen Text
+    # kein Ergebnis, vermutlich weil ein dominanter Wiederholungs-Chant ("Kumba
+    # kumba a kumba ya") die Erkennung verwaessert (real per Test verifiziert,
+    # nicht angenommen). Der Fix greift trotzdem gleichermassen: ob Whisper
+    # keine Vorgabe bekommt, weil die Sprache wirklich fehlt oder weil unsere
+    # Erkennung an diesem Text scheitert, das Risiko (Rateerei, Halluzination)
+    # ist identisch. Stimmen in diesem Fall wenigstens 2 unabhaengige Provider
+    # überein (die harte technische Untergrenze von _provider_consensus selbst,
+    # siehe dortiger Docstring), zaehlt das als ausreichende Evidenz OHNE
+    # Whisper zu fragen -- spart die aussichtslose Transkription UND verhindert,
+    # dass ein durch Rateerei verursachter Nulltreffer die übereinstimmende
+    # Datei fälschlich löscht (real passiert bei Ilumbarada: zwei Provider
+    # einig, Whisper ohne Sprachvorgabe score=0.0, Datei geloescht).
+    if (
+        consensus_rep is None
+        and lyrics_core._resolve_lrc_language(all_candidates) is None
+    ):
+        raw_count = lyrics_core._nonempty_candidate_count(all_candidates)
+        # _group_candidates fasst inhaltlich (fast) identische Rohquellen
+        # bereits VOR _provider_consensus zu einer einzigen Gruppe zusammen
+        # (>= 90% Wort-Jaccard) -- stimmen genau 2 unabhaengige Quellen so
+        # stark ueberein, bleibt danach nur noch 1 Gruppe uebrig, und
+        # _provider_consensus kann strukturell keinen paarweisen Vergleich
+        # mehr rechnen (braucht mindestens 2 Gruppen, siehe dortiger
+        # Docstring: "mindestens 2 auswertbare Kandidaten"). Realer Bug beim
+        # Live-Test des Ilumbarada-Fixes gefunden: min_providers=2 allein
+        # reichte nicht, weil genau dieser Fall eintrat. Bei exakt 1 Gruppe
+        # aus >= 2 Rohquellen ist das die staerkste Form von Uebereinstimmung
+        # (wortgleich, nicht nur aehnlich) -- direkt akzeptieren, ohne
+        # _provider_consensus erneut zu bemuehen.
+        if len(grouped) == 1 and raw_count >= 2:
+            consensus_rep, consensus_jaccard = grouped[0], 1.0
+        else:
+            consensus_rep, consensus_jaccard = lyrics_core._provider_consensus(
+                grouped, min_providers=2, raw_count=raw_count
+            )
+
     if consensus_rep is not None:
         best_content: bytes | None = consensus_rep.read_bytes()
         info_str = f"{prov_str} │ Konsens {consensus_jaccard:.0%}"

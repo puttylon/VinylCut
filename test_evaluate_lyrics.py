@@ -259,6 +259,94 @@ class TestEvaluateSongKonsens(_GlobalsResetMixin):
         assert found is True
         assert extras["method"] == "konsens"
 
+    def test_zwei_provider_ohne_erkennbare_sprache_ergeben_konsens_ohne_whisper(
+        self, tmp_path, monkeypatch
+    ):
+        """Bugfix ("Ilumbarada"-Fall, ROADMAP.md): ohne aus den Kandidatentexten
+        erkennbare Sprache (z.B. eine erfundene Kunstsprache) kann Whisper keine
+        sinnvolle Sprachvorgabe bekommen und rät -- real beobachtet: score=0.0,
+        eine von zwei Providern übereinstimmend bestätigte Datei wurde
+        fälschlich gelöscht. Stimmen in diesem Fall wenigstens 2 Provider
+        überein, reicht das jetzt OHNE Whisper."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "netease": LRC_B})
+        monkeypatch.setattr(
+            lyrics_core, "_resolve_lrc_language", lambda candidates: None
+        )
+
+        def _fail_if_called(*a, **kw):
+            raise AssertionError(
+                "ohne erkennbare Sprache sollte Whisper bei 2 uebereinstimmenden "
+                "Providern nicht mehr aufgerufen werden"
+            )
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
+
+        found, info_str, extras = evaluate_lyrics.evaluate_song(conn, "artist", "title")
+
+        assert found is True
+        assert extras["method"] == "konsens"
+
+    def test_zwei_wortgleiche_provider_ohne_sprache_ergeben_konsens_ohne_whisper(
+        self, tmp_path, monkeypatch
+    ):
+        """Regressionstest fuer den realen Bug im ersten Versuch dieses Fixes:
+        _group_candidates fasst zwei WORTGLEICHE Rohquellen bereits VOR
+        _provider_consensus zu einer einzigen Gruppe zusammen -- dann bleibt
+        nur noch 1 Gruppe uebrig, und _provider_consensus kann strukturell
+        keinen paarweisen Vergleich mehr rechnen (braucht mindestens 2
+        Gruppen), egal welchen min_providers-Wert man uebergibt. Live beim
+        Wiederherstellen von "Ilumbarada" entdeckt: der Song lief trotz Fix
+        erneut komplett durch Whisper, weil genau dieser Fall eintrat (beide
+        Provider praktisch wortgleich)."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "netease": LRC_A})
+        monkeypatch.setattr(
+            lyrics_core, "_resolve_lrc_language", lambda candidates: None
+        )
+
+        def _fail_if_called(*a, **kw):
+            raise AssertionError(
+                "ohne erkennbare Sprache sollte Whisper bei 2 wortgleichen "
+                "Providern nicht mehr aufgerufen werden"
+            )
+
+        monkeypatch.setattr(lyrics_core, "_whisper_best", _fail_if_called)
+
+        found, info_str, extras = evaluate_lyrics.evaluate_song(conn, "artist", "title")
+
+        assert found is True
+        assert extras["method"] == "konsens"
+
+    def test_zwei_provider_mit_erkennbarer_sprache_bleiben_bei_whisper(
+        self, tmp_path, monkeypatch
+    ):
+        """Gegenprobe: ist eine Sprache erkennbar, bleibt es bei der normalen
+        Mindestanzahl von 3 Providern -- die Ausnahme greift NUR ohne
+        erkennbare Sprache, sonst wuerde die Konsens-Schwelle allgemein
+        aufgeweicht."""
+        conn = cs.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
+        _put_texts(conn, "artist", "title", {"lrclib": LRC_A, "netease": LRC_B})
+        monkeypatch.setattr(
+            lyrics_core, "_resolve_lrc_language", lambda candidates: "en"
+        )
+        flac_path = tmp_path / "song.flac"
+        flac_path.write_bytes(b"")
+
+        calls = []
+        monkeypatch.setattr(
+            lyrics_core,
+            "_whisper_best",
+            lambda *a, **kw: (
+                calls.append(1) or (None, 0.0, False, 0, "medium", "en", None, False)
+            ),
+        )
+
+        evaluate_lyrics.evaluate_song(conn, "artist", "title", flac_path=flac_path)
+
+        assert calls == [1]  # Whisper WURDE aufgerufen
+
 
 class TestEvaluateSongWhisper(_GlobalsResetMixin):
     def test_kein_konsens_kein_flac_faellt_auf_heuristik_zurueck(self, tmp_path):

@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -270,12 +270,36 @@ _EARLY_STOP_DEDUPE_JACCARD = (
 # best_score bei wortidentischen Mehrfach-Provider-Texten == second_score,
 # der Separations-Check schlaegt dann IMMER fehl und es wird nie frueh gestoppt.
 
+# Wall-Clock-Deckel gegen Whisper-Haenger ("Dooh Dooh"-Fall, ROADMAP.md):
+# extrem repetitive, weitgehend wortlose Vocals ("dooh dooh dooh...") lassen
+# Whisper unabhaengig von korrekter Spracherkennung in eine interne
+# Wiederholungs-/Fallback-Schleife laufen -- live beobachtet: 26+ Minuten fuer
+# ein Whisper-Fenster von unter 4 Minuten Audio, mit bis zu 135s zwischen
+# einzelnen Segmenten. Absoluter Deckel fuer den GESAMTEN Transkriptions-
+# versuch (nicht pro Segment, kein Reset), ab Start der Live-Transkription
+# gerechnet.
+#
+# 300s statt anfangs 180s (siehe ROADMAP.md): Verteilung ueber 4142 echte
+# frueheren Whisper-Versuche (early_stop_log-Zeitabstaende) zeigt, dass 4-6%
+# aller LEGITIMEN Laeufe laenger als 180s brauchen (medium p99=289s,
+# large-v3 p99=331s) -- live an "Dragostea Din Tei" (235,9s, danach korrekt
+# akzeptiert) und "Helden Und Diebe" (bei 180s faelschlich abgeschnitten,
+# haette 186,2s gebraucht) bestaetigt. Echte pathologische Ausreisser (900s+,
+# bis 47 Minuten) sind dagegen mit <0,2% klar getrennt selten -- 300s laesst
+# die legitimen langsamen Faelle durch, kappt aber weiterhin die extremen.
+_TRANSCRIBE_TIMEOUT_SEC = 300
+
 # Leichtgewichtige Lauf-Statistik (kein Rueckgabewert-Umbau von _whisper_best
 # noetig, siehe songtext_pipeline.py-Abschlusszeile): wie oft frueh gestoppt
 # wurde und wie viele Audiosekunden dadurch eingespart wurden (Proxy fuer
 # Zeitersparnis -- Whisper-Laufzeit ist ungefaehr proportional zur
 # transkribierten Audiodauer, siehe Early-Stop-Validierung).
-_early_stop_stats = {"versuche": 0, "frueh_gestoppt": 0, "audio_sek_gespart": 0.0}
+_early_stop_stats = {
+    "versuche": 0,
+    "frueh_gestoppt": 0,
+    "audio_sek_gespart": 0.0,
+    "timeout": 0,  # Teilmenge von frueh_gestoppt: davon per _TRANSCRIBE_TIMEOUT_SEC abgebrochen
+}
 
 # In-memory-Kontext für die kontrastive Marge, einmal pro Lauf gebaut (siehe
 # _build_contrastive_context, in main() aufgerufen). None solange nicht gebaut.
@@ -1477,12 +1501,22 @@ def _transcribe_with_early_stop(
         next_checkpoint = _EARLY_STOP_CHECKPOINT_SEC
         early_stopped = False
 
+        t0 = time.monotonic()
         segs_iter, _info = model.transcribe(str(tmp_wav), **kwargs)
         for seg in segs_iter:
             words.extend(re.findall(r"[^\W\d_]+", seg.text.lower()))
             no_speech_sum += seg.no_speech_prob
             logprob_sum += seg.avg_logprob
             n_segs += 1
+
+            if time.monotonic() - t0 > _TRANSCRIBE_TIMEOUT_SEC:
+                _print_status(
+                    f"  {flac_path.name}  Whisper-Timeout nach "
+                    f"{_TRANSCRIBE_TIMEOUT_SEC}s, breche ab..."
+                )
+                early_stopped = True
+                _early_stop_stats["timeout"] += 1
+                break
 
             if not groups or seg.end < next_checkpoint:
                 continue

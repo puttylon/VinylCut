@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `2.0.1`):
+`lyrics_core.py`, `2.0.2`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -70,6 +70,77 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Wall-Clock-Deckel gegen Whisper-Hänger ("Dooh Dooh"-Fall)
+
+**Auslöser:** Live-Lauf des Nutzers blieb bei "17 Dooh Dooh.flac" 26+ Minuten
+bei Whisper hängen ("das ist nun wieder so ein Fall wo Whisper viel länger
+braucht als der Song lang ist"). `Ctrl+C` griff nicht (Hänger steckte in
+nativem ctranslate2-Code, das Python-Signal kam erst nach dessen Rückkehr
+an) -- Prozess musste per `kill -9` beendet werden.
+
+**Untersuchung, live reproduziert (Wegwerf-Skript, siehe CLAUDE.md-Vorgabe):**
+Der Song besteht fast nur aus einer extrem repetitiven, wortlosen Hookline
+("dooh dooh dooh..."). Whisper erkennt die Sprache dadurch falsch (Russisch
+statt Englisch/instrumental) und halluziniert dazu passenden kyrillischen
+Text ("Невеста", "Музыка") -- mit bis zu 135s zwischen einzelnen Segmenten.
+Ein erzwungener korrekter Sprach-Hint (`language="en"`) behob es NICHT
+(lief weiterhin 20+ Minuten) -- die Wiederholung selbst löst offenbar eine
+interne Fallback-/Wiederholungsschleife aus, unabhängig von der Sprache.
+
+Ein zweiter realer Fall ("Dragostea Din Tei", ebenfalls eine kurze
+wiederholte Hookline vor viel echtem Text) zeigte dasselbe Muster OHNE
+Sprachvorgabe (fälschlich als Russisch erkannt, Halluzination). MIT der von
+der Produktion tatsächlich genutzten korrekten Sprachvorgabe (`language=
+"ro"`, aus den Kandidatentexten abgeleitet) transkribierte Whisper dagegen
+korrekt -- zeigt, dass nicht jeder Song mit repetitiver Hookline gleich
+betroffen ist.
+
+**Fix:** `lyrics_core._transcribe_with_early_stop()` bekommt einen
+absoluten Wall-Clock-Deckel (`_TRANSCRIBE_TIMEOUT_SEC`) für den GESAMTEN
+Transkriptionsversuch (nicht pro Segment, kein Reset) -- geprüft zwischen
+den ohnehin einzeln konsumierten Segmenten, kein Hard-Kill nötig, da
+Segmente auch im pathologischen Fall weiter nachkommen, nur sehr langsam.
+Bei Überschreitung: Abbruch, `early_stopped=True` (kein Cache des
+unvollständigen Transkripts, wie beim regulären früher Stopp), eigene
+Live-Statuszeile ("Whisper-Timeout nach ...s, breche ab...") und ein
+eigener Zähler `_early_stop_stats["timeout"]`, der in der
+Abschlusszeile des Laufs mit ausgewiesen wird.
+
+Wichtige, per Test verifizierte Erkenntnis: die bis zum Abbruch gesammelten
+Wörter werden GENAUSO gegen die Provider-Kandidatentexte gescort wie ein
+vollständiges Transkript (kein Sonderfall nötig) -- bei "Dragostea Din Tei"
+reichten die vor dem Timeout gesammelten 205 Wörter für eine korrekte
+Annahme des echten Kandidatentexts (`score=0.391`, `accept=True`). Ein
+Timeout bedeutet also nicht zwangsläufig ein falsches Verdikt, nur weniger
+Beweismaterial.
+
+**Kalibrierung des Deckels, mit echten Daten statt Schätzung:** Erster
+Wert 180s wirkte im Praxistest zu knapp -- Verteilung über 4142 echte
+historische Whisper-Versuche (Zeitabstand aufeinanderfolgender
+`early_stop_log`-Einträge als Näherung) zeigte: 4-6% aller LEGITIMEN Läufe
+brauchen länger als 180s (medium p99=289s, large-v3 p99=331s), aber nur
+0,1-0,2% länger als 1200s (Extremwerte bis 47 Minuten -- klar abgesetzter
+Ausreißer-Schwanz). Live an zwei weiteren, unauffälligen Songs bestätigt:
+"Dragostea Din Tei" (235,9s, danach korrekt akzeptiert) und "Helden Und
+Diebe" (bei 180s fälschlich abgeschnitten, hätte 186,2s gebraucht). Deckel
+auf **300s** gesetzt -- lässt die legitimen langsamen Fälle durch, kappt
+weiterhin die extremen Ausreißer.
+
+**Bewusst NICHT umgesetzt:** eine gesonderte Behandlung "Timeout zählt
+nicht als finales Whisper-Verdikt" (würde eine bestehende `.lrc` vor
+Löschung schützen, selbst wenn Whisper bei einem echten Hänger wie Dooh
+Dooh nichts Verwertbares liefert) -- nach Live-Test zurückgestellt, da der
+befürchtete Fall (korrekter Text wird durch Timeout fälschlich gelöscht)
+sich bei "Dragostea Din Tei" NICHT bestätigte (Timeout lieferte trotzdem
+genug korrekte Wörter für eine richtige Annahme). Bleibt ein möglicher
+Ansatzpunkt für den selteneren Fall "Whisper halluziniert auch mit
+korrekter Sprachvorgabe weiter" (wie Dooh Dooh), falls das künftig
+auffällt.
+
+Neue Tests: `test_bricht_bei_ueberschrittenem_zeit_deckel_ab`
+(`TestTranscribeWithEarlyStop`). 581/581 Tests grün, `ruff` sauber.
+`lyrics_core.__version__` auf `2.0.2` erhöht.
 
 ## ✓ Sig-Backfill: reines Nachtragen der Signatur ohne Neubewertung für die Migrationswelle
 

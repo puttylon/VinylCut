@@ -2687,6 +2687,33 @@ class TestTranscribeWithEarlyStop:
         )
         assert early_stopped is True
 
+    def test_bricht_bei_ueberschrittenem_zeit_deckel_ab(self, monkeypatch):
+        """Regressionstest fuer den realen "Dooh Dooh"-Fall (ROADMAP.md):
+        extrem repetitive, wortlose Vocals liessen Whisper 26+ Minuten
+        haengen, weit ueber dem Deckel. Segmente kommen zwar weiter (kein
+        echter Deadlock), aber die Wanduhr laeuft dem Audio-Fortschritt
+        davon -- _TRANSCRIBE_TIMEOUT_SEC muss dann unabhaengig vom
+        Konfidenz-Checkpoint abbrechen."""
+        segments = [
+            self._FakeSegment("dooh dooh dooh", end=5.0),
+            self._FakeSegment("dooh dooh dooh", end=10.0),
+            self._FakeSegment("dooh dooh dooh", end=15.0),
+            self._FakeSegment("darf nie verarbeitet werden", end=20.0),
+        ]
+        # t0, dann je Segment ein Aufruf -- erst beim 3. Segment ueberschreitet
+        # die verstrichene Zeit den Deckel (300s).
+        times = iter([0.0, 10.0, 50.0, 350.0, 999.0])
+        monkeypatch.setattr(lyrics_core.time, "monotonic", lambda: next(times))
+        stats_before = lyrics_core._early_stop_stats["timeout"]
+
+        words, no_speech, logprob, early_stopped = self._run(
+            monkeypatch, segments, [self._alpha_words("aw", 25)]
+        )
+
+        assert early_stopped is True
+        assert "verarbeitet" not in words  # 4. Segment nie konsumiert
+        assert lyrics_core._early_stop_stats["timeout"] == stats_before + 1
+
 
 class TestSongCandidateWords:
     """_song_candidate_words() tokenisiert die Kandidatentexte eines

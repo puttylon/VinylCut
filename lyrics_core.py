@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "1.13.33"
+__version__ = "2.0.0"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -2018,6 +2018,18 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
     _try_claim_folder), wird sie hier weiterverwendet statt erneut gesperrt —
     ein zweiter flock()-Versuch auf denselben Ordner im selben Prozess würde
     sich sonst selbst blockieren (Deadlock).
+
+    Ausnahme vom ts-Vergleich: unterscheidet sich "sig" (siehe _current_sig)
+    vom Platten-Stand, gewinnt der neue Eintrag IMMER, unabhängig vom ts.
+    Realer Bug (siehe ROADMAP.md, "Signatur-Snapshot"): "ts" stammt aus
+    cache_store.latest_result_timestamp(), spiegelt also nur den jüngsten
+    DB-Datensatz (Provider-Treffer/Transkript) -- nicht die Aktualität der
+    JSON-Entscheidung selbst. Ein Song ohne neue DB-Zeile (Provider-TTL
+    noch gültig, Whisper früh gestoppt -> nie persistiert) bekommt beim
+    Selbstheilungs-Fix einen "ts", der ÄLTER sein kann als der bereits auf
+    der Platte stehende -- der reine ts-Vergleich verwarf den frischen,
+    sig-tragenden Eintrag dann bei JEDEM Lauf erneut, der Song wurde bei
+    jedem Aufruf wieder neu gewhispert, die Selbstheilung griff nie.
     """
     own_lock = lockfile is None
     if own_lock:
@@ -2031,9 +2043,13 @@ def _save_cache(folder: Path, cache: dict, lockfile: "IO | None" = None) -> None
             fcntl.flock(lockfile, fcntl.LOCK_EX)
         disk_cache = _load_cache(folder)
         for key, entry in cache.items():
-            if key not in disk_cache or _parse_cache_ts(
-                entry.get("ts", "")
-            ) >= _parse_cache_ts(disk_cache[key].get("ts", "")):
+            old = disk_cache.get(key)
+            if (
+                old is None
+                or entry.get("sig") != old.get("sig")
+                or _parse_cache_ts(entry.get("ts", ""))
+                >= _parse_cache_ts(old.get("ts", ""))
+            ):
                 disk_cache[key] = entry
         (folder / _CACHE_FILENAME).write_text(
             json.dumps(disk_cache, ensure_ascii=False, indent=2), encoding="utf-8"

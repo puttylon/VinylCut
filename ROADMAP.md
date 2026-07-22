@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `1.13.33`):
+`lyrics_core.py`, `2.0.0`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -71,6 +71,50 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
 
+## ✓ Bugfix: Selbstheilung landete nie auf der Platte -- Song wurde bei JEDEM Lauf neu gewhispert ("Helikopter-Fall")
+
+**Auslöser:** Direkt nach Freigabe der Signatur-Snapshot-Selbstheilung (siehe
+nächster Eintrag) meldete der Nutzer live während eines `--recursive`-Laufs:
+"ich lasse den Aufruf zum zweiten Mal laufen und nun wird der Song wieder
+gewhispert?" -- derselbe Track wurde nicht nur einmalig (erwarteter
+Selbstheilungs-Preis), sondern bei JEDEM erneuten Lauf wieder komplett neu
+transkribiert.
+
+**Untersuchung, per DB-Abfrage verifiziert:** `early_stop_log` zeigte für
+"04 Helikopter (Markus Becker Solo Mix)" Whisper-Läufe an zwei verschiedenen
+Tagen (21.07. und 22.07.), aber der JSON-Ordner-Cache-Eintrag für diesen Song
+blieb bei beiden Läufen unverändert auf uraltem Stand (`v=1.13.17`,
+kein `sig`-Feld, `ts` vom 17.07.) stehen -- obwohl `_save_cache()` nachweislich
+in der Zwischenzeit erfolgreich für ANDERE Songs im selben Ordner schrieb.
+
+**Ursache:** `_save_cache()`s Merge-Logik übernimmt einen neuen Eintrag nur,
+wenn sein `"ts"` ≥ dem bereits auf der Platte stehenden `"ts"` ist (Schutz
+gegen Lost-Updates zwischen zwei parallelen Instanzen). `"ts"` stammt aber aus
+`cache_store.latest_result_timestamp()` -- dem jüngsten DB-Datensatz
+(Provider-Treffer/Transkript), NICHT der Wanduhr-Zeit des Schreibvorgangs.
+Für "Helikopter": `latest_result_timestamp()` lieferte `2026-07-16T11:25:55`
+(letzte Provider-Abfrage; Whisper wird bei Early-Stop nie persistiert, siehe
+nächster Eintrag), der Platten-Eintrag stand aber schon auf `2026-07-17
+T18:08:25`. Jeder frisch berechnete Eintrag -- inklusive der neuen, korrekten
+`sig` -- war damit laut DB-Zeitstempel "älter" als der vorhandene und wurde
+von `_save_cache()` verworfen, bevor er je auf die Platte kam. Der Song blieb
+für immer "veraltet" und löste bei jedem Lauf erneut die volle
+Whisper-Auswertung aus, ohne dass sich je etwas dauerhaft änderte. Betraf in
+einem einzigen Test-Ordner mindestens 17 von 46 Tracks.
+
+**Fix:** `_save_cache()` akzeptiert einen neuen Eintrag jetzt zusätzlich
+IMMER, wenn sich seine `sig` vom Platten-Stand unterscheidet -- unabhängig
+vom ts-Vergleich. Der ts-basierte Lost-Update-Schutz bleibt für den
+unveränderten Fall (gleiche sig, zwei Prozesse) unverändert bestehen. 2 neue
+Regressionstests (`test_geaenderte_sig_gewinnt_trotz_aelterem_ts`,
+`test_gleiche_sig_mit_aelterem_ts_verliert_weiterhin`). 568/568 Tests grün,
+`ruff` sauber. `lyrics_core.__version__` auf `2.0.0` erhöht.
+
+Löst NICHT das im nächsten Eintrag beschriebene Kosten-Risiko (91%
+Early-Stop, kein Transkript-Cache) -- dieser Fix sorgt nur dafür, dass eine
+einmal fällige Selbstheilung auch tatsächlich EINMALIG bleibt, statt sich bei
+jedem Lauf zu wiederholen.
+
 ## ✓ Bugfix: JSON-Cache erkannte Retagging nicht + ⚠ offenes Risiko bei Selbstheilung (Signatur-Snapshot)
 
 **Auslöser:** Nutzerfrage direkt nach dem vorherigen Fix: "Prüfst du denn beim
@@ -103,7 +147,7 @@ gesonderter Migrationsschritt nötig.
 Tests: `TestCurrentSig` (5 neue Tests), `TestCacheEntryUpToDate` um 3 Tests
 erweitert (fehlende Signatur, Genre-Wechsel zu Skip, unveränderte Signatur
 bleibt aktuell). 566/566 Tests grün, `ruff` sauber.
-`lyrics_core.__version__` auf `1.13.33` erhöht.
+`lyrics_core.__version__` auf `2.0.0` erhöht.
 
 **⚠ Offenes Risiko, NICHT behoben:** Nach Freigabe der "vollen Selbstheilung"
 lief der Nutzer `--recursive` erneut, und das Log zeigte für Songs mit

@@ -839,6 +839,64 @@ class TestSaveCache:
         _save_cache(tmp_path, cache_a)
         assert _load_cache(tmp_path)["a.flac"]["ts"] == "2026-01-01T00:00:05"
 
+    def test_geaenderte_sig_gewinnt_trotz_aelterem_ts(self, tmp_path):
+        """Regressionstest fuer einen realen Produktions-Bug (siehe
+        ROADMAP.md, "Signatur-Snapshot"): "ts" stammt aus
+        cache_store.latest_result_timestamp() (juengster DB-Datensatz), nicht
+        aus der Wanduhr. Ein Song ohne neue DB-Zeile (Provider-TTL noch
+        gueltig, Whisper frueh gestoppt -> nie persistiert) bekommt beim
+        Selbstheilungs-Fix einen "ts", der AELTER sein kann als der bereits
+        auf der Platte stehende -- ohne die sig-Ausnahme wuerde der frische,
+        sig-tragende Eintrag JEDES Mal wieder verworfen, der Song bliebe fuer
+        immer "veraltet" und wuerde bei jedem Lauf erneut gewhispert."""
+        _save_cache(
+            tmp_path,
+            {
+                "a.flac": {
+                    "r": "ok",
+                    "ts": "2026-07-17T18:08:25",
+                    "sig": ["a", "b", False],
+                }
+            },
+        )
+        _save_cache(
+            tmp_path,
+            {
+                "a.flac": {
+                    "r": "ok",
+                    "ts": "2026-07-16T11:25:55.398618+00:00",
+                    "sig": ["a", "b", True],
+                }
+            },
+        )
+        assert _load_cache(tmp_path)["a.flac"]["sig"] == ["a", "b", True]
+
+    def test_gleiche_sig_mit_aelterem_ts_verliert_weiterhin(self, tmp_path):
+        """Gegenprobe: bleibt die sig gleich, gilt weiterhin der reine
+        ts-Vergleich (Lost-Update-Schutz zwischen parallelen Instanzen bleibt
+        fuer den unveraenderten Fall intakt)."""
+        _save_cache(
+            tmp_path,
+            {
+                "a.flac": {
+                    "r": "ok",
+                    "ts": "2026-07-17T18:08:25",
+                    "sig": ["a", "b", False],
+                }
+            },
+        )
+        _save_cache(
+            tmp_path,
+            {
+                "a.flac": {
+                    "r": "nf",
+                    "ts": "2026-07-16T11:25:55.398618+00:00",
+                    "sig": ["a", "b", False],
+                }
+            },
+        )
+        assert _load_cache(tmp_path)["a.flac"]["r"] == "ok"
+
     def test_neuer_utc_zeitstempel_schlaegt_aelteren_trotz_kleinerer_stunde(
         self, tmp_path
     ):

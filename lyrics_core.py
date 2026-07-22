@@ -330,6 +330,24 @@ _EARLY_STOP_NEARZERO_N_CONFIRM = (
 # haette 186,2s gebraucht) bestaetigt. Echte pathologische Ausreisser (900s+,
 # bis 47 Minuten) sind dagegen mit <0,2% klar getrennt selten -- 300s laesst
 # die legitimen langsamen Faelle durch, kappt aber weiterhin die extremen.
+#
+# BEKANNTE, DOKUMENTIERTE GRENZE (live an "Dooh Dooh" nach diesem Fix
+# entdeckt, siehe ROADMAP.md): der Check laeuft nur, wenn model.transcribe()
+# ein neues Segment LIEFERT -- er kann nicht eingreifen, waehrend die
+# Bibliothek intern noch rechnet, ohne ein Segment auszugeben. Realer Fall:
+# 2 Segmente bei 30s/247s (beide unter dem Deckel, korrekt kein Abbruch),
+# danach 246s weitere interne Arbeit OHNE ein drittes Segment, dann
+# natuerliches Ende bei 495,9s -- der Deckel griff hier NICHT, weil kein
+# weiteres Segment mehr kam, an dem er haette pruefen koennen. Bewusst NICHT
+# behoben (Thread-/Prozess-basierter Hard-Timeout wurde erwogen, aber beide
+# Varianten bringen eigene Risiken -- ein Thread liesse sich nicht wirklich
+# abbrechen, wuerde also im Hintergrund weiterlaufen und koennte sich mit
+# dem naechsten Song um dasselbe Modell-Objekt streiten; ein separater
+# Prozess braeuchte einen dauerhaften Worker, deutlich mehr Komplexitaet).
+# Praktische Einordnung: die Transkription endet in diesem Fall dennoch von
+# selbst (hier nach 8,3 Minuten) -- kein unbegrenzter Haenger mehr wie vor
+# diesem Fix (26+ Minuten, immer weiter), nur eben nicht durch den Deckel
+# selbst beendet.
 _TRANSCRIBE_TIMEOUT_SEC = 300
 
 # Leichtgewichtige Lauf-Statistik (kein Rueckgabewert-Umbau von _whisper_best

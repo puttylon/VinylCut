@@ -187,6 +187,25 @@ einen Grund. `evaluate_lyrics.py` zeigt dann "Timeout" bzw. "nahe Null"
 statt irreführend "früh-gestoppt". 1 neuer Test (Reset-Verhalten). 587/587
 Tests grün. `lyrics_core.__version__` auf `2.0.5` erhöht.
 
+**Nachtrag (bekannte, dokumentierte Grenze, keine Umsetzung):** Live-Test
+gegen "Dooh Dooh" vor dem Mergen zeigte, dass der 300s-Deckel nicht in
+jedem Fall greift. Beleg (Segment-für-Segment-Diagnose): 2 Segmente bei
+30s/247s (beide unter dem Deckel, korrekt kein Abbruch), danach 246s
+weitere interne Arbeit in `model.transcribe()` OHNE ein drittes Segment,
+dann natürliches Ende bei 495,9s. Der Deckel prüft nur, wenn ein neues
+Segment ankommt -- kommt keins mehr, kann er nicht eingreifen, unabhängig
+davon wie lange die Bibliothek intern noch rechnet. Erwogene Fixes (Thread-
+mit `.join(timeout)`, separater Prozess mit echtem Hard-Kill) wurden nach
+Abwägung NICHT umgesetzt -- beide bringen eigene Risiken (Thread liefe im
+Hintergrund weiter und könnte sich mit dem nächsten Song um dasselbe
+Modell-Objekt streiten; Prozess bräuchte einen dauerhaften Worker, deutlich
+mehr Komplexität für ein Soloprojekt). Praktische Einordnung: die
+Transkription endet trotzdem von selbst (hier 8,3 Minuten) -- kein
+unbegrenzter Hänger mehr wie vor diesem Fix (26+ Minuten, immer weiter),
+nur eben nicht durch den Deckel selbst beendet. Nutzer-Entscheidung: so
+lassen, Grenze dokumentieren statt Komplexität für einen seltenen Randfall
+hinzufügen.
+
 ## ✓ Bugfix: Whisper ohne Sprachvorgabe löschte übereinstimmende Provider-Texte fälschlich ("Ilumbarada"-Fall)
 
 **Auslöser:** Live-Lauf des Nutzers zeigte für "27 Ilumbarada.flac"

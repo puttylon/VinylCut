@@ -25,7 +25,7 @@ automatisch nach.
 
 **Songtexte-Pipeline** (`songtext_pipeline.py` als Orchestrator +
 `scan_songs`/`fetch_providers`/`evaluate_lyrics`/`write_lrc`, Kernlogik in
-`lyrics_core.py`, `2.0.5`):
+`lyrics_core.py`, `2.0.6`):
 - Einzelne Phasen-Flags `--scan`/`--abfragen`/`--nachholen`/`--bewerten`/
   `--schreiben`, jede unabhängig wiederholbar; Pfad-eingrenzbar,
   Datei-für-Datei, Ordner-Sperre (parallele Instanzen möglich).
@@ -71,6 +71,55 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: Whisper-Doppel-Transkription (bewerten + schreiben riefen beide unabhängig Whisper auf)
+
+**Auslöser:** Nutzer beobachtete live eine 7-minütige, im Log unsichtbare
+Lücke vor einer Whisper-Zeile ("Flash For Ferris MC") und fragte direkt
+nach, ob Whisper womöglich unnötig doppelt läuft.
+
+**Untersuchung (per Opus-Konsultation, nur geprüft, nichts umgesetzt, siehe
+Vorgehen):** Bestätigt mit hartem Beleg, nicht nur Code-Lesen.
+- **DB-Abfrage** (`early_stop_log`): 4227 Zeilen, 2173 Songs. 1658 Songs mit
+  GENAU 2 Einträgen -- davon ausnahmslos ALLE eng beieinander (704× <30s,
+  681× 30-60s, 265× 1-5min, 9× 5-15min) UND mit identischem Modell. Kein
+  einziger Fall mit größerem Abstand/anderem Modell (hätte auf einen
+  `--nachholen`-/Mehrtages-Lauf statt derselben Session hingedeutet).
+- **Wegwerf-Skript:** `evaluate_lyrics.evaluate_all()` + danach
+  `write_lrc.write_all()` für denselben Song im selben Prozess (genau wie
+  `songtext_pipeline._run_selected_steps()` es pro Datei tut) -- Zähler-Stub
+  zeigte: bei `early_stopped=True` **2** Transkriptions-Aufrufe, bei
+  `early_stopped=False` nur **1**.
+
+**Ursache:** `evaluate_all()` (Phase "bewerten") und `write_all()` (Phase
+"schreiben") rufen beide unabhängig `evaluate_song()` → `_whisper_best()`
+auf, ohne voneinander zu wissen -- laufen bei einem normalen PFAD-Lauf pro
+Datei direkt hintereinander im selben Prozess. `_whisper_best()` cached ein
+früh gestopptes (unvollständiges) Transkript bewusst NICHT persistent
+(würde spätere Vergleiche verfälschen) -- bei ~91% Early-Stop-Quote fand der
+zweite Aufruf so gut wie nie einen Cache-Treffer und transkribierte vollständig
+neu. Verdoppelte effektiv die Whisper-Zeit für die meisten Songs, die
+überhaupt Whisper brauchen.
+
+**Fix:** Prozess-lokaler Zwischenspeicher `_last_transcript_memo` (Modul-
+Global nach dem Vorbild von `_early_stop_stats`) -- hält NUR den zuletzt live
+erzeugten EINEN Eintrag (kein wachsender Cache über viele Songs), Schlüssel
+`(flac_path, model)`. Gemerkt wird das ROHE Transkript
+(`raw_words`/`no_speech`/`logprob`/`early_stopped`), NICHT die fertige
+Score-/Akzeptanz-Entscheidung -- das Scoring (`_score_against_idf` gegen die
+AKTUELL übergebenen Kandidaten) läuft bei jedem Aufruf frisch, damit ein
+Grenzfall (Kandidaten unterscheiden sich minimal zwischen den zwei Phasen)
+korrekt bleibt. Ein Memo-Treffer lädt kein Modell und schreibt keinen
+`early_stop_log`-Eintrag (kein echter Versuch) -- Nebeneffekt: die
+Doppel-Zeilen-Signatur aus der Untersuchung oben verschwindet für künftige
+Läufe von selbst. Getrennte Prozesse (z.B. `--bewerten` heute, `--schreiben`
+morgen) starten mit leerem Memo und transkribieren eigenständig neu -- die
+bewusste Phasen-Unabhängigkeit bleibt erhalten.
+
+4 neue Tests (`TestTranscriptMemo`: gleicher Song im selben Lauf nur 1x,
+verschiedene Songs weiterhin je 1x, frischer Prozess transkribiert erneut,
+Memo-Treffer scored trotzdem frisch gegen geänderte Kandidaten). 591/591
+Tests grün, `ruff` sauber. `lyrics_core.__version__` auf `2.0.6` erhöht.
 
 ## ✓ Score-basierter früher Ausstieg gegen anhaltend aussichtslose Whisper-Transkriptionen
 

@@ -42,7 +42,7 @@ except ImportError:
 # Versionsgeschichte bis hier: siehe Git-Historie von fetch_songtext.py.
 # Weiterhin nur für den JSON-Ordner-Cache-Eintrag ("v"-Feld, siehe
 # _cache_entry_valid) gebraucht -- kein eigenständiges CLI-Tool mehr.
-__version__ = "2.0.5"
+__version__ = "2.0.6"
 
 _ALL_PROVIDERS = ["lrclib", "musixmatch", "netease", "genius"]
 _PROVIDER_TIMEOUT = 20  # Sekunden pro Provider-Abfrage
@@ -358,6 +358,29 @@ _early_stop_stats = {
 # (haette ~20 bestehende Test-Mocks angefasst, die exakte Tupel-Laengen
 # erwarten) -- Seitenkanal nach demselben Muster wie _early_stop_stats.
 _last_early_stop_reason: str | None = None
+
+# Prozess-lokaler Zwischenspeicher fuer das ZULETZT live erzeugte Whisper-
+# Transkript (siehe _whisper_best, ROADMAP.md "Whisper-Doppel-Transkription").
+# Haelt bewusst nur EINEN Eintrag (ueberschreiben, nicht anhaengen) -- waechst
+# also bei einem --recursive-Lauf ueber tausende Songs NICHT an. Zweck: die
+# beiden Pipeline-Phasen "bewerten" (evaluate_all) und "schreiben" (write_all)
+# rufen fuer denselben Song im selben Prozess BEIDE unabhaengig _whisper_best.
+# Ein frueh gestopptes Transkript wird NICHT persistent gecacht (Docstring
+# _transcribe_with_early_stop) -- ohne diesen Memo wuerde der zweite Aufruf
+# komplett neu transkribieren und die teure Whisper-Zeit verdoppeln (real
+# belegt: early_stop_log zeigte 1658 Songs mit genau 2 eng benachbarten,
+# identischen Eintraegen pro --recursive-Lauf). Gemerkt wird NUR das ROHE
+# Transkript (raw_words/no_speech/logprob/early_stopped), NICHT die Score-/
+# Akzeptanz-Entscheidung: die (idf-Jaccard gegen die jeweils aktuell
+# uebergebenen Kandidaten) laeuft bei JEDEM Aufruf frisch weiter -- so bleibt
+# das Ergebnis korrekt, falls sich die Kandidaten zwischen den Phasen minimal
+# unterscheiden. Ein frischer Prozess (getrennte --bewerten/--schreiben-Laeufe
+# an verschiedenen Tagen) startet mit leerem Memo und transkribiert
+# eigenstaendig neu -- die bewusste Phasen-Unabhaengigkeit bleibt erhalten.
+# Schluessel: (str(flac_path), model_name) -- eindeutig fuer dieselbe
+# Audiodatei und dasselbe Modell, unabhaengig vom persistenten Cache
+# (funktioniert auch wenn dieser aus ist).
+_last_transcript_memo: "dict | None" = None
 
 # In-memory-Kontext für die kontrastive Marge, einmal pro Lauf gebaut (siehe
 # _build_contrastive_context, in main() aufgerufen). None solange nicht gebaut.
@@ -1898,51 +1921,87 @@ def _whisper_best(
     # daher immer live -- auch unter --cache-only, sonst wuerde kein neuer
     # Song je zum ersten Mal verifiziert.
 
-    # Modell-Load HIER, erst unmittelbar vor dem echten Live-Transkriptions-
-    # Aufruf (siehe Docstring oben) -- ein Cache-Treffer weiter oben hat
-    # diese Zeile nie erreicht, also auch nie ein Modell geladen.
-    if _get_whisper_model(_WHISPER_MODEL) is None:
-        return (None, 0.0, False, 0, "", None, None, False)
+    # Prozess-lokaler Zwischenspeicher (siehe _last_transcript_memo): hat der-
+    # selbe Song im selben Prozesslauf bereits ein LIVE erzeugtes Transkript
+    # (Normalfall: bewerten-Phase transkribiert, schreiben-Phase kommt gleich
+    # danach), wird dieses statt eines zweiten Live-Laufs verwendet. Der teure
+    # Whisper-Modell-Aufruf entfaellt dann -- die Score-/Akzeptanz-Auswertung
+    # unten laeuft aber unveraendert frisch gegen die AKTUELL uebergebenen
+    # Kandidaten. Auf einem Memo-Treffer wird deshalb auch KEIN Modell geladen
+    # (wie beim persistenten Cache-Treffer oben) und KEIN Early-Stop-Telemetrie-
+    # Eintrag geschrieben (das war nur fuer echte Whisper-Versuche gedacht --
+    # ein zweiter Log-Eintrag pro Song war genau das Symptom der Doppel-
+    # Transkription, siehe ROADMAP.md).
+    global _last_transcript_memo
+    memo_key = (str(flac_path), _WHISPER_MODEL)
+    memo = _last_transcript_memo
+    if memo is not None and memo["key"] == memo_key:
+        raw_words = memo["raw_words"]
+        no_speech = memo["no_speech"]
+        logprob = memo["logprob"]
+        early_stopped = memo["early_stopped"]
+    else:
+        # Modell-Load HIER, erst unmittelbar vor dem echten Live-Transkriptions-
+        # Aufruf (siehe Docstring oben) -- ein Cache-/Memo-Treffer hat diese
+        # Zeile nie erreicht, also auch nie ein Modell geladen.
+        if _get_whisper_model(_WHISPER_MODEL) is None:
+            return (None, 0.0, False, 0, "", None, None, False)
 
-    # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
-    # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
-    # ein Transkript genuegt fuer den Vergleich mit allen.
-    reason_suffix = f" ({reason})" if reason else ""
-    _print_status(
-        f"  {_ts()}  {flac_path.name}  Whisper transkribiert...{reason_suffix}"
-    )
-    candidate_word_sets = []
-    for p in candidates:
-        try:
-            candidate_word_sets.append(
-                set(_extract_lrc_words(p.read_text(encoding="utf-8")))
-            )
-        except Exception:
-            candidate_word_sets.append(set())
-
-    raw_words, no_speech, logprob, early_stopped = _transcribe_with_early_stop(
-        flac_path,
-        start,
-        ctx,
-        _WHISPER_MODEL,
-        lrc_lang,
-        candidate_word_sets,
-        artist_key,
-        titel_key,
-        n_docs,
-        df,
-    )
-    # Early-Stop-Log: JEDER echte Whisper-Versuch (fruh gestoppt oder nicht),
-    # unabhaengig vom Transkript-Cache unten -- reine Telemetrie fuer die
-    # Auswertung der Early-Stop-Wirksamkeit (siehe cache_store.log_early_stop_attempt).
-    if use_cache:
-        try:
-            with _cache_lock:
-                cache_store.log_early_stop_attempt(
-                    _cache_conn, artist_key, titel_key, early_stopped, _WHISPER_MODEL
+        # Cache-Miss: EIN einziger Whisper-Lauf (Start-Offset s.o.), gegen ALLE
+        # Kandidaten gescort -- alle Kandidaten beschreiben dieselbe Audiodatei,
+        # ein Transkript genuegt fuer den Vergleich mit allen.
+        reason_suffix = f" ({reason})" if reason else ""
+        _print_status(
+            f"  {_ts()}  {flac_path.name}  Whisper transkribiert...{reason_suffix}"
+        )
+        candidate_word_sets = []
+        for p in candidates:
+            try:
+                candidate_word_sets.append(
+                    set(_extract_lrc_words(p.read_text(encoding="utf-8")))
                 )
-        except Exception:
-            pass
+            except Exception:
+                candidate_word_sets.append(set())
+
+        raw_words, no_speech, logprob, early_stopped = _transcribe_with_early_stop(
+            flac_path,
+            start,
+            ctx,
+            _WHISPER_MODEL,
+            lrc_lang,
+            candidate_word_sets,
+            artist_key,
+            titel_key,
+            n_docs,
+            df,
+        )
+        # Rohes Transkript dieses Live-Laufs merken (ueberschreiben, nicht
+        # anhaengen) -- nur der EINE zuletzt erzeugte Eintrag.
+        _last_transcript_memo = {
+            "key": memo_key,
+            "raw_words": raw_words,
+            "no_speech": no_speech,
+            "logprob": logprob,
+            "early_stopped": early_stopped,
+        }
+
+        # Early-Stop-Log: NUR echte Whisper-Versuche (fruh gestoppt oder nicht),
+        # unabhaengig vom Transkript-Cache unten -- reine Telemetrie fuer die
+        # Auswertung der Early-Stop-Wirksamkeit (siehe
+        # cache_store.log_early_stop_attempt). Auf einem Memo-Treffer bewusst
+        # NICHT geloggt (kein echter Versuch).
+        if use_cache:
+            try:
+                with _cache_lock:
+                    cache_store.log_early_stop_attempt(
+                        _cache_conn,
+                        artist_key,
+                        titel_key,
+                        early_stopped,
+                        _WHISPER_MODEL,
+                    )
+            except Exception:
+                pass
 
     # has_vocals: primär no_speech_prob, sekundär Wortzahl. Zaehlt bei
     # erkannter Halluzinationsschleife als 0 -- das Scoring unten nutzt

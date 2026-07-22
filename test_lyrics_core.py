@@ -2353,6 +2353,142 @@ class TestTranscriptCache:
         assert calls[0] == pytest.approx(5.0)  # frühester Kandidaten-Start
 
 
+class TestTranscriptMemo:
+    """Prozess-lokaler Zwischenspeicher _last_transcript_memo (siehe ROADMAP.md,
+    "Whisper-Doppel-Transkription"): ein früh gestopptes Transkript wird NICHT
+    persistent gecacht -- die beiden Pipeline-Phasen bewerten/schreiben rufen
+    aber im selben Prozess BEIDE _whisper_best für denselben Song. Ohne Memo
+    würde der zweite Aufruf komplett neu transkribieren."""
+
+    def teardown_method(self):
+        lyrics_core._cache_conn = None
+        lyrics_core._cache_refresh = False
+        lyrics_core._last_transcript_memo = None
+
+    def _prep(self, monkeypatch, tmp_path):
+        lyrics_core._last_transcript_memo = None
+        conn = cache_store.open_cache(tmp_path / "cache.db")
+        lyrics_core._cache_conn = conn
+        lyrics_core._cache_ttl_days = 30
+        lyrics_core._cache_refresh = False
+        monkeypatch.setattr(lyrics_core, "_get_whisper_model", lambda name: object())
+        monkeypatch.setattr(lyrics_core, "_contrastive_idf", (1, {}))
+        monkeypatch.setattr(lyrics_core, "_detect_lrc_language", lambda c: None)
+        return conn
+
+    def _make_lrc(self, tmp_path, name, content):
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_zweiter_aufruf_selber_song_frueh_gestoppt_nur_ein_transcribe(
+        self, tmp_path, monkeypatch
+    ):
+        """Kernszenario: früh gestopptes Transkript (nicht DB-gecacht). Zwei
+        _whisper_best-Aufrufe für DENSELBEN Song im selben Prozess lösen nur
+        EINEN echten Transkriptions-Aufruf aus -- der zweite trifft den Memo."""
+        self._prep(monkeypatch, tmp_path)
+        calls = []
+
+        def _counting(path, *a, **k):
+            calls.append(path)
+            return ["alpha", "beta", "gamma", "delta"], 0.05, -0.3, True  # early_stop
+
+        monkeypatch.setattr(lyrics_core, "_transcribe_with_early_stop", _counting)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]alpha beta gamma delta\n")
+
+        lyrics_core._whisper_best(flac, [lrc], artist="A", title="T")
+        assert len(calls) == 1
+        lyrics_core._whisper_best(flac, [lrc], artist="A", title="T")
+        assert len(calls) == 1  # zweiter Aufruf: Memo-Treffer, kein Neu-Transkribieren
+
+    def test_verschiedene_songs_je_ein_transcribe(self, tmp_path, monkeypatch):
+        """Der Memo hält nur EINEN Eintrag: ein anderer Song (andere Audiodatei)
+        löst weiterhin einen eigenen Transkriptions-Aufruf aus."""
+        self._prep(monkeypatch, tmp_path)
+        calls = []
+
+        def _counting(path, *a, **k):
+            calls.append(path)
+            return ["alpha", "beta", "gamma", "delta"], 0.05, -0.3, True
+
+        monkeypatch.setattr(lyrics_core, "_transcribe_with_early_stop", _counting)
+
+        flac1 = tmp_path / "song1.flac"
+        flac1.write_bytes(b"x")
+        lrc1 = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]alpha beta gamma delta\n")
+        flac2 = tmp_path / "song2.flac"
+        flac2.write_bytes(b"y")
+        lrc2 = self._make_lrc(tmp_path, "b.lrc", "[00:01.00]alpha beta gamma delta\n")
+
+        lyrics_core._whisper_best(flac1, [lrc1], artist="A", title="T1")
+        lyrics_core._whisper_best(flac2, [lrc2], artist="B", title="T2")
+        assert len(calls) == 2  # zwei verschiedene Songs -> zwei Transkriptionen
+
+    def test_frischer_prozess_transkribiert_erneut(self, tmp_path, monkeypatch):
+        """Leerer Memo (simuliert getrennten Prozess, z.B. --bewerten heute /
+        --schreiben morgen): derselbe Song wird eigenständig neu transkribiert.
+        Die bewusste Phasen-Unabhängigkeit bei getrennten Prozessen bleibt."""
+        self._prep(monkeypatch, tmp_path)
+        calls = []
+
+        def _counting(path, *a, **k):
+            calls.append(path)
+            return ["alpha", "beta", "gamma", "delta"], 0.05, -0.3, True
+
+        monkeypatch.setattr(lyrics_core, "_transcribe_with_early_stop", _counting)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]alpha beta gamma delta\n")
+
+        lyrics_core._whisper_best(flac, [lrc], artist="A", title="T")
+        assert len(calls) == 1
+        lyrics_core._last_transcript_memo = None  # frischer Prozess: leerer Memo
+        lyrics_core._whisper_best(flac, [lrc], artist="A", title="T")
+        assert len(calls) == 2  # neuer Prozess transkribiert eigenständig neu
+
+    def test_memo_treffer_scored_frisch_gegen_neue_kandidaten(
+        self, tmp_path, monkeypatch
+    ):
+        """Grenzfall: unterscheiden sich die Kandidaten zwischen den beiden
+        Aufrufen, wird trotz Memo-Treffer (rohes Transkript wiederverwendet)
+        frisch gescort -- NICHT die alte Entscheidung blind übernommen. Der
+        zurückgegebene beste Kandidat stammt aus den AKTUELL übergebenen
+        Kandidaten."""
+        self._prep(monkeypatch, tmp_path)
+        calls = []
+
+        def _counting(path, *a, **k):
+            calls.append(path)
+            return ["alpha", "beta", "gamma", "delta"], 0.05, -0.3, True
+
+        monkeypatch.setattr(lyrics_core, "_transcribe_with_early_stop", _counting)
+
+        flac = tmp_path / "song.flac"
+        flac.write_bytes(b"x")
+        lrc_a = self._make_lrc(tmp_path, "a.lrc", "[00:01.00]alpha beta gamma delta\n")
+        lrc_b = self._make_lrc(tmp_path, "b.lrc", "[00:01.00]alpha beta gamma delta\n")
+        lrc_c = self._make_lrc(tmp_path, "c.lrc", "[00:01.00]xxxxx yyyyy zzzzz\n")
+
+        best1, *_ = lyrics_core._whisper_best(flac, [lrc_a], artist="A", title="T")
+        assert best1 == lrc_a
+        assert len(calls) == 1
+
+        # Zweiter Aufruf: DENSELBE Song (Memo-Treffer, keine Neu-Transkription),
+        # aber GEÄNDERTE Kandidatenliste. Der alte Sieger lrc_a ist gar nicht
+        # mehr dabei -- korrektes frisches Scoring muss lrc_b (passend) wählen,
+        # nicht lrc_c (unpassend) und erst recht nicht blind lrc_a.
+        best2, *_ = lyrics_core._whisper_best(
+            flac, [lrc_c, lrc_b], artist="A", title="T"
+        )
+        assert len(calls) == 1  # Memo-Treffer: kein zweiter Transkriptions-Aufruf
+        assert best2 == lrc_b  # frisch gegen die neuen Kandidaten gescort
+
+
 class TestGlobalCacheIdf:
     """_global_cache_idf() baut df/n_docs aus ALLEN texte.inhalt der Cache-DB
     -- ein Zählschritt pro Text (Dokumentfrequenz), Tokenisierung wie

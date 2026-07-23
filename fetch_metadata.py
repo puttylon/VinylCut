@@ -144,18 +144,35 @@ def fetch_musicbrainz_by_id(mbid: str):
     }
 
 
+def _flatten_discogs_tracks(tracklist):
+    # "index"-Einträge (z.B. Suiten/Medleys) tragen keine eigene Dauer,
+    # ihre echten Titel/Längen stecken in sub_tracks.
+    tracks = []
+    for t in tracklist:
+        if t.get("type_") in (None, "track"):
+            tracks.append(
+                {
+                    "title": (t.get("title") or "Track").strip(),
+                    "dur_s": _parse_discogs_duration(t.get("duration", "")),
+                }
+            )
+        elif t.get("type_") == "index":
+            for st in t.get("sub_tracks", []):
+                if st.get("type_") in (None, "track"):
+                    tracks.append(
+                        {
+                            "title": (st.get("title") or "Track").strip(),
+                            "dur_s": _parse_discogs_duration(st.get("duration", "")),
+                        }
+                    )
+    return tracks
+
+
 def fetch_discogs_by_id(rel_id, token):
     full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
     if not full:
         return None
-    tracks = [
-        {
-            "title": (t.get("title") or "Track").strip(),
-            "dur_s": _parse_discogs_duration(t.get("duration", "")),
-        }
-        for t in full.get("tracklist", [])
-        if t.get("type_") in (None, "track")
-    ]
+    tracks = _flatten_discogs_tracks(full.get("tracklist", []))
     if not tracks:
         return None
     fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
@@ -322,14 +339,7 @@ def main():
         if not full:
             continue
 
-        tracks = [
-            {
-                "title": (t.get("title") or "Track").strip(),
-                "dur_s": _parse_discogs_duration(t.get("duration", "")),
-            }
-            for t in full.get("tracklist", [])
-            if t.get("type_") in (None, "track")
-        ]
+        tracks = _flatten_discogs_tracks(full.get("tracklist", []))
 
         if not tracks:
             continue

@@ -17,7 +17,7 @@ DC-Offset-Entfernung, optionaler Kanalausgleich, Peak-Normalisierung auf
 bevorzugt), interaktive Tracklist, manuelle ID-Vorgabe, Cover-Download →
 `release.json` + `cover.jpg`. Benötigt `DISCOGS_TOKEN`.
 
-**cut.py** (`1.9.19`) — interaktives Setzen der Track-Startpunkte
+**cut.py** (`1.9.20`) — interaktives Setzen der Track-Startpunkte
 (ffplay-Vorschau, optionaler Normton), sample-genauer Schnitt via SoX,
 FLAC-Tagging inkl. Versions-Kommentar, Fortsetzen über `progress.json`,
 Flags `--out`/`--no-songtext`/`--preview`. Holt Songtexte pro Track
@@ -71,6 +71,19 @@ einreihen), `inspect_song.py` (Einzelsong-Dump), `compare_whisper_models.py`
 ---
 
 # Änderungshistorie (Archiv — chronologisch, neueste zuerst)
+
+## ✓ Bugfix: Discogs-Releases mit Suiten/Medleys ("index"-Tracks) wurden komplett verworfen
+
+Discogs verschachtelt bei manchen Releases die echten Tracks als `sub_tracks`
+unter einem `type_: "index"`-Elternteil (z.B. Peter Gregson – *Quartets*,
+Release 25042627: 4 "index"-Einträge, Titel/Dauer stecken in je einem
+`sub_tracks`-Array). Der Filter in `fetch_metadata.py` akzeptierte nur
+`type_ in (None, "track")` — bei so einem Release blieb `tracks` leer, sowohl
+in der automatischen Suche als auch bei manueller ID-Eingabe ("ID nicht
+gefunden oder keine validen Tracks", obwohl die Release valide war).
+Neue Hilfsfunktion `_flatten_discogs_tracks()` liest `sub_tracks` mit aus,
+an beiden Stellen (Suche + `fetch_discogs_by_id`) verwendet. `cut.py` auf
+`1.9.20`.
 
 ## ✓ Bugfix: Whisper-Doppel-Transkription (bewerten + schreiben riefen beide unabhängig Whisper auf)
 

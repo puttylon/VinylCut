@@ -23,7 +23,7 @@ from cut_ui import build_cutting_panel, build_metadata_panel, live_input
 from library import parse_offset, parse_preview_duration
 from lyrics_core import _load_cache, _save_cache
 
-__version__ = "1.9.19"
+__version__ = "1.9.20"
 
 
 def _fetch_lyrics_for_track(

@@ -295,32 +295,7 @@ def run_metadata_search(
     refresh()
 
     # Discogs search
-    import urllib.parse
-
-    results = []
-    for page in range(1, 3):
-        query = urllib.parse.quote(f"{artist} {album}")
-        data = mf._get_json(
-            f"{mf.DISCOGS_API}/database/search?type=release&q={query}&per_page=50&page={page}",
-            token,
-        )
-        if not data:
-            break
-        results += data.get("results", [])
-        if page >= data.get("pagination", {}).get("pages", 1):
-            break
-
-    plausible = [
-        r
-        for r in results
-        if mf._name_matches(r.get("title", "").split(" - ")[-1], album)
-    ]
-    plausible.sort(
-        key=lambda r: (
-            0 if "vinyl" in " ".join(r.get("format", [])).lower() else 1,
-            -r.get("community", {}).get("have", 0),
-        )
-    )
+    results, plausible = mf.search_discogs_releases(artist, album, token)
 
     best_score = 9999.0
 
@@ -359,30 +334,14 @@ def run_metadata_search(
             full = mf._get_json(f"{mf.DISCOGS_API}/releases/{rel_id}", token)
             if not full:
                 continue
-            tracks = [
-                {
-                    "title": (t.get("title") or "Track").strip(),
-                    "dur_s": mf._parse_discogs_duration(t.get("duration", "")),
-                }
-                for t in full.get("tracklist", [])
-                if t.get("type_") in (None, "track")
-            ]
-            if not tracks:
+            community_have = (
+                res.get("community", {}).get("have", 0)
+                if isinstance(res.get("community"), dict)
+                else 0
+            )
+            cand = mf.build_discogs_candidate(rel_id, full, community_have)
+            if not cand:
                 continue
-            fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
-            cand = {
-                "id": str(rel_id),
-                "title": full.get("title", ""),
-                "format": fmts,
-                "is_vinyl": "vinyl" in fmts.lower(),
-                "tracks": tracks,
-                "cover_url": (full.get("images") or [{}])[0].get("uri"),
-                "community_have": (
-                    res.get("community", {}).get("have", 0)
-                    if isinstance(res.get("community"), dict)
-                    else 0
-                ),
-            }
             all_cands.append(cand)
             score = mf.score_release(cand, flac_total, album)
             if score < best_score:

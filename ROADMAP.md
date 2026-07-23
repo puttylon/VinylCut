@@ -81,9 +81,18 @@ Release 25042627: 4 "index"-Einträge, Titel/Dauer stecken in je einem
 `type_ in (None, "track")` — bei so einem Release blieb `tracks` leer, sowohl
 in der automatischen Suche als auch bei manueller ID-Eingabe ("ID nicht
 gefunden oder keine validen Tracks", obwohl die Release valide war).
-Neue Hilfsfunktion `_flatten_discogs_tracks()` liest `sub_tracks` mit aus,
-an beiden Stellen (Suche + `fetch_discogs_by_id`) verwendet. `cut.py` auf
-`1.9.20`.
+Neue Hilfsfunktion `_flatten_discogs_tracks()` liest `sub_tracks` mit aus.
+
+**Nachtrag:** `cut.py` hatte dieselbe Such-/Kandidaten-Aufbau-Logik
+(Discogs-Suche + Plausibilitätsfilter + Tracklist-Parsing) komplett separat
+dupliziert -- der erste Fix in `fetch_metadata.py` griff dort nicht, die
+automatische Suche fand Release 25042627 (perfekter 83-Minuten-Match)
+weiterhin nicht von selbst. Auf Nutzerfrage ("sollte die logik nicht nur an
+einer Stelle sitzen?") zwei gemeinsame Funktionen extrahiert:
+`search_discogs_releases()` (Suche+Filter+Sortierung) und
+`build_discogs_candidate()` (Release-JSON → Kandidat-Dict). `main()`,
+`fetch_discogs_by_id()` und `cut.py` nutzen jetzt alle dieselbe Quelle.
+`cut.py` auf `1.9.20`.
 
 ## ✓ Bugfix: Whisper-Doppel-Transkription (bewerten + schreiben riefen beide unabhängig Whisper auf)
 

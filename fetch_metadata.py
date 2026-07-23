@@ -168,10 +168,42 @@ def _flatten_discogs_tracks(tracklist):
     return tracks
 
 
-def fetch_discogs_by_id(rel_id, token):
-    full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
-    if not full:
-        return None
+def search_discogs_releases(artist, album, token):
+    """Sucht Discogs-Releases über die Textsuche, gefiltert auf plausible
+    Titel-Treffer und nach Vinyl/Popularität sortiert.
+
+    Gibt (results, plausible) zurück -- results ist die rohe Trefferliste
+    (für Statistik/Anzeige), plausible die gefilterte+sortierte Liste, aus
+    der die Kandidaten-Prüfschleife schöpft.
+    """
+    results = []
+    for page in range(1, 3):
+        query = urllib.parse.quote(f"{artist} {album}")
+        data = _get_json(
+            f"{DISCOGS_API}/database/search?type=release&q={query}&per_page=50&page={page}",
+            token,
+        )
+        if not data:
+            break
+        results += data.get("results", [])
+        if page >= data.get("pagination", {}).get("pages", 1):
+            break
+
+    plausible = [
+        r for r in results if _name_matches(r.get("title", "").split(" - ")[-1], album)
+    ]
+    plausible.sort(
+        key=lambda r: (
+            0 if "vinyl" in " ".join(r.get("format", [])).lower() else 1,
+            -r.get("community", {}).get("have", 0),
+        )
+    )
+    return results, plausible
+
+
+def build_discogs_candidate(rel_id, full, community_have=0):
+    """Baut aus der vollen Release-JSON (GET /releases/{id}) einen
+    Kandidaten-Dict, oder None wenn keine validen Tracks enthalten sind."""
     tracks = _flatten_discogs_tracks(full.get("tracklist", []))
     if not tracks:
         return None
@@ -183,8 +215,15 @@ def fetch_discogs_by_id(rel_id, token):
         "is_vinyl": "vinyl" in fmts.lower(),
         "tracks": tracks,
         "cover_url": (full.get("images") or [{}])[0].get("uri"),
-        "community_have": 0,
+        "community_have": community_have,
     }
+
+
+def fetch_discogs_by_id(rel_id, token):
+    full = _get_json(f"{DISCOGS_API}/releases/{rel_id}", token)
+    if not full:
+        return None
+    return build_discogs_candidate(rel_id, full)
 
 
 def search_musicbrainz(
@@ -293,28 +332,7 @@ def main():
     flac_total = get_flac_duration(flac_path)
     print(f"Dateidauer gemessen: {flac_total / 60:.1f} min")
 
-    results = []
-    for page in range(1, 3):
-        query = urllib.parse.quote(f"{artist} {album}")
-        data = _get_json(
-            f"{DISCOGS_API}/database/search?type=release&q={query}&per_page=50&page={page}",
-            token,
-        )
-        if not data:
-            break
-        results += data.get("results", [])
-        if page >= data.get("pagination", {}).get("pages", 1):
-            break
-
-    plausible = [
-        r for r in results if _name_matches(r.get("title", "").split(" - ")[-1], album)
-    ]
-    plausible.sort(
-        key=lambda r: (
-            0 if "vinyl" in " ".join(r.get("format", [])).lower() else 1,
-            -r.get("community", {}).get("have", 0),
-        )
-    )
+    results, plausible = search_discogs_releases(artist, album, token)
 
     best_cand = None
     best_score = 9999.0
@@ -339,23 +357,14 @@ def main():
         if not full:
             continue
 
-        tracks = _flatten_discogs_tracks(full.get("tracklist", []))
-
-        if not tracks:
-            continue
-
-        fmts = ", ".join(f.get("name", "") for f in full.get("formats", []))
-        cand = {
-            "id": str(rel_id),
-            "title": full.get("title", ""),
-            "format": fmts,
-            "is_vinyl": "vinyl" in fmts.lower(),
-            "tracks": tracks,
-            "cover_url": (full.get("images") or [{}])[0].get("uri"),
-            "community_have": res.get("community", {}).get("have", 0)
+        community_have = (
+            res.get("community", {}).get("have", 0)
             if isinstance(res.get("community"), dict)
-            else 0,
-        }
+            else 0
+        )
+        cand = build_discogs_candidate(rel_id, full, community_have)
+        if not cand:
+            continue
         all_cands.append(cand)
 
         score = score_release(cand, flac_total, album)
